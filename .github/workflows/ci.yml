@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install packages
+        run: |
+          pip install -e ./packages/sdk -e ./packages/server -e ./packages/teleop
+      - name: Import smoke test
+        run: |
+          python -c "import interlatent; import interlatent.inference.client; import interlatent.node.cli"
+          python -c "import interlatent_server.server.transport; import interlatent_server.server.app"
+          python -c "import interlatent_teleop.protocol.teleop_pb2"
+      - name: Loopback end-to-end (echo backend, no GPU)
+        run: |
+          timeout 120 python examples/01_loopback_no_hardware.py --steps 30
+      - name: Lint (errors only)
+        run: |
+          pip install ruff
+          ruff check --select E9,F63,F7,F82 packages/ examples/
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dco:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check DCO sign-off
+        run: |
+          missing=0
+          for sha in $(git rev-list origin/${{ github.base_ref }}..HEAD); do
+            if ! git log -1 --format=%B "$sha" | grep -qi '^Signed-off-by:'; then
+              echo "Missing Signed-off-by: $sha"; missing=1
+            fi
+          done
+          exit $missing

@@ -1,0 +1,19 @@
+<svg width="520" height="120" viewBox="0 0 520 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- mark: a latent grid with one activated unit -->
+  <g>
+    <rect x="10" y="10" width="100" height="100" rx="22" fill="#0F1117"/>
+    <circle cx="40" cy="40" r="7" fill="#3D4451"/>
+    <circle cx="60" cy="40" r="7" fill="#3D4451"/>
+    <circle cx="80" cy="40" r="7" fill="#3D4451"/>
+    <circle cx="40" cy="60" r="7" fill="#3D4451"/>
+    <circle cx="60" cy="60" r="9" fill="#7C5CFF"/>
+    <circle cx="80" cy="60" r="7" fill="#3D4451"/>
+    <circle cx="40" cy="80" r="7" fill="#3D4451"/>
+    <circle cx="60" cy="80" r="7" fill="#3D4451"/>
+    <circle cx="80" cy="80" r="7" fill="#3D4451"/>
+    <path d="M60 60 L104 16" stroke="#7C5CFF" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="104" cy="16" r="5" fill="#7C5CFF"/>
+  </g>
+  <text x="130" y="78" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="52" font-weight="700" fill="currentColor">interlatent</text>
+</svg>

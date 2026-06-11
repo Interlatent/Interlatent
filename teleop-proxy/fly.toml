@@ -1,0 +1,40 @@
+# Fly.io config for the teleop WS proxy.
+#
+# This deploys a single small VM that joins our tailnet at boot and
+# proxies browser WS connections to per-box teleop relays. Sized
+# minimally — the proxy is pure I/O, no CPU work.
+#
+# First-time deploy (one machine, no Fly.io app yet):
+#   1. install flyctl + log in
+#   2. cd teleop-proxy && fly launch --no-deploy --copy-config --name interlatent-teleop
+#   3. fly secrets set TS_AUTHKEY=tskey-auth-... TELEOP_TAILNET=tail285014.ts.net
+#   4. fly deploy
+#   5. fly certs add teleop.interlatent.com
+#   6. set the CNAME/A records the certs cmd prints in your DNS provider
+#   7. set INTERLATENT_TELEOP_PROXY_HOST=teleop.interlatent.com in Vercel
+#      and redeploy the backend
+app = "interlatent-teleop"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep at least one machine warm. The proxy holds long-lived WS
+  # connections; auto-stop would close them mid-session.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    # Generous — a teleop session is one WS in + one WS out. We can
+    # comfortably handle hundreds on a shared-cpu-1x.
+    soft_limit = 200
+    hard_limit = 500
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

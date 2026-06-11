@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Secrets / local config — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*_key
+*.key
+
+# Local collection artifacts
+interlatent_*.db
+*.sqlite
+datasets/
+interlatent_media_*/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

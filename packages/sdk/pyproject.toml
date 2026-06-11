@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interlatent"
+version = "0.4.35"
+description = "Interlatent SDK — run VLA policies on real robots, teleoperate, and collect LeRobot datasets."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Interlatent Contributors" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "requests>=2.31.0",
+  "torch>=2.0",
+  "numpy>=1.21",
+  # DRTC client: gRPC + gRPC-Web (for the hosted Modal endpoint).
+  "grpcio>=1.60",
+  "protobuf>=4.25",
+  "sonora>=0.2.2",
+  # Teleop relay channel on the node uses websockets.sync.client to
+  # ride the GPU box's WS relay for DAgger interventions. Not optional —
+  # every node session opens the channel and was crashing on ImportError
+  # when the host didn't already have websockets installed.
+  "websockets>=12",
+]
+
+[project.optional-dependencies]
+# pip install 'interlatent[mjlab]'
+# Requires mjlab to be installed separately from source.
+mjlab = []
+
+# pip install 'interlatent[isaaclab]'
+# Requires isaaclab and isaaclab_rl to be installed separately from source.
+# See: https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
+isaaclab = []
+
+# pip install 'interlatent[lerobot]'
+# Required for LeRobotDataset upload format and HuggingFace repo-based checkpoint
+# naming in the lerobot integration. lerobot >= 0.4.0 ships the v3.0 dataset writer
+# that powers the SDK's upload-time rebuild path.
+lerobot = [
+  "huggingface_hub>=0.20",
+  "lerobot>=0.4.0",
+  "pyarrow>=14",
+  "Pillow>=9",
+]
+
+[project.scripts]
+interlatent-sync-rollout = "interlatent.lerobot.sync_inference.sync_rollout:main"
+# Daemon that runs on a Pi (or any always-on machine) and converges to
+# whatever inference session the dashboard has assigned to the Node.
+interlatent-node = "interlatent.node.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/interlatent/interlatent"
+Documentation = "https://github.com/interlatent/interlatent/tree/main/docs"
+Issues = "https://github.com/interlatent/interlatent/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["interlatent*"]
