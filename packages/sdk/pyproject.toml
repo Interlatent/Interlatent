@@ -35,15 +35,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# pip install 'interlatent[mjlab]'
-# Requires mjlab to be installed separately from source.
-mjlab = []
-
-# pip install 'interlatent[isaaclab]'
-# Requires isaaclab and isaaclab_rl to be installed separately from source.
-# See: https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
-isaaclab = []
-
 # pip install 'interlatent[lerobot]'
 # Required for LeRobotDataset upload format and HuggingFace repo-based checkpoint
 # naming in the lerobot integration. lerobot >= 0.4.0 ships the v3.0 dataset writer
@@ -59,7 +50,6 @@ lerobot = [
 # DRTC connectivity smoke test: synthetic control loop against an inference
 # server — no robot needed.
 interlatent-rollout = "interlatent.inference.integration.rollout:main"
-interlatent-sync-rollout = "interlatent.lerobot.sync_inference.sync_rollout:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
 # whatever inference session the dashboard has assigned to the Node.
 interlatent-node = "interlatent.node.cli:main"

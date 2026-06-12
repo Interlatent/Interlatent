@@ -43,7 +43,6 @@ Key properties:
 | Node daemon | `node/` (cli, daemon, control, keyboard_action, teleop_channel) | `interlatent-node` — long-running daemon that runs assigned inference sessions on real hardware (LeRobot robot classes), with DAgger keyboard takeover |
 | Collection | `_client.py`, `_watcher.py`, `_db.py`, `_step_source.py` | `watch()/tick()/collect()` — stage per-step state/action/reward into local SQLite |
 | Dataset build | `storage/lerobot_rebuild.py`, `_dataset.py` | Turn the staging cache into a LeRobot v3.0 dataset on disk |
-| Sim wrappers | `isaaclab/`, `mjlab/`, `lerobot/` | Environment-specific collection loops |
 
 Collection is **local-first**: `watch()`/`tick()` write only to local SQLite + JPEG staging.
 Uploading to the hosted platform is a separate, optional step.

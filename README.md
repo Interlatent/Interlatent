@@ -109,7 +109,7 @@ The result is smooth high-rate control on top of slow, big models. Read more in
 
 | Package | PyPI | What it does |
 |---|---|---|
-| [`packages/sdk`](packages/sdk) | `interlatent` | Robot-side client: DRTC inference client, robot node daemon, LeRobot/Isaac Lab/MuJoCo integrations, local dataset collection |
+| [`packages/sdk`](packages/sdk) | `interlatent` | Robot-side client: DRTC inference client, robot node daemon, LeRobot integration, local dataset collection |
 | [`packages/server`](packages/server) | `interlatent-server` | Self-hosted gRPC inference server: policy backends, action chunk scheduling, torch.compile warm-up, episode recording, teleop relay |
 | [`packages/teleop`](packages/teleop) | `interlatent-teleop` | Direct laptop ↔ Pi teleoperation: keyboard + MediaPipe hand tracking, 50 Hz control loop with safety gate |
 | [`proto/`](proto) | — | The gRPC wire contract shared by client, server, and the hosted cloud |

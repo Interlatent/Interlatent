@@ -42,7 +42,6 @@ jobs:
           import glob, zipfile
           required = {
               "interlatent-": ["interlatent/node/cli.py",
-                               "interlatent/lerobot/sync_inference/sync_rollout.py",
                                "interlatent/inference/integration/rollout.py"],
               "interlatent_server-": ["interlatent_server/server/app.py"],
               "interlatent_teleop-": ["interlatent_teleop/pi/__main__.py",

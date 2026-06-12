@@ -14,8 +14,5 @@ extend-exclude = [
 select = ["E4", "E7", "E9", "F"]
 
 [lint.per-file-ignores]
-# lerobot type registrations must execute between imports (draccus CLI
-# parsing discovers config classes at import time).
-"packages/sdk/src/interlatent/lerobot/sync_inference/sync_rollout.py" = ["E402"]
 # Aligned one-line key handlers read better as a table.
 "packages/teleop/src/interlatent_teleop/laptop/keyboard_cli.py" = ["E701"]

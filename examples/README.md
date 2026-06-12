@@ -10,7 +10,3 @@ Ordered by how much hardware you need — start at 01 with nothing but a laptop.
 | 04 | [`04_teleop_record.md`](04_teleop_record.md) — teleoperate from your laptop (keyboard or hand tracking), record demonstrations | SO-101 + Pi (mock driver available) |
 | 05 | [`05_collect_dataset.py`](05_collect_dataset.py) — collect a LeRobot v3.0 dataset locally from any gym env | nothing |
 | 06 | [`06_connect_hosted.py`](06_connect_hosted.py) — the one-argument upgrade to Interlatent Cloud | an API key |
-
-Sim collection (no robot, real physics): the SDK ships wrappers for
-[Isaac Lab](../packages/sdk/src/interlatent/isaaclab/README.md) and
-[MuJoCo (mjlab)](../packages/sdk/src/interlatent/mjlab/README.md).

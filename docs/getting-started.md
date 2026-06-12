@@ -1,6 +1,6 @@
 # Getting started
 
-Goal: from `pip install` to a policy driving a (real or simulated) robot.
+Goal: from `pip install` to a policy driving a robot.
 
 ## 1. Install
 

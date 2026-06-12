@@ -32,11 +32,9 @@ Python, you can drive it (that's the whole of
 
 ## Simulators (data collection)
 
-| Sim | Integration |
-|---|---|
-| Isaac Lab | [`interlatent.isaaclab.IsaacSimCollectionEnv`](../packages/sdk/src/interlatent/isaaclab/README.md) |
-| MuJoCo (mjlab) | [`interlatent.mjlab.CollectionEnv`](../packages/sdk/src/interlatent/mjlab/README.md) |
-| Gym-style anything | `client.watch()` / `client.tick()` — see [examples/05](../examples/05_collect_dataset.py) |
+Any gym-style environment — including simulators — can be recorded with the generic
+`client.watch()` / `client.tick()` API; see [examples/05](../examples/05_collect_dataset.py).
+There are no simulator-specific wrappers at the moment.
 
 **Missing your arm or your policy family?** That's the contribution we most want — open an
 issue and we'll help you land it.

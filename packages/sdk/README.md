@@ -34,8 +34,6 @@ pip install interlatent
 Optional extras for environment integrations:
 
 ```bash
-pip install 'interlatent[isaaclab]'   # Isaac Lab (requires isaaclab installed separately)
-pip install 'interlatent[mjlab]'      # MuJoCo Lab (requires mjlab installed separately)
 pip install 'interlatent[lerobot]'    # LeRobot (adds huggingface_hub for checkpoint naming)
 ```
 
@@ -241,87 +239,7 @@ model.learn(100_000, callback=callback)
 client.close()
 ```
 
-## Isaac Lab Integration
-
-> ⚠️ The Isaac Lab / MuJoCo Lab collection-env wrappers are currently out of date with the public SDK surface and are scheduled for a rewrite (see `FUTURE.md`, item 9). Treat the examples below as indicative of the intended shape, not a verified contract — prefer the core `watch()` / `tick()` / `checkpoint()` API above.
-
-The `IsaacSimCollectionEnv` wraps an Isaac Lab environment for collection. It supports both `ManagerBasedRLEnv` and `DirectRLEnv`.
-
-### Mode 1 — standalone collection
-
-The wrapper drives its own rollout loop:
-
-```python
-from interlatent import Interlatent
-from interlatent.isaaclab.collection_env import IsaacSimCollectionEnv
-
-client = Interlatent(api_key="...")
-env = gym.make("Isaac-Velocity-Flat-Spot-v0", cfg=env_cfg)
-
-col_env = IsaacSimCollectionEnv(
-    env,
-    interlatent_client=client,
-    env_name="Isaac-Velocity-Flat-Spot-v0",
-)
-
-runner = OnPolicyRunner(col_env, asdict(agent_cfg), device=device)
-runner.load(checkpoint_path, load_cfg={"actor": True}, strict=True)
-col_env.attach(runner.alg.actor)
-
-result = col_env.collect(steps=2000)
-# result = {"episode_id": "...", "steps": 2000, "env_name": "..."}
-```
-
-### Mode 2 — passive collection (hooks into an existing training/eval loop)
-
-The wrapper intercepts `env.step()` calls and automatically feeds data to the Interlatent client:
-
-```python
-col_env = IsaacSimCollectionEnv(env, interlatent_client=client, env_name="Spot-v0")
-runner = OnPolicyRunner(col_env, asdict(agent_cfg), device=device)
-
-with col_env.collecting(runner.alg.actor) as episode_id:
-    runner.learn(num_learning_iterations=500)
-
-print("episode:", episode_id)
-```
-
-Both modes automatically:
-- Auto-detect observation and action labels from Isaac Lab managers
-- Capture rendered frames
-- Upload data on completion
-- Pass reward configuration to the server
-
-### Reward inspection
-
-```python
-# Snapshot current reward manager state
-rewards = col_env.inspect_rewards(env_idx=0)
-
-# JSON-serializable reward config
-config = col_env.reward_config_json(env_idx=0)
-```
-
-## MuJoCo Lab Integration
-
-> ⚠️ Same caveat as Isaac Lab above — this wrapper is scheduled for a rewrite (see `FUTURE.md`, item 9).
-
-The `CollectionEnv` wrapper in `interlatent.mjlab.collection_env` has the same API as `IsaacSimCollectionEnv`, adapted for mjlab environments. Usage is identical — see the Isaac Lab section above.
-
-```python
-from interlatent.mjlab.collection_env import CollectionEnv
-
-col_env = CollectionEnv(
-    env,
-    interlatent_client=client,
-    env_name="my-mjlab-env",
-    actor_obs_key="actor",  # default is "actor" for mjlab (vs "policy" for isaaclab)
-)
-```
-
 ## LeRobot Integration
-
-Two CLI entry points are provided for working with LeRobot robots and DRTC servers.
 
 ### `interlatent-rollout` — DRTC connectivity smoke test
 
@@ -338,30 +256,6 @@ interlatent-rollout \
 ```
 
 Pass `--grpc-web` when targeting an HTTPS endpoint (e.g. a Modal deployment).
-
-### `interlatent-sync-rollout` — instrumented recording on a real robot
-
-Drop-in replacement for `lerobot-record` that can additionally capture policy activations.
-Requires the lerobot extra: `pip install 'interlatent[lerobot]'`. Same arguments as
-`lerobot-record`, plus optional `--interlatent.*` flags:
-
-```bash
-interlatent-sync-rollout \
-    --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0 \
-    --robot.cameras='{"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}' \
-    --robot.id=my_arm \
-    --dataset.repo_id=user/dataset \
-    --dataset.num_episodes=1 \
-    --dataset.single_task="Pick up the cube" \
-    --policy.path=user/my_policy \
-    --interlatent.api_key=ilat_xxx \
-    --interlatent.layer=auto
-```
-
-If `--interlatent.api_key` is omitted it falls back to the `INTERLATENT_API_KEY` env
-var; if neither is set, recording proceeds without Interlatent — identical to
-`lerobot-record`.
 
 ## HTTP Resources
 

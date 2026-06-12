@@ -19,7 +19,6 @@ def test_sdk_wheel_contains_all_entry_point_packages():
     for needed in (
         "interlatent",
         "interlatent.node",                    # interlatent-node
-        "interlatent.lerobot.sync_inference",  # interlatent-sync-rollout
         "interlatent.inference.integration",   # interlatent-rollout
         "interlatent.storage",
     ):
