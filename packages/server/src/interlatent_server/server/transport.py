@@ -41,7 +41,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-import numpy as np
 
 from ..protocol import messages_pb2 as pb
 from ..protocol import messages_pb2_grpc as pb_grpc

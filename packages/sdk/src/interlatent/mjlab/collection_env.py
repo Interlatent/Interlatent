@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional
 
 import inspect
 
@@ -333,7 +333,9 @@ class CollectionEnv(RslRlVecEnvWrapper):
         """
         model = self._resolve_model(actor_model)
 
-        watcher = self._il.watch(
+        # watch() binds the session + recorder on the client; the returned
+        # handle is managed by the client, not by this env.
+        self._il.watch(
             model,
             env_name=self._env_name,
             context_fn=self._make_obs_context_fn(),

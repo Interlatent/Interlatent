@@ -34,6 +34,14 @@ import numpy as np
 import torch
 
 # ── lerobot type registrations (needed for draccus CLI parsing) ──────
+try:
+    import lerobot  # noqa: F401
+except ImportError as _e:
+    raise SystemExit(
+        "interlatent-sync-rollout drives real lerobot robots and needs the "
+        "lerobot extra installed:\n\n    pip install 'interlatent[lerobot]'\n"
+    ) from _e
+
 from lerobot.cameras import CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
@@ -100,7 +108,6 @@ except ImportError:
         sanity_check_dataset_robot_compatibility,
     )
 from lerobot.configs import parser
-from lerobot.configs.policies import PreTrainedConfig
 
 # datasets — top-level re-exports were added post-v0.5.1; use deep paths
 # that exist in both v0.5.1 and main.

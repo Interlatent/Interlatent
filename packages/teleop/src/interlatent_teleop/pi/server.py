@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from concurrent import futures
-from typing import Iterator, Optional
+from typing import Optional
 
 import grpc
 import numpy as np

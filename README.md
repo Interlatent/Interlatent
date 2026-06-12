@@ -42,10 +42,13 @@ Everything in this repo works fully offline with zero account. Apache-2.0.
 ### Try it in 60 seconds (no robot, no GPU)
 
 ```bash
+git clone https://github.com/interlatent/interlatent && cd interlatent
 pip install interlatent interlatent-server
-interlatent-serve                      # terminal 1 — built-in test backend
-python examples/01_loopback_no_hardware.py   # terminal 2 — full client↔server loop
+python examples/01_loopback_no_hardware.py   # spawns a local test server, runs the full robot loop
 ```
+
+The example starts `interlatent-serve` with the built-in test backend and drives it the
+exact way a robot would — observations up, action chunks back, one action per tick.
 
 ### Serve a real policy on your GPU
 

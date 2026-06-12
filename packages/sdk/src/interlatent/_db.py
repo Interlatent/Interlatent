@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-from typing import Sequence
 
 from ._schema import ActivationEvent
 from ._storage import CollectionSQLiteBackend

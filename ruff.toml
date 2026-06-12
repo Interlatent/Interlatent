@@ -1,0 +1,21 @@
+# Lint configuration for the whole monorepo. CI runs `ruff check .`.
+line-length = 100
+target-version = "py311"
+
+# Generated protobuf stubs are not ours to lint.
+extend-exclude = [
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+]
+
+[lint]
+# Errors + pyflakes. Style rules (E1/E2/E5 whitespace, line length) are left
+# to the author; correctness rules are enforced.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# lerobot type registrations must execute between imports (draccus CLI
+# parsing discovers config classes at import time).
+"packages/sdk/src/interlatent/lerobot/sync_inference/sync_rollout.py" = ["E402"]
+# Aligned one-line key handlers read better as a table.
+"packages/teleop/src/interlatent_teleop/laptop/keyboard_cli.py" = ["E701"]

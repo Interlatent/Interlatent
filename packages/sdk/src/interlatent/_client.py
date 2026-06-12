@@ -4,7 +4,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict
 
 if TYPE_CHECKING:
     from ._media import MediaBuffer
@@ -562,7 +562,6 @@ class Interlatent:
         """
         import logging
         import requests
-        import shutil
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from ._dataset import LeRobotRebuilder
 
@@ -778,7 +777,7 @@ class Interlatent:
                 if client._watcher is not None:
                     # SB3 provides these via the training env
                     try:
-                        from stable_baselines3.common.vec_env import VecEnv
+                        from stable_baselines3.common.vec_env import VecEnv  # noqa: F401  (availability probe)
                         env = getattr(self.model, "env", None)
                         if env is not None:
                             # VecEnv: get info from buffer

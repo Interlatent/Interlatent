@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional
 
 def _now() -> str:
     """Return current UTC time in ISO-8601 with trailing Z."""
-    return _dt.datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _uuid() -> str:

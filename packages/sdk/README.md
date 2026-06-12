@@ -321,71 +321,47 @@ col_env = CollectionEnv(
 
 ## LeRobot Integration
 
-Two CLI entry points are provided for instrumenting LeRobot policy servers with Interlatent activation capture.
+Two CLI entry points are provided for working with LeRobot robots and DRTC servers.
 
-### Async inference (gRPC policy server)
+### `interlatent-rollout` — DRTC connectivity smoke test
 
-Drop-in replacement for lerobot's `PolicyServer`. Hooks into the policy after it loads and captures activations on every forward pass. Uploads all data on client disconnect or shutdown.
+Opens a DRTC session against an inference server (self-hosted or hosted) and drives a
+synthetic control loop — no robot or cameras needed. Use it to validate your server and
+network path before wiring hardware:
 
 ```bash
 interlatent-rollout \
-    --host=0.0.0.0 \
-    --port=8080 \
-    --fps=30 \
-    --layer=auto \
-    --api-key="ilat_..." \
-    --env-name="my-robot-env" \
-    --model-name="my-policy"    # optional — auto-derived from policy path
+    --server gpu-box:50051 \
+    --environment my-arm \
+    --fps 30 \
+    --steps 300
 ```
 
-Then run lerobot's robot client as normal:
+Pass `--grpc-web` when targeting an HTTPS endpoint (e.g. a Modal deployment).
 
-```bash
-python -m lerobot.async_inference.robot_client \
-    --robot.type=so100_follower \
-    --server_address=HOST:8080
-```
+### `interlatent-sync-rollout` — instrumented recording on a real robot
 
-### Sync inference (local rollout)
-
-Replaces lerobot's teleop loop — runs policy inference locally on the robot with Interlatent instrumentation:
+Drop-in replacement for `lerobot-record` that can additionally capture policy activations.
+Requires the lerobot extra: `pip install 'interlatent[lerobot]'`. Same arguments as
+`lerobot-record`, plus optional `--interlatent.*` flags:
 
 ```bash
 interlatent-sync-rollout \
-    --robot.type=so100_follower \
-    --robot.port=/dev/tty.usbmodem58760431541 \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
-    --robot.id=black \
-    --pretrained_name_or_path=user/model \
-    --policy_type=smolvla \
-    --task="pick up the cube" \
-    --fps=30 \
-    --layer=auto \
-    --api-key="ilat_..."
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.cameras='{"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}' \
+    --robot.id=my_arm \
+    --dataset.repo_id=user/dataset \
+    --dataset.num_episodes=1 \
+    --dataset.single_task="Pick up the cube" \
+    --policy.path=user/my_policy \
+    --interlatent.api_key=ilat_xxx \
+    --interlatent.layer=auto
 ```
 
-The environment and model must already exist in the Interlatent dashboard. The model name is derived from the policy path (HuggingFace repo `org/model-name` becomes `model-name`; local file uses the basename). Override with `--model-name`.
-
-## VLA Layer Inspection
-
-The `vla` module provides a utility for discovering hookable layers in vision-language-action models:
-
-```python
-from interlatent.vla.hook_vla_layers import inspect_policy
-
-attn_layers, linear_layers = inspect_policy(
-    policy,
-    max_attn_layers=10,
-    max_linear_layers=10,
-    verbose=True,
-)
-
-# Each layer has: full_name, module, kind ("attention"/"linear"), metadata
-for layer in attn_layers:
-    print(f"{layer.full_name}: heads={layer.num_heads}, dim={layer.embed_dim}")
-```
-
-This is an inspection utility — it is not integrated into `watch()` and does not collect activations on its own.
+If `--interlatent.api_key` is omitted it falls back to the `INTERLATENT_API_KEY` env
+var; if neither is set, recording proceeds without Interlatent — identical to
+`lerobot-record`.
 
 ## HTTP Resources
 

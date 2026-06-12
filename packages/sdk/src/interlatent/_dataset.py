@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 from ._step_source import CollectionDBStepSource
 from .storage.lerobot_rebuild import LeRobotRebuilder as _EngineRebuilder
@@ -28,7 +28,7 @@ _LOG = logging.getLogger(__name__)
 
 # Re-exported so ``from interlatent._dataset import StepRow`` keeps
 # resolving for any external code that wandered in here.
-from .storage.lerobot_rebuild import StepRow, StepSource  # noqa: F401
+from .storage.lerobot_rebuild import StepRow, StepSource  # noqa: F401, E402
 
 
 class LeRobotRebuilder(_EngineRebuilder):

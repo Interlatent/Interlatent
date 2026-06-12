@@ -48,7 +48,12 @@ logging.basicConfig(
 log = logging.getLogger("teleop-proxy")
 
 
-TAILNET = os.environ["TELEOP_TAILNET"]
+TAILNET = os.environ.get("TELEOP_TAILNET", "")
+if not TAILNET:
+    raise SystemExit(
+        "TELEOP_TAILNET is required (e.g. 'tail285014.ts.net'). "
+        "Set it with `fly secrets set TELEOP_TAILNET=...` or export it locally."
+    )
 BOX_PORT = int(os.environ.get("TELEOP_BOX_PORT", "50052"))
 LISTEN_PORT = int(os.environ.get("PORT", "8080"))
 TS_SOCKET = os.environ.get("TS_SOCKET", "/var/run/tailscale/tailscaled.sock")

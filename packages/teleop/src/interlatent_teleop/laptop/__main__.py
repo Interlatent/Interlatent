@@ -106,7 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         session_token=args.session_token,
         control_hz=args.control_hz,
     )
-    session = client.open()
+    try:
+        session = client.open()
+    except ConnectionError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     logging.info("connected; home pose=%s", np.round(session.home_joints, 1).tolist())
 
     retargeter = Retargeter(

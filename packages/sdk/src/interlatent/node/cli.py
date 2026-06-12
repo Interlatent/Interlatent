@@ -155,8 +155,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
             "compute box is attached to your env on the dashboard."
         )
     print(
-        f"  Run `interlatent-node run --robot <name> --port <path>` to "
-        f"start the daemon."
+        "  Run `interlatent-node run --robot <name> --port <path>` to "
+        "start the daemon."
     )
     return 0
 

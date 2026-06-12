@@ -56,6 +56,9 @@ lerobot = [
 ]
 
 [project.scripts]
+# DRTC connectivity smoke test: synthetic control loop against an inference
+# server — no robot needed.
+interlatent-rollout = "interlatent.inference.integration.rollout:main"
 interlatent-sync-rollout = "interlatent.lerobot.sync_inference.sync_rollout:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
 # whatever inference session the dashboard has assigned to the Node.

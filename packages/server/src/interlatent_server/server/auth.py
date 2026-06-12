@@ -17,7 +17,7 @@ The Interlatent backend treats API keys as `X-Api-Key` HTTP headers
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Callable
 
 DEFAULT_API_BASE = "https://interlatent.com/api/v1"
 DEFAULT_TTL_S = 60.0

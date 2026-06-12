@@ -60,8 +60,6 @@ from isaaclab_rl.rsl_rl.vecenv_wrapper import RslRlVecEnvWrapper
 from interlatent._metrics import LambdaMetric
 from interlatent._metrics import obs as _obs_metric
 
-from interlatent._metrics import LambdaMetric
-from interlatent._metrics import obs as _obs_metric
 
 _LOG = logging.getLogger(__name__)
 
@@ -348,7 +346,9 @@ class IsaacSimCollectionEnv(RslRlVecEnvWrapper):
         """
         model = self._resolve_model(actor_model)
 
-        watcher = self._il.watch(
+        # watch() binds the session + recorder on the client; the returned
+        # handle is managed by the client, not by this env.
+        self._il.watch(
             model,
             env_name=self._env_name,
             context_fn=self._make_obs_context_fn(),

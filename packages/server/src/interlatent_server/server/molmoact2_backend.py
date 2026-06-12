@@ -184,7 +184,16 @@ class MolmoAct2Backend(LeRobotBackend):
             with open(cfg_path) as fh:
                 cfg_json = json.load(fh)
         norm_filename = cfg_json.get("norm_stats_filename") or "norm_stats.json"
-        with open(_osp.join(ckpt_dir, norm_filename)) as fh:
+        norm_path = _osp.join(ckpt_dir, norm_filename)
+        if not _osp.isfile(norm_path):
+            raise FileNotFoundError(
+                f"MolmoAct2 checkpoint {policy_uri!r} is missing {norm_filename!r} "
+                f"(looked in {ckpt_dir}). This file holds the action normalization "
+                "statistics and ships with the checkpoint repo — make sure you "
+                "downloaded the full checkpoint, or point --policy at a directory "
+                "that contains it."
+            )
+        with open(norm_path) as fh:
             norm = json.load(fh)
         by_tag = norm.get("metadata_by_tag") or {}
         if not isinstance(by_tag, dict) or not by_tag:

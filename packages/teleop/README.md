@@ -23,13 +23,13 @@ The Pi advertises joint names, limits, and max velocity on `OpenTeleop`. The lap
 On the **Pi** (the one wired to the SO-101):
 
 ```bash
-pip install -e packages/interlatent-teleop[so101]
+pip install 'interlatent-teleop[so101]'        # or from a checkout: pip install -e './packages/teleop[so101]'
 ```
 
 On the **laptop** (the producer with the webcam):
 
 ```bash
-pip install -e packages/interlatent-teleop[laptop]
+pip install 'interlatent-teleop[laptop]'       # or from a checkout: pip install -e './packages/teleop[laptop]'
 ```
 
 Both ends share the base package (gRPC + numpy + protocol stubs); the extras only differ in hardware-side deps.
@@ -70,10 +70,13 @@ Pass `--session-token <secret>` to the Pi and the same value to the laptop (or s
 
 Defined in `interlatent_teleop/common/config.py`. SO-101 defaults:
 
-- Joint limits: `±90°` for arm joints, `0..100` for gripper
-- Max velocity: 120–240 °/s per joint, 400 °/s for gripper
+- Joint limits: per joint, `±100°`–`±180°` for the arm joints, `0..100` for the gripper
+- Max velocity: 50–240 °/s per joint (gravity-loaded joints are capped lowest), 400 °/s for gripper
 - Producer-side: low-pass smoothing (`α=0.4`) on retargeted joints, target clamp before send
 - Pi-side: workspace clamp → velocity clamp → 200 ms staleness freeze → deadman → optional confidence threshold
+- E-stop: a failed motor write latches an e-stop that freezes the arm. Release and
+  re-press the deadman to clear it; a persistent hardware fault re-latches on the
+  next write, so a broken arm never resumes for more than one tick.
 
 Adjust limits in `common/config.py` after you have validated the loop end-to-end on real hardware. Defaults are intentionally conservative.
 

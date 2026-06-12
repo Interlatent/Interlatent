@@ -16,6 +16,7 @@ packages/server/   pip: interlatent-server   import: interlatent_server   (GPU i
 packages/teleop/   pip: interlatent-teleop   import: interlatent_teleop   (laptop ↔ Pi teleop)
 proto/             gRPC wire contract (source of truth for generated stubs)
 examples/          runnable examples, ordered by hardware required
+tests/             pytest suite — runs with no GPU and no robot
 docs/              user documentation
 docker/            CUDA image for the inference server
 ```
@@ -26,17 +27,17 @@ docker/            CUDA image for the inference server
 git clone https://github.com/interlatent/interlatent
 cd interlatent
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ./packages/sdk -e ./packages/server -e ./packages/teleop
+pip install -e ./packages/sdk -e ./packages/server -e ./packages/teleop pytest pytest-timeout ruff
 ```
 
 The three packages use distinct import paths (`interlatent`, `interlatent_server`,
 `interlatent_teleop`) and co-install cleanly.
 
-Run the server locally (no GPU needed — the built-in `echo` backend works on CPU):
+Run the tests (no GPU, no robot — they spin up local servers and the mock teleop driver):
 
 ```bash
-interlatent-serve --port 50051
-python examples/01_loopback_no_hardware.py   # exercises the full client↔server path
+pytest tests/
+python examples/01_loopback_no_hardware.py   # the same loop a real robot runs
 ```
 
 For real policies install `pip install -e './packages/server[lerobot]'` (needs a CUDA GPU
@@ -72,7 +73,8 @@ add a driver under `packages/teleop/src/interlatent_teleop/pi/` for teleop suppo
 ## Pull requests
 
 - Keep PRs focused; separate refactors from behavior changes.
-- Match the surrounding code's style. Lint with `ruff check packages/`.
+- Match the surrounding code's style. Lint with `ruff check .` and run `pytest tests/`
+  before pushing — CI runs both.
 - Examples and docs count as code — if your change alters a public surface, update them.
 - **Sign off your commits** (DCO): `git commit -s`. By signing off you certify the
   [Developer Certificate of Origin](https://developercertificate.org/) — that you have the

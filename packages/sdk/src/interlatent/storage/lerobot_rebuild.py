@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence, Tuple
