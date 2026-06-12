@@ -23,6 +23,7 @@ dependencies = [
   "requests>=2.31.0",
   "torch>=2.0",
   "numpy>=1.21",
+  "httpx",
   # DRTC client: gRPC + gRPC-Web (for the hosted Modal endpoint).
   "grpcio>=1.60",
   "protobuf>=4.25",
