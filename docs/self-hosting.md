@@ -50,6 +50,34 @@ the easiest way to reach a cloud GPU from a robot at home/lab — no public port
 [docker/README.md](../docker/README.md) for provider-specific notes and the full env var
 list.
 
+## Make a personal box discoverable in the dashboard
+
+If you have an Interlatent account, a box you run yourself can show up in the hosted dashboard as
+a launchable box — no provisioning. Give `interlatent-serve` your API key and it dials *out* to
+register and report its status:
+
+```bash
+INTERLATENT_API_KEY=ilat_... interlatent-serve \
+  --policy lerobot/smolvla_base \
+  --advertise-address 100.x.y.z:50051   # the address robots dial; see below
+```
+
+- **Gated on the key.** Without `INTERLATENT_API_KEY` (or `--api-key`) the server makes **no**
+  outbound calls and behaves exactly as a fully self-hosted box.
+- **`--advertise-address`** (`INTERLATENT_ADVERTISE_ADDRESS`) is the `host:port` the dashboard
+  stores for robots to dial. It defaults to a detected local IP + `--port`, which is fine on one
+  LAN; **set it explicitly** behind NAT/Tailscale (e.g. your `100.x` tailnet address).
+- **Stable identity.** The box mints a UUID once and persists it to `~/.interlatent/box-id`, so a
+  restart re-attaches to the same dashboard box. Pin it with `INTERLATENT_BOX_ID` if that path
+  isn't durable (see the Docker note below).
+- **Status.** The box reports `ready`/`running`/`uploading` as sessions come and go, and a
+  best-effort `stopped` on clean shutdown. **Caveat:** if it dies *ungracefully* it can linger as
+  `ready` in the dashboard — just remove it there. See
+  [ADR-0003](adr/0003-byo-box-dashboard-registration.md).
+
+This is independent of the coordinator below: dashboard registration is for the *hosted* control
+plane; the coordinator is the *self-hosted* one.
+
 ## Running sessions offline — the coordinator
 
 To drive an always-on robot **node** without the hosted dashboard, run a local

@@ -113,8 +113,12 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         recorder_base_dir: Optional[Path] = None,
         inference_executor: Optional[Executor] = None,
         dataset_sink: Optional[DatasetSink] = None,
+        reporter=None,
     ) -> None:
         self._buf = chunk_buffer or InMemoryChunkBuffer()
+        # Optional dashboard reporter (BYO box self-registration). None when
+        # no API key was configured — all transition reports are then no-ops.
+        self._reporter = reporter
         # Default publish destination when a session's OpenSession metadata
         # doesn't specify one. None falls back to the hosted inbox at
         # recording time. interlatent-serve sets this from --output-dir/--s3-*
@@ -147,6 +151,15 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _report_status(self, status: str) -> None:
+        if self._reporter is not None:
+            self._reporter.report_status(status)
+
+    def _report_ready_if_idle(self) -> None:
+        """Tell the dashboard we're idle once no session or upload remains."""
+        if self._reporter is not None and not self._sessions and not self._lingering_uploads:
+            self._reporter.report_status("ready")
 
     def ensure_gc_started(self) -> None:
         """Lazily spin up the idle-GC task on the current event loop.
@@ -229,6 +242,7 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             session_id, request.model_id, chunk_size,
             "yes" if recorder is not None else "no",
         )
+        self._report_status("running")
         return pb.OpenSessionResponse(
             session_id=session_id,
             chunk_size=chunk_size,
@@ -243,6 +257,8 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         self._buf.drop(request.session_id)
         if state is not None and state.recorder is not None:
             self._spawn_upload(state)
+        # If nothing is left running or uploading, we're idle again.
+        self._report_ready_if_idle()
         return pb.CloseSessionResponse()
 
     async def Infer(self, request: pb.Observation, context) -> pb.ActionChunk:
@@ -462,7 +478,12 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         )
         state.upload_task = task
         self._lingering_uploads.add(task)
-        task.add_done_callback(self._lingering_uploads.discard)
+        self._report_status("uploading")
+        task.add_done_callback(self._on_upload_done)
+
+    def _on_upload_done(self, task: asyncio.Task) -> None:
+        self._lingering_uploads.discard(task)
+        self._report_ready_if_idle()
 
     async def _idle_gc_loop(self) -> None:
         """Force-close sessions that have gone silent.
@@ -514,6 +535,7 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
                                 "Idle-GC dropped session %s (silent for >%.0fs, %d rows discarded, episode_id=%s)",
                                 sid, self._idle_timeout_s, dropped, episode_id,
                             )
+                            self._report_ready_if_idle()
 
                         task.add_done_callback(_on_done)
             except asyncio.CancelledError:

@@ -98,6 +98,7 @@ async def _serve(
     teleop_port: int,
     teleop_secret: str,
     dataset_sink=None,
+    reporter=None,
 ) -> None:
     import grpc
 
@@ -129,7 +130,9 @@ async def _serve(
 
     pb_grpc.add_InferenceServiceServicer_to_server(
         InferenceServicer(
-            inference_executor=inference_executor, dataset_sink=dataset_sink
+            inference_executor=inference_executor,
+            dataset_sink=dataset_sink,
+            reporter=reporter,
         ),
         server,
     )
@@ -144,6 +147,12 @@ async def _serve(
             ", ".join(f"{ip}:{port}" for ip in _ips), _host,
         )
 
+    # Announce to the hosted dashboard (no-op unless --api-key was given):
+    # register once, then report ready now that the port is bound + warm.
+    if reporter is not None:
+        await reporter.register()
+        reporter.report_status("ready")
+
     if teleop_secret:
         from .teleop_relay import serve as serve_teleop
 
@@ -155,7 +164,14 @@ async def _serve(
             "Set the secret to enable DAgger takeover."
         )
 
-    await server.wait_for_termination()
+    try:
+        await server.wait_for_termination()
+    finally:
+        # Best-effort graceful "stopped" so the box doesn't linger as
+        # ``ready`` in the dashboard. Synchronous — a daemon thread would be
+        # killed before the request leaves on process exit.
+        if reporter is not None:
+            reporter.report_status("stopped", block=True)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -220,6 +236,27 @@ def main(argv: list[str] | None = None) -> None:
         default=os.environ.get("AWS_REGION", ""),
         help="S3 region. Env: AWS_REGION",
     )
+    # Dashboard self-registration. When an API key is supplied, this box
+    # dials out and registers itself with the hosted dashboard so it shows
+    # up as a launchable BYO box. Off (no outbound calls) without a key.
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("INTERLATENT_API_KEY", ""),
+        help="Your Interlatent API key. When set, this box self-registers "
+        "with the dashboard and reports its status. Env: INTERLATENT_API_KEY",
+    )
+    parser.add_argument(
+        "--api-base",
+        default=os.environ.get("INTERLATENT_API_BASE", "https://interlatent.com/api/v1"),
+        help="Interlatent backend base URL. Env: INTERLATENT_API_BASE",
+    )
+    parser.add_argument(
+        "--advertise-address",
+        default=os.environ.get("INTERLATENT_ADVERTISE_ADDRESS", ""),
+        help="host:port robots dial to reach this box's DRTC port; reported to "
+        "the dashboard. Defaults to a detected local address + --port (set this "
+        "explicitly behind NAT/Tailscale). Env: INTERLATENT_ADVERTISE_ADDRESS",
+    )
     args = parser.parse_args(argv)
 
     if args.output_dir and args.s3_uri:
@@ -234,6 +271,7 @@ def main(argv: list[str] | None = None) -> None:
         _warmup(args.policy, args.backend)
 
     dataset_sink = _resolve_sink(args)
+    reporter = _resolve_reporter(args)
 
     asyncio.run(
         _serve(
@@ -242,7 +280,33 @@ def main(argv: list[str] | None = None) -> None:
             teleop_port=args.teleop_port,
             teleop_secret=os.environ.get("INTERLATENT_TELEOP_SECRET", ""),
             dataset_sink=dataset_sink,
+            reporter=reporter,
         )
+    )
+
+
+def _advertise_address(args) -> str:
+    """The host:port robots dial, reported to the dashboard.
+
+    Prefers the operator's --advertise-address (needed behind NAT/Tailscale).
+    Otherwise a best-effort guess: first detected local IP (or hostname) +
+    --port. A guess is fine for same-LAN use; remote boxes should set it.
+    """
+    if args.advertise_address:
+        return args.advertise_address
+    host, ips = _reachable_addresses()
+    return f"{ips[0] if ips else host}:{args.port}"
+
+
+def _resolve_reporter(args):
+    """Build the dashboard reporter from CLI flags, or None when disabled."""
+    from .box_report import build_reporter
+
+    return build_reporter(
+        api_base=args.api_base,
+        api_key=args.api_key,
+        endpoint=_advertise_address(args),
+        warmup_policy=args.policy,
     )
 
 
