@@ -32,7 +32,39 @@ from typing import Any, Callable, Optional
 
 import httpx
 
+from .. import routing
+
 _LOG = logging.getLogger("interlatent.node.daemon")
+
+
+def _reachable_addresses() -> tuple[str, list[str]]:
+    """Best-effort list of this host's non-loopback addresses (no extra deps).
+
+    The node is outbound-only today (it dials the coordinator + GPU), so this
+    is informational — useful for debugging and for future routing methods
+    where the node must advertise an address.
+    """
+    import socket
+
+    ips: list[str] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))  # no packets sent — just selects a route
+            ips.append(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    host = socket.gethostname()
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = info[4][0]
+            if ip not in ips and not ip.startswith("127.") and ip != "::1":
+                ips.append(ip)
+    except OSError:
+        pass
+    return host, ips
 
 
 @dataclass
@@ -122,6 +154,11 @@ class NodeDaemon:
             "Node daemon online: node_id=%s api_base=%s",
             self.cfg.node_id, self.cfg.api_base,
         )
+        _host, _ips = _reachable_addresses()
+        if _ips:
+            _LOG.info(
+                "Node host addresses: %s (hostname=%s)", ", ".join(_ips), _host
+            )
         # Best-effort: tell the dashboard what hardware is attached so
         # the user can examine it (robot type, USB port, cameras). Never
         # fatal — a failed report just leaves the panel empty.
@@ -220,19 +257,38 @@ class NodeDaemon:
                 await asyncio.sleep(min(backoff, self.cfg.max_backoff_s))
                 backoff = min(backoff * 2, self.cfg.max_backoff_s)
 
-    def _resolve_endpoint(self, session: dict) -> str:
-        """Pick the DRTC endpoint we'd actually dial for this session.
+    def _resolve_route(self, session: dict) -> Optional[dict]:
+        """Pick the route descriptor we'd actually use for this session.
 
-        Mirrors the precedence in _start_loop so _converge can tell
+        Precedence (preserves the legacy endpoint precedence):
+          1. ``INTERLATENT_DRTC_URL`` env var — operator override (direct)
+          2. the session's ``route`` block stamped by the coordinator
+          3. the session's legacy ``drtc_endpoint`` (direct)
+          4. node config ``drtc_url`` — fixed fallback (direct)
+        Returns ``None`` when nothing resolves.
+        """
+        env = os.environ.get("INTERLATENT_DRTC_URL")
+        if env:
+            return routing.make_descriptor(env)
+        route = session.get("route")
+        if route and route.get("address"):
+            return route
+        ep = session.get("drtc_endpoint")
+        if ep:
+            return routing.make_descriptor(ep)
+        if self.cfg.drtc_url:
+            return routing.make_descriptor(self.cfg.drtc_url)
+        return None
+
+    def _resolve_endpoint(self, session: dict) -> str:
+        """The address we'd dial — used by _converge to detect endpoint changes.
+
+        Mirrors the precedence in _resolve_route so _converge can tell
         whether a server-reported endpoint change actually affects us
         (when we're pinned via env var / cfg, it doesn't).
         """
-        return (
-            os.environ.get("INTERLATENT_DRTC_URL")
-            or (session.get("drtc_endpoint") or None)
-            or self.cfg.drtc_url
-            or ""
-        )
+        route = self._resolve_route(session)
+        return route.get("address", "") if route else ""
 
     def _converge(self, session: Optional[dict]) -> None:
         desired_id = (session or {}).get("id", "") if session else ""
@@ -314,31 +370,32 @@ class NodeDaemon:
     def _start_loop(self, session: dict) -> None:
         from interlatent.inference.integration.connect import connect_drtc
 
-        # DRTC endpoint resolution, in priority order:
-        #   1. INTERLATENT_DRTC_URL env var — operator override per run
-        #   2. session's `drtc_endpoint` — the dashboard now stamps this
-        #      per session from whichever compute box is attached to
-        #      the parent env. This is the normal path for self-serve
-        #      compute — the user picks a box in the workspace and the
-        #      node inherits the endpoint automatically.
-        #   3. node config (`drtc_url` in ~/.interlatent/node.toml) —
-        #      legacy fallback for fleet-wide / operator-set endpoints.
-        # If all three are empty we refuse to start; the daemon would
-        # otherwise hang against an empty address with a cryptic gRPC
-        # error. The usual fix: attach a running compute box to the
-        # env in the dashboard.
-        drtc_endpoint = self._resolve_endpoint(session)
-        if not drtc_endpoint:
+        # DRTC route resolution (see _resolve_route for precedence): env-var
+        # override > coordinator-stamped ``route`` > legacy ``drtc_endpoint`` >
+        # node-config ``drtc_url``. The route's ``method`` selects a connector
+        # (only ``direct`` today); the connector yields the address to dial.
+        # If nothing resolves we refuse to start rather than hang against an
+        # empty address. The usual fix: register/select a reachable GPU box.
+        route = self._resolve_route(session)
+        if not route or not route.get("address"):
             _LOG.error(
-                "No DRTC endpoint for session %s. Attach a running "
-                "compute box to this env in the dashboard (Compute → "
-                "Spin up, then select it in the env Workspace), or set "
-                "INTERLATENT_DRTC_URL to a fixed endpoint.",
+                "No DRTC endpoint for session %s. Register a reachable GPU box "
+                "with the coordinator (`interlatent gpu add`) and assign it to "
+                "this session, or set INTERLATENT_DRTC_URL to a fixed endpoint.",
                 session.get("id", "?"),
             )
             return
-        _LOG.info("DRTC endpoint for session %s: %s",
-                  session.get("id", "?"), drtc_endpoint)
+        try:
+            drtc_endpoint = routing.connect_params(route)["server_address"]
+        except ValueError as exc:
+            _LOG.error("Cannot route session %s: %s", session.get("id", "?"), exc)
+            return
+        if not drtc_endpoint:
+            _LOG.error("Route for session %s resolved to an empty address",
+                       session.get("id", "?"))
+            return
+        _LOG.info("DRTC route for session %s: method=%s endpoint=%s",
+                  session.get("id", "?"), route.get("method", "direct"), drtc_endpoint)
 
         # Pull recording context out of the session payload. The backend
         # populates ``collection_context`` from the parent Environment,
@@ -391,6 +448,16 @@ class NodeDaemon:
             session_metadata.get("num_inference_steps", "default"),
             image_resize if image_resize is not None else "native",
         )
+
+        # Recording destination is configured on the coordinator (or backend)
+        # and rides in the session payload's ``recording`` block. The node
+        # forwards it verbatim into OpenSession metadata; the GPU server's
+        # recorder interprets the keys (output_dir / s3_uri / s3_*) to pick a
+        # sink. Opaque to the node. See ADR-0002.
+        recording_cfg = session.get("recording") or {}
+        for _k, _v in recording_cfg.items():
+            if _v is not None:
+                session_metadata[str(_k)] = str(_v)
 
         client = connect_drtc(
             # DRTC auth needs the ilat_ user key; the node token is

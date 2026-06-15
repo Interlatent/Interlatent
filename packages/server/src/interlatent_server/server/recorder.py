@@ -9,9 +9,10 @@ SSD.
 
 On :meth:`CloseSession` the recorder is finalised and a
 :class:`LeRobotRebuilder` build is kicked off (against the local
-on-disk staging) followed by the standard inbox-upload protocol used
-by the SDK today: ``POST /api/v1/episodes`` → ``POST
-.../upload-urls`` → presigned ``PUT`` → ``POST .../upload-complete``.
+on-disk staging). The finished dataset is then handed to a
+:class:`~.sinks.DatasetSink` for publishing — the hosted inbox
+(default), a local directory, or an S3-compatible bucket. See
+:mod:`.sinks`.
 
 This file lives on the engine side only — the SDK never imports it.
 The auth header reused for backend HTTP calls is the same
@@ -25,13 +26,13 @@ import asyncio
 import json
 import logging
 import shutil
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
 
 from ..protocol import messages_pb2 as pb  # noqa: F401  (type-only ref in docstrings)
 from ..storage.lerobot_rebuild import LeRobotRebuilder, StepRow
+from .sinks import BackendInboxSink, DatasetSink
 
 log = logging.getLogger(__name__)
 
@@ -50,12 +51,6 @@ _QUEUE_MAXSIZE = 64
 # session never gets a CloseSession (Pi crash, network drop).
 _MAX_STEPS_PER_SESSION = 108_000
 
-# Upload defaults — match the SDK's behaviour.
-_UPLOAD_BATCH_SIZE = 100
-_PUT_TIMEOUT = 300.0
-_HTTP_TIMEOUT = 60.0
-
-
 _IMAGE_KEY_PREFIX = "observation.images."
 
 
@@ -64,24 +59,6 @@ def _short_cam(key: str) -> str:
     if key.startswith(_IMAGE_KEY_PREFIX):
         return key[len(_IMAGE_KEY_PREFIX):]
     return key
-
-
-def _api_v1_root(api_base: str) -> str:
-    """Normalize an Interlatent API base to its ``/api/v1`` root.
-
-    ``api_base`` reaches us via ``INTERLATENT_API_BASE`` (and OpenSession
-    metadata), but two conventions collide in the same image:
-    ``serve_gpu`` and the whole node SDK treat it as the **bare origin**
-    (``https://interlatent.com``) and append ``/api/v1/...`` per call,
-    while older recorder code assumed it already ended in ``/api/v1``.
-    A box configured for the warmup-target fetch carries the bare origin,
-    so the recorder posted to ``/episodes`` and got 405. Accept either
-    form and always return the ``/api/v1`` root so the routes resolve.
-    """
-    base = api_base.rstrip("/")
-    if base.endswith("/api/v1"):
-        return base
-    return f"{base}/api/v1"
 
 
 # ----------------------------------------------------------------------
@@ -109,6 +86,10 @@ class RecorderConfig:
     api_key: str
     api_base: str
     sdk_version: str = "drtc-server"
+    # Where the finished dataset is published. Defaults to the hosted
+    # inbox; the servicer sets a Local/S3 sink when the session metadata
+    # (or serve flags) request one.
+    sink: Optional[DatasetSink] = None
 
 
 class SessionRecorder:
@@ -401,22 +382,34 @@ class SessionRecorder:
         dataset_parent.mkdir(parents=True, exist_ok=True)
         dataset_root = dataset_parent / "v3"
 
-        # Measured fps wins over the requested config.fps — see _first_ts_ns
-        # comment for why. Fall back to config.fps when we don't have enough
-        # samples (<2 steps or degenerate timestamps).
+        sink: DatasetSink = self.config.sink or BackendInboxSink()
+
         measured_fps = self._measured_fps()
-        effective_fps = measured_fps if measured_fps is not None else self.config.fps
         if measured_fps is not None:
             log.info(
                 "SessionRecorder %s: measured fps=%.2f (config.fps=%d)",
                 self.config.episode_id, measured_fps, self.config.fps,
             )
 
+        # Merge-capable sinks (Local/S3) accumulate sessions with
+        # aggregate_datasets, which rejects mismatched fps/features. Pin the
+        # dataset fps to the *declared* rate (stable across sessions) and keep
+        # the measured rate in the info block; force the control_source column
+        # so pure-policy and teleop sessions share one schema. Non-merge sinks
+        # (the hosted inbox) keep the original measured-fps-wins behaviour.
+        if sink.normalize_for_merge():
+            dataset_fps = self.config.fps
+        else:
+            effective = measured_fps if measured_fps is not None else self.config.fps
+            dataset_fps = int(round(effective)) if effective >= 1 else 1
+
         rebuilder = LeRobotRebuilder(
             root=dataset_root,
-            fps=int(round(effective_fps)) if effective_fps >= 1 else 1,
+            fps=dataset_fps if dataset_fps >= 1 else 1,
             task=self.config.task,
             env_slug=self.config.env_slug,
+            force_control_source=sink.normalize_for_merge(),
+            measured_fps=measured_fps,
         )
 
         loop = asyncio.get_running_loop()
@@ -446,139 +439,28 @@ class SessionRecorder:
         episode_id = episode_uuids[0]
 
         try:
-            await self._post_episodes_create(episode_id)
-            await self._upload_dataset_dir(episode_id, dataset_root)
-            await self._post_upload_complete(episode_id)
+            await sink.publish(
+                episode_id=episode_id,
+                dataset_root=dataset_root,
+                config=self.config,
+            )
             if self._dropped:
                 log.warning(
-                    "SessionRecorder %s: uploaded with %d dropped frames",
+                    "SessionRecorder %s: published with %d dropped frames",
                     self.config.episode_id, self._dropped,
                 )
             else:
                 log.info(
-                    "SessionRecorder %s: upload complete (%d steps, %d cams)",
+                    "SessionRecorder %s: publish complete (%d steps, %d cams)",
                     self.config.episode_id, self._step_count, len(self._cameras),
                 )
         except Exception:
             log.exception(
-                "SessionRecorder %s: backend upload failed",
+                "SessionRecorder %s: dataset publish failed",
                 self.config.episode_id,
             )
         finally:
             self._cleanup_working_dir()
-
-    # ------------------------------------------------------------------
-    # Upload internals
-    # ------------------------------------------------------------------
-
-    def _build_headers(self) -> dict[str, str]:
-        return {
-            "x-api-key": self.config.api_key,
-            "Accept": "application/json",
-        }
-
-    async def _post_episodes_create(self, episode_id: str) -> None:
-        import httpx
-
-        body = {
-            "episode_id": episode_id,
-            "environment": self.config.env_slug,
-            "layer": self.config.layer,
-            "model_id": self.config.model_id,
-            "tags": {
-                "source": "drtc-server",
-                "policy_uri": self.config.policy_uri,
-            },
-            "sdk_version": self.config.sdk_version,
-            "model_framework": "drtc",
-        }
-        url = f"{_api_v1_root(self.config.api_base)}/episodes"
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            r = await client.post(url, json=body, headers=self._build_headers())
-            if r.status_code == 409:
-                # Pre-existing episode row — tolerate (idle-GC may have
-                # fired and committed the upload before a tardy
-                # CloseSession arrived).
-                log.info(
-                    "SessionRecorder %s: episode row already existed (409)",
-                    self.config.episode_id,
-                )
-                return
-            r.raise_for_status()
-
-    async def _upload_dataset_dir(self, episode_id: str, root: Path) -> None:
-        """Walk ``root``, mint presigned URLs in batches, ``PUT`` each file."""
-        import httpx
-
-        # Collect manifest entries (matches SDK ``_inbox/<uuid>/<rel_path>``).
-        session_uuid = uuid.uuid4().hex
-        manifest: list[dict[str, Any]] = []
-        for f in sorted(root.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = f.relative_to(root).as_posix()
-            manifest.append({
-                "key": f"_inbox/{session_uuid}/{rel}",
-                "local": str(f),
-                "size": f.stat().st_size,
-            })
-        if not manifest:
-            log.warning(
-                "SessionRecorder %s: dataset root contained zero files",
-                self.config.episode_id,
-            )
-            return
-
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            headers = self._build_headers()
-
-            for i in range(0, len(manifest), _UPLOAD_BATCH_SIZE):
-                batch = manifest[i : i + _UPLOAD_BATCH_SIZE]
-                url = (
-                    f"{_api_v1_root(self.config.api_base)}/episodes/"
-                    f"{episode_id}/upload-urls"
-                )
-                req_body = {
-                    "files": [{"key": e["key"], "size": e["size"]} for e in batch],
-                }
-                r = await client.post(url, json=req_body, headers=headers)
-                r.raise_for_status()
-                presigned: dict[str, str] = r.json().get("presigned_urls", {})
-
-                # PUT each file. Concurrency is bounded by the asyncio
-                # gather; httpx pools the connections.
-                async def _put(entry: dict[str, Any]) -> None:
-                    put_url = presigned.get(entry["key"])
-                    if not put_url:
-                        raise RuntimeError(
-                            f"Backend did not return a presigned URL for {entry['key']}"
-                        )
-                    # Read+upload with a fresh client per call would be
-                    # wasteful; httpx.AsyncClient is fine to share across
-                    # PUTs but S3 doesn't accept the same auth headers,
-                    # so we open a per-PUT call with no global headers.
-                    async with httpx.AsyncClient(timeout=_PUT_TIMEOUT) as put_client:
-                        with open(entry["local"], "rb") as fh:
-                            data = fh.read()
-                        resp = await put_client.put(put_url, content=data)
-                        if not (200 <= resp.status_code < 300):
-                            raise RuntimeError(
-                                f"S3 PUT {entry['key']} -> "
-                                f"{resp.status_code} {resp.text[:160]}"
-                            )
-
-                await asyncio.gather(*(_put(e) for e in batch))
-
-    async def _post_upload_complete(self, episode_id: str) -> None:
-        import httpx
-
-        url = (
-            f"{_api_v1_root(self.config.api_base)}/episodes/"
-            f"{episode_id}/upload-complete"
-        )
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            r = await client.post(url, json={"manifest": None}, headers=self._build_headers())
-            r.raise_for_status()
 
     # ------------------------------------------------------------------
     # Cleanup

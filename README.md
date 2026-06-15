@@ -32,6 +32,7 @@ chunking, so the arm never stutters while the model thinks.
 - 🦾 **Drive real hardware** (SO-101, Koch, ALOHA, anything LeRobot supports) over LAN, Tailscale, or the internet
 - ⚡ **Real-time action chunking (DRTC)** — pipelined inference, latency estimation, and chunk merging keep control smooth at 30 Hz even with multi-second model latency
 - 🎮 **Teleoperate** with your keyboard or MediaPipe hand tracking, including DAgger-style takeover during policy rollouts
+- 🛰️ **Run robot nodes with no dashboard** — a local coordinator (`interlatent up`) assigns sessions to your robots and records episodes to a local dir or S3, fully self-hosted
 - 📦 **Collect LeRobot v3.0 datasets** locally — your data, your disk, no account required
 - ☁️ **One-line cloud upgrade** — the same code runs against [Interlatent Cloud](https://interlatent.com) for managed warm GPUs, hosted datasets, and reward labeling
 
@@ -109,7 +110,7 @@ The result is smooth high-rate control on top of slow, big models. Read more in
 
 | Package | PyPI | What it does |
 |---|---|---|
-| [`packages/sdk`](packages/sdk) | `interlatent` | Robot-side client: DRTC inference client, robot node daemon, LeRobot integration, local dataset collection |
+| [`packages/sdk`](packages/sdk) | `interlatent` | Robot-side client: DRTC inference client, robot node daemon, local coordinator CLI (`interlatent up`), LeRobot integration, local dataset collection |
 | [`packages/server`](packages/server) | `interlatent-server` | Self-hosted gRPC inference server: policy backends, action chunk scheduling, torch.compile warm-up, episode recording, teleop relay |
 | [`packages/teleop`](packages/teleop) | `interlatent-teleop` | Direct laptop ↔ Pi teleoperation: keyboard + MediaPipe hand tracking, 50 Hz control loop with safety gate |
 | [`proto/`](proto) | — | The gRPC wire contract shared by client, server, and the hosted cloud |

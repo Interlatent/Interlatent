@@ -41,6 +41,12 @@ lerobot = [
 recording = [
   "pyarrow>=14",
 ]
+# Upload recorded datasets to an S3-compatible bucket (AWS S3, Cloudflare
+# R2, MinIO, ...). boto3 is imported lazily, so the base install is
+# unaffected when recording locally or to the hosted inbox.
+s3 = [
+  "boto3>=1.34",
+]
 
 [project.scripts]
 interlatent-serve = "interlatent_server.server.app:main"

@@ -50,14 +50,80 @@ the easiest way to reach a cloud GPU from a robot at home/lab — no public port
 [docker/README.md](../docker/README.md) for provider-specific notes and the full env var
 list.
 
+## Running sessions offline — the coordinator
+
+To drive an always-on robot **node** without the hosted dashboard, run a local
+**coordinator** (ships with the `interlatent` SDK). It assigns sessions to nodes over the
+same API the node already polls — no account, no dashboard.
+
+```bash
+# 1. On the GPU box: serve a policy (no API key needed).
+interlatent-serve --policy lerobot/smolvla_base
+
+# 2. On your laptop/control host: start the coordinator and tell it where to
+#    save recorded episodes (local dir here; or --s3-uri for S3/R2/MinIO).
+interlatent up --port 8900 --output-dir /data/so101-kitchen
+interlatent gpu add gpu0 100.x.y.z:50051          # the GPU box (LAN/tailnet URL)
+
+# 3. On the robot (Pi): pair the node at the coordinator (no key required).
+interlatent-node pair --name arm0 --api-base http://<coordinator-host>:8900
+interlatent-node run --robot so101 --port /dev/ttyACM0 --camera top=/dev/video0 \
+    --api-base http://<coordinator-host>:8900
+
+# 4. Back on the control host: assign a session, then stop it when done.
+interlatent node ls
+interlatent session start --node arm0 --gpu gpu0 --policy lerobot/smolvla_base \
+    --task "pick up the cube"
+interlatent session stop <session-id>     # node winds down; dataset is published
+interlatent down                           # refuses while a session is active (use --force)
+```
+
+`session stop` **unassigns** the session — the node closes the DRTC session gracefully,
+which is what makes the GPU box build and publish the episode. The coordinator is only a
+control plane: the inference link is direct node↔GPU and keeps running even if the
+coordinator is down (`interlatent down` therefore guards against orphaning a moving robot).
+See [ADR-0001](adr/0001-offline-coordinator-control-plane.md).
+
+### Recording destinations
+
+When a node session records, the **GPU box** builds a LeRobot v3 dataset at session close and
+publishes it. The destination is configured on the coordinator and passed to the server
+per-session (so you don't set it on `interlatent-serve`):
+
+| `interlatent up …` | Result |
+|---|---|
+| `--output-dir /data/run` | one flat LeRobot dataset on the GPU box's disk, **merged across sessions** |
+| `--s3-uri s3://bucket/prefix [--s3-endpoint-url … --s3-access-key … --s3-secret-key …]` | same, uploaded to S3 / R2 / MinIO (needs `interlatent-server[s3]` on the GPU box) |
+| _(neither)_ | inference-only; sessions are **not** recorded (`session start` warns) |
+
+Merge-on-stop appends each session into one training-ready dataset via lerobot's
+`aggregate_datasets`; point one destination at one robot/policy collection. A local
+`--output-dir` lands on the **GPU box's** filesystem (recording is server-side) — with
+everything on one machine that's the same disk; for a remote GPU box use `--s3-uri`. See
+[ADR-0002](adr/0002-recording-destination-via-session-metadata.md).
+
 ## Ports
 
 | Port | What | Expose to |
 |---|---|---|
 | 50051 | gRPC inference (DRTC) | your robots |
 | 50052 | WebSocket teleop relay (DAgger takeover) | your operator laptops/browsers |
+| 8900 | coordinator control plane (`interlatent up`) | your robot nodes + control host |
 
 ## Networking
+
+You supply the address the robot uses to reach the server — any reachable `host:port` works
+(LAN IP, tailnet `100.x`, public DNS, a tunnel URL); there's no lock-in to a particular
+method, and the gRPC vs gRPC-web transport is inferred from the address (an `https://…` URL
+uses gRPC-web). On startup `interlatent-serve` **logs the addresses it's reachable at** (and
+`interlatent-node` logs its host addresses), so you can copy one straight into
+`interlatent gpu add <name> <addr>`.
+
+Each GPU registration also carries a **routing method** (`interlatent gpu add … --method`,
+default `direct` = dial the address as-is). This is a forward-looking seam: future methods
+(e.g. a NAT-traversal relay both sides dial out to, or MagicDNS resolution) register a
+resolver + connector in `interlatent/routing.py` without changing the coordinator or node —
+see that module's docstring.
 
 - **Same machine / LAN:** point the client at `host:50051`. Done.
 - **Tailscale (recommended for remote GPUs):** join both ends to the tailnet, use the

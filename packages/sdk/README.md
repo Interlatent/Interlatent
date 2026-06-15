@@ -11,9 +11,14 @@ What's in this package:
    [`interlatent-server`](../server) box (no account needed) or Interlatent Cloud
    (`api_key=`).
 2. **Robot node daemon** (`interlatent-node`) — a long-running daemon for always-on robots,
-   with camera capture and DAgger keyboard takeover (uses Interlatent Cloud for session
-   assignment).
-3. **Collection** — `watch()` / `tick()` / `collect()` record per-step observations,
+   with camera capture and DAgger keyboard takeover. Gets its sessions from a coordinator —
+   your own (below) or Interlatent Cloud.
+3. **Coordinator + CLI** (`interlatent`) — a local control plane for running node sessions
+   with **no dashboard**: `interlatent up` starts it, `interlatent gpu add` /
+   `interlatent session start` register GPU boxes and drive sessions, and recorded episodes
+   land in a local dir or S3 bucket. See [self-hosting.md](../../docs/self-hosting.md) and
+   [examples/07](../../examples/07_offline_no_dashboard.md).
+4. **Collection** — `watch()` / `tick()` / `collect()` record per-step observations,
    actions, rewards, and metrics into a local SQLite staging cache; build a local LeRobot
    v3.0 dataset from it, or `upload()` it to a hosted environment.
 
