@@ -44,6 +44,24 @@ DEFAULT_STATE_PATH = Path(
 _LIVE_WINDOW_S = 30.0
 
 
+class PolicyChangeError(Exception):
+    """Raised when a session would switch a GPU box's onboard policy.
+
+    A GPU box pre-warms (loads + torch.compiles) one policy; running a
+    *different* one recompiles (slow) and loads alongside the warm policy
+    (possible OOM). We refuse unless the caller explicitly confirms.
+    """
+
+    def __init__(self, gpu: str, warm: str, requested: str) -> None:
+        super().__init__(
+            f"gpu {gpu} is warmed for {warm}; switching to {requested} recompiles "
+            f"(slow) and may OOM. Confirm to change the onboard policy."
+        )
+        self.gpu = gpu
+        self.warm = warm
+        self.requested = requested
+
+
 class Coordinator:
     """In-memory control-plane state with atomic JSON persistence.
 
@@ -134,13 +152,17 @@ class Coordinator:
     # Admin API
     # ------------------------------------------------------------------
 
-    def add_gpu(self, name: str, url: str, method: str = "direct") -> dict:
+    def add_gpu(self, name: str, url: str, method: str = "direct", warm_policy: str = "") -> dict:
         if method not in routing.known_methods():
             raise ValueError(
                 f"unknown routing method {method!r}; known: {routing.known_methods()}"
             )
         with self._lock:
-            gpu = {"name": name, "url": url, "method": method}
+            # ``warm_policy`` tracks the box's onboard (compiled) policy. Seeded
+            # from the operator's DRTC_WARMUP_POLICY here; updated on a confirmed
+            # policy switch. Empty = unknown, so the switch guard stays off until
+            # the first session establishes it.
+            gpu = {"name": name, "url": url, "method": method, "warm_policy": warm_policy}
             self._state["gpus"][name] = gpu
             self._persist()
         return gpu
@@ -219,6 +241,14 @@ class Coordinator:
             gpu = self._state["gpus"].get(gpu_name)
             if gpu is None:
                 raise ValueError(f"unknown gpu {gpu_name!r} (register with `interlatent gpu add`)")
+            # Onboard-policy guard: a matching policy reuses the box's compiled
+            # runtime (instant); a mismatch recompiles + may OOM, so refuse
+            # unless the caller confirmed. ``warm_policy`` empty = unknown, so
+            # the first session just records the policy without prompting.
+            warm = (gpu.get("warm_policy") or "").strip()
+            requested = params["policy"]
+            if warm and requested != warm and not params.get("confirm_policy_change"):
+                raise PolicyChangeError(gpu_name, warm, requested)
             env_slug = params.get("env_slug") or "default"
             task = params.get("task") or env_slug
             fps = float(params.get("fps") or 30.0)
@@ -245,6 +275,11 @@ class Coordinator:
                 "gpu": gpu_name,
             }
             self._state["sessions"][node_id] = session
+            # Track the (now) onboard policy so the next session for it is the
+            # fast path and a later switch prompts again. Covers both a confirmed
+            # switch and the first-session establish-from-unknown case.
+            if requested and requested != warm:
+                gpu["warm_policy"] = requested
             self._persist()
             self._cond.notify_all()
         _LOG.info("Started session %s on node %s (gpu=%s policy=%s)",
@@ -372,9 +407,10 @@ class _Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/v1/inference/sessions/") and path.endswith("/teleop-token"):
                 return self._send(404, {"error": "teleop disabled (offline coordinator)"})
             if path == "/admin/gpus":
-                return self._send(
-                    200, c.add_gpu(body["name"], body["url"], body.get("method", "direct"))
-                )
+                return self._send(200, c.add_gpu(
+                    body["name"], body["url"],
+                    body.get("method", "direct"), body.get("warm_policy", ""),
+                ))
             if path == "/admin/destination":
                 c.set_destination(body.get("recording") or {})
                 return self._send(200, {"recording": c.get_destination()})
@@ -432,6 +468,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "policy is required"})
         try:
             session = c.start_session(node_id, gpu_name, body)
+        except PolicyChangeError as e:
+            return self._send(409, {
+                "error": str(e),
+                "needs_policy_confirm": True,
+                "warm_policy": e.warm,
+                "requested": e.requested,
+            })
         except ValueError as e:
             return self._send(409, {"error": str(e)})
         warn = None

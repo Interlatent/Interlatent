@@ -63,7 +63,10 @@ interlatent-serve --policy lerobot/smolvla_base
 # 2. On your laptop/control host: start the coordinator and tell it where to
 #    save recorded episodes (local dir here; or --s3-uri for S3/R2/MinIO).
 interlatent up --port 8900 --output-dir /data/so101-kitchen
-interlatent gpu add gpu0 100.x.y.z:50051          # the GPU box (LAN/tailnet URL)
+# Register the GPU box. --warm-policy tells the coordinator which policy the box
+# is pre-warmed for (its DRTC_WARMUP_POLICY), so it can keep sessions on the fast
+# (already-compiled) path and warn before an expensive policy switch.
+interlatent gpu add gpu0 100.x.y.z:50051 --warm-policy lerobot/smolvla_base
 
 # 3. On the robot (Pi): pair the node at the coordinator (no key required).
 interlatent-node pair --name arm0 --api-base http://<coordinator-host>:8900
@@ -77,6 +80,14 @@ interlatent session start --node arm0 --gpu gpu0 --policy lerobot/smolvla_base \
 interlatent session stop <session-id>     # node winds down; dataset is published
 interlatent down                           # refuses while a session is active (use --force)
 ```
+
+**Onboard policy.** A GPU box pre-warms (loads + `torch.compile`s) one policy; running that
+policy is instant, but switching to a different one recompiles (slow) and loads alongside the
+warm one (possible OOM). The coordinator tracks the box's onboard policy (seeded by
+`gpu add --warm-policy`, updated on each confirmed switch): `session start --policy X` runs
+silently when `X` matches, and **refuses a mismatch** unless you pass `--confirm-policy-change`
+(or answer the interactive prompt). Keep `gpu add --warm-policy` in sync with the box's
+`DRTC_WARMUP_POLICY`.
 
 `session stop` **unassigns** the session — the node closes the DRTC session gracefully,
 which is what makes the GPU box build and publish the episode. The coordinator is only a

@@ -74,6 +74,51 @@ def test_add_gpu_rejects_unknown_method(tmp_path):
     assert gpu["method"] == "direct"
 
 
+def test_onboard_policy_guard(tmp_path):
+    from interlatent.coordinator.server import PolicyChangeError
+
+    c = _coord(tmp_path)
+    node = c.pair("arm0")["id"]
+    c.add_gpu("gpu0", "127.0.0.1:50051", warm_policy="lerobot/smolvla_base")
+    assert c.list_gpus()[0]["warm_policy"] == "lerobot/smolvla_base"
+
+    # Matching policy -> proceeds (fast path, reuses the compiled runtime).
+    s1 = c.start_session(node, "gpu0", {"policy": "lerobot/smolvla_base"})
+    assert s1["policy_uri"] == "lerobot/smolvla_base"
+    c.stop_session(s1["id"])
+
+    # Mismatch without confirm -> refused; onboard policy unchanged.
+    with pytest.raises(PolicyChangeError):
+        c.start_session(node, "gpu0", {"policy": "lerobot/act_xyz"})
+    assert c.list_gpus()[0]["warm_policy"] == "lerobot/smolvla_base"
+
+    # Mismatch WITH confirm -> proceeds and updates the onboard policy.
+    s2 = c.start_session(
+        node, "gpu0", {"policy": "lerobot/act_xyz", "confirm_policy_change": True}
+    )
+    assert s2["policy_uri"] == "lerobot/act_xyz"
+    assert c.list_gpus()[0]["warm_policy"] == "lerobot/act_xyz"
+    c.stop_session(s2["id"])
+
+    # act_xyz is now the onboard policy -> matches, no confirm needed.
+    s3 = c.start_session(node, "gpu0", {"policy": "lerobot/act_xyz"})
+    assert s3["policy_uri"] == "lerobot/act_xyz"
+
+
+def test_unknown_onboard_policy_is_recorded_on_first_session(tmp_path):
+    from interlatent.coordinator.server import PolicyChangeError
+
+    c = _coord(tmp_path)
+    node = c.pair("arm0")["id"]
+    c.add_gpu("gpu0", "127.0.0.1:50051")  # no warm policy -> guard off initially
+    s = c.start_session(node, "gpu0", {"policy": "lerobot/smolvla_base"})
+    c.stop_session(s["id"])
+    # First session established the onboard policy; a different one now prompts.
+    assert c.list_gpus()[0]["warm_policy"] == "lerobot/smolvla_base"
+    with pytest.raises(PolicyChangeError):
+        c.start_session(node, "gpu0", {"policy": "other"})
+
+
 def test_recording_destination_injected(tmp_path):
     c = _coord(tmp_path)
     node = c.pair("arm0")["id"]
@@ -163,6 +208,39 @@ def test_http_roundtrip(tmp_path):
         assert len(client.list_sessions()) == 1
         client.stop_session(sid)
         assert client.list_sessions() == []
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        gpu_sock.close()
+
+
+def test_http_policy_change_requires_confirm(tmp_path):
+    gpu_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    gpu_sock.bind(("127.0.0.1", 0))
+    gpu_sock.listen()
+    gpu_port = gpu_sock.getsockname()[1]
+
+    _Handler.coordinator = Coordinator(tmp_path / "state.json")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        client = CoordinatorClient(f"http://127.0.0.1:{port}")
+        client._req("POST", "/api/v1/nodes", {"name": "arm0"})
+        client.add_gpu("gpu0", f"127.0.0.1:{gpu_port}", warm_policy="lerobot/smolvla_base")
+
+        # Mismatch without confirm -> structured 409 the CLI can prompt on.
+        with pytest.raises(CoordinatorError) as ei:
+            client.start_session({"node": "arm0", "gpu": "gpu0", "policy": "lerobot/act_xyz"})
+        assert ei.value.payload.get("needs_policy_confirm") is True
+        assert ei.value.payload.get("warm_policy") == "lerobot/smolvla_base"
+
+        # With confirm -> succeeds.
+        resp = client.start_session({
+            "node": "arm0", "gpu": "gpu0", "policy": "lerobot/act_xyz",
+            "confirm_policy_change": True,
+        })
+        assert resp["session"]["policy_uri"] == "lerobot/act_xyz"
     finally:
         srv.shutdown()
         srv.server_close()

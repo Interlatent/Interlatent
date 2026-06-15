@@ -9,7 +9,9 @@ from typing import Any, Optional
 
 
 class CoordinatorError(RuntimeError):
-    pass
+    def __init__(self, message: str, payload: Optional[dict] = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
 
 
 class CoordinatorClient:
@@ -26,12 +28,12 @@ class CoordinatorClient:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
-            detail = ""
+            body: dict = {}
             try:
-                detail = json.loads(e.read() or b"{}").get("error", "")
+                body = json.loads(e.read() or b"{}")
             except Exception:
                 pass
-            raise CoordinatorError(detail or f"HTTP {e.code} {e.reason}")
+            raise CoordinatorError(body.get("error") or f"HTTP {e.code} {e.reason}", payload=body)
         except urllib.error.URLError as e:
             raise CoordinatorError(f"cannot reach coordinator at {self.base} ({e.reason})")
 
@@ -39,8 +41,10 @@ class CoordinatorClient:
     def list_gpus(self) -> list[dict]:
         return self._req("GET", "/admin/gpus")["gpus"]
 
-    def add_gpu(self, name: str, url: str, method: str = "direct") -> dict:
-        return self._req("POST", "/admin/gpus", {"name": name, "url": url, "method": method})
+    def add_gpu(self, name: str, url: str, method: str = "direct", warm_policy: str = "") -> dict:
+        return self._req("POST", "/admin/gpus", {
+            "name": name, "url": url, "method": method, "warm_policy": warm_policy,
+        })
 
     def remove_gpu(self, name: str) -> None:
         self._req("DELETE", f"/admin/gpus/{name}")

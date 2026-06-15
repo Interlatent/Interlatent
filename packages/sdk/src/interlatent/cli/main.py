@@ -191,8 +191,13 @@ def cmd_logs(args: argparse.Namespace) -> int:
 def cmd_gpu(args: argparse.Namespace) -> int:
     client = _client_or_exit()
     if args.gpu_cmd == "add":
-        client.add_gpu(args.name, args.url, args.method)
-        suffix = "" if args.method == "direct" else f" (method={args.method})"
+        client.add_gpu(args.name, args.url, args.method, args.warm_policy)
+        bits = []
+        if args.method != "direct":
+            bits.append(f"method={args.method}")
+        if args.warm_policy:
+            bits.append(f"warm={args.warm_policy}")
+        suffix = f"  ({', '.join(bits)})" if bits else ""
         print(f"✓ Registered gpu {args.name} -> {args.url}{suffix}")
     elif args.gpu_cmd == "rm":
         client.remove_gpu(args.name)
@@ -203,7 +208,12 @@ def cmd_gpu(args: argparse.Namespace) -> int:
             print("(no gpus registered)")
         for g in gpus:
             method = g.get("method", "direct")
-            suffix = "" if method == "direct" else f"  [{method}]"
+            bits = []
+            if method != "direct":
+                bits.append(method)
+            if g.get("warm_policy"):
+                bits.append(f"warm={g['warm_policy']}")
+            suffix = f"  [{', '.join(bits)}]" if bits else ""
             print(f"{g['name']:20}  {g['url']}{suffix}")
     return 0
 
@@ -236,6 +246,7 @@ def cmd_session(args: argparse.Namespace) -> int:
             "node": args.node, "gpu": args.gpu, "policy": args.policy,
             "backend": args.backend, "task": args.task, "env_slug": args.env_slug,
             "no_probe": args.no_probe,
+            "confirm_policy_change": args.confirm_policy_change,
         }
         for key, val in (("fps", args.fps), ("chunk_size", args.chunk_size),
                          ("action_dim", args.action_dim)):
@@ -244,8 +255,26 @@ def cmd_session(args: argparse.Namespace) -> int:
         try:
             resp = client.start_session(params)
         except CoordinatorError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 1
+            # A mismatched onboard policy needs explicit confirmation. Prompt on
+            # a TTY; otherwise tell the user to pass --confirm-policy-change.
+            if e.payload.get("needs_policy_confirm") and not args.confirm_policy_change:
+                print(f"warning: {e}", file=sys.stderr)
+                if sys.stdin.isatty() and input(
+                    "Change the onboard policy? [y/N] "
+                ).strip().lower() in ("y", "yes"):
+                    params["confirm_policy_change"] = True
+                    try:
+                        resp = client.start_session(params)
+                    except CoordinatorError as e2:
+                        print(f"error: {e2}", file=sys.stderr)
+                        return 1
+                else:
+                    print("aborted — re-run with --confirm-policy-change to proceed.",
+                          file=sys.stderr)
+                    return 1
+            else:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
         sess = resp["session"]
         print(f"✓ Started session {sess['id']} on node {sess.get('node_id')} "
               f"(gpu={sess.get('gpu')}, policy={sess['policy_uri']})")
@@ -339,6 +368,10 @@ def build_parser() -> argparse.ArgumentParser:
     g_add.add_argument("--method", default="direct",
                        help="Routing method (default: direct = dial the address as-is). "
                        "Future methods (relay/tunnel) plug in here.")
+    g_add.add_argument("--warm-policy", default="",
+                       help="Policy this box is pre-warmed for (its DRTC_WARMUP_POLICY). "
+                       "Sessions requesting it start instantly; a different policy needs "
+                       "--confirm-policy-change at `session start`.")
     gpu_sub.add_parser("ls", help="List GPU boxes.")
     g_rm = gpu_sub.add_parser("rm", help="Forget a GPU box.")
     g_rm.add_argument("name")
@@ -365,6 +398,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_start.add_argument("--action-dim", type=int, default=None)
     s_start.add_argument("--no-probe", action="store_true",
                          help="Skip the GPU reachability probe.")
+    s_start.add_argument("--confirm-policy-change", action="store_true",
+                         help="Allow switching the GPU box's onboard policy (recompiles, "
+                         "may OOM). Required when --policy differs from the box's warm policy.")
     s_stop = sess_sub.add_parser("stop", help="Stop (unassign) a session.")
     s_stop.add_argument("session_id")
     sess_sub.add_parser("ls", help="List active sessions.")

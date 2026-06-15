@@ -26,6 +26,7 @@ dependencies = [
   "httpx",
   # DRTC client: gRPC + gRPC-Web (for the hosted Modal endpoint).
   "grpcio>=1.60",
+  "grpcio-tools>=1.60",
   "protobuf>=4.25",
   "sonora>=0.2.2",
   # Teleop relay channel on the node uses websockets.sync.client to
