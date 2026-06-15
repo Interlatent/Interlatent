@@ -21,6 +21,8 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent.node",                    # interlatent-node
         "interlatent.inference.integration",   # interlatent-rollout
         "interlatent.storage",
+        "interlatent.cli",                     # interlatent
+        "interlatent.coordinator",             # coordinator daemon (interlatent up)
     ):
         assert needed in pkgs, f"{needed} missing from sdk wheel (no __init__.py?)"
 

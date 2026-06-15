@@ -10,3 +10,4 @@ Ordered by how much hardware you need — start at 01 with nothing but a laptop.
 | 04 | [`04_teleop_record.md`](04_teleop_record.md) — teleoperate from your laptop (keyboard or hand tracking), record demonstrations | SO-101 + Pi (mock driver available) |
 | 05 | [`05_collect_dataset.py`](05_collect_dataset.py) — collect a LeRobot v3.0 dataset locally from any gym env | nothing |
 | 06 | [`06_connect_hosted.py`](06_connect_hosted.py) — the one-argument upgrade to Interlatent Cloud | an API key |
+| 07 | [`07_offline_no_dashboard.md`](07_offline_no_dashboard.md) — run node sessions + record datasets with the local coordinator, no account | GPU server + node (mock OK) |

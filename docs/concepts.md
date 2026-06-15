@@ -55,16 +55,31 @@ metadata, the lingua franca of open robot learning. Two recording paths:
   `LeRobotRebuilder` emits the dataset on your disk.
 - **Server-side** (`RecordTick` RPC): the GPU box persists each control tick — including
   whether it was policy or human teleop — and builds the dataset at session close. This is
-  how DAgger-style takeover data gets captured without the robot staging anything.
+  how DAgger-style takeover data gets captured without the robot staging anything. The
+  finished dataset is published to a **destination**: the hosted inbox (Cloud), a local
+  directory, or an S3-compatible bucket. The local/S3 destinations *merge-on-stop* — each
+  session is appended into one flat, training-ready LeRobot dataset, no account required.
 
 ## The node
 
 `interlatent-node` is a long-running daemon for robots that should be remotely operable: it
-pairs the machine to a dashboard account, heartbeats, and converges to whatever inference
-session is assigned to it (policy, cameras, DAgger keyboard takeover). The node is the
-managed counterpart of hand-writing the `connect_drtc()` loop — it requires Interlatent
-Cloud for session assignment, while the loop in
+pairs the machine to a **coordinator** (your own, or Interlatent Cloud), heartbeats, and
+converges to whatever inference session is assigned to it (policy, cameras, DAgger keyboard
+takeover). The node is the managed counterpart of hand-writing the `connect_drtc()` loop —
+it needs a coordinator for session assignment, while the loop in
 [examples/03](../examples/03_run_on_so101.py) is fully self-contained.
+
+## The coordinator
+
+The **coordinator** is the control plane that assigns sessions to nodes. It is the
+self-hosted, offline replacement for Interlatent Cloud's session assignment: `interlatent up`
+runs a small local HTTP service that speaks the same API the node polls, and
+`interlatent gpu add` / `interlatent session start` register GPU boxes and drive sessions —
+no account, no dashboard. Stopping a session **unassigns** it; the node then closes the DRTC
+session, which is what triggers the server to build and publish the recorded dataset. The
+coordinator is *only* a control plane — the inference link is direct node↔GPU and keeps
+running even if the coordinator goes down. See [self-hosting.md](self-hosting.md) and
+[ADR-0001](adr/0001-offline-coordinator-control-plane.md).
 
 ## Teleoperation
 

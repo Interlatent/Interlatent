@@ -52,8 +52,12 @@ lerobot = [
 # server — no robot needed.
 interlatent-rollout = "interlatent.inference.integration.rollout:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
-# whatever inference session the dashboard has assigned to the Node.
+# whatever inference session the dashboard (or local coordinator) has
+# assigned to the Node.
 interlatent-node = "interlatent.node.cli:main"
+# Local coordinator + admin CLI: run VLA inference sessions fully offline
+# (no hosted dashboard). `interlatent up`, `gpu add`, `session start`, ...
+interlatent = "interlatent.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"

@@ -48,6 +48,7 @@ from .chunk_buffer import ChunkBuffer, InMemoryChunkBuffer, StoredChunk
 from .policy_runtime import PolicyRuntime, decode_payload
 from .recorder import RecorderConfig, SessionRecorder
 from .schedule import reconstruct
+from .sinks import BackendInboxSink, DatasetSink, sink_from_metadata
 
 log = logging.getLogger(__name__)
 
@@ -111,8 +112,15 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
         recorder_base_dir: Optional[Path] = None,
         inference_executor: Optional[Executor] = None,
+        dataset_sink: Optional[DatasetSink] = None,
     ) -> None:
         self._buf = chunk_buffer or InMemoryChunkBuffer()
+        # Default publish destination when a session's OpenSession metadata
+        # doesn't specify one. None falls back to the hosted inbox at
+        # recording time. interlatent-serve sets this from --output-dir/--s3-*
+        # for standalone (no-coordinator) use; the coordinator path overrides
+        # it per-session via metadata. See ADR-0002.
+        self._default_sink = dataset_sink
         self._sessions: dict[str, SessionState] = {}
         self._next_step: dict[str, int] = {}
         self._context_steps = context_steps
@@ -369,23 +377,29 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         metadata: dict[str, str],
         context,
     ) -> Optional[SessionRecorder]:
-        """Return a recorder iff metadata opts in AND auth is present.
+        """Return a recorder iff metadata opts in (and, for the inbox, auth).
 
-        Recording requires an API key (used for the post-rollout HTTP
-        upload back to the Interlatent backend). When the gRPC client
-        somehow reached us without ``x-api-key`` — i.e. when local-dev
-        is running without the auth wrapper — we silently disable
-        recording rather than crash inference.
+        The publish destination is resolved per-session: ``OpenSession``
+        metadata (coordinator-configured) → the serve-level default sink
+        (``--output-dir``/``--s3-*``) → the hosted inbox. Only the inbox
+        needs an ``x-api-key``; Local/S3 sinks record without one (offline
+        operation). See ADR-0002.
         """
         if not _truthy(metadata.get("record")):
             return None
 
+        # Destination precedence: session metadata > serve default > inbox.
+        sink: DatasetSink = (
+            sink_from_metadata(metadata) or self._default_sink or BackendInboxSink()
+        )
+
         api_key = _api_key_from_context(context)
-        if not api_key:
+        if sink.requires_api_key() and not api_key:
             log.warning(
-                "Session %s requested recording but no x-api-key present; "
-                "disabling recorder. Pass the key via gRPC metadata so the "
-                "recorder can authenticate the inbox upload.",
+                "Session %s requested recording to the hosted inbox but no "
+                "x-api-key present; disabling recorder. Pass the key via gRPC "
+                "metadata, or configure a local/S3 destination (output_dir / "
+                "s3_uri) for offline recording.",
                 session_id,
             )
             return None
@@ -422,6 +436,7 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             layer=layer,
             api_key=api_key,
             api_base=metadata.get("api_base") or _DEFAULT_API_BASE,
+            sink=sink,
         )
         return SessionRecorder(working_dir, config)
 

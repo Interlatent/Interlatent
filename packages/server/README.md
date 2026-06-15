@@ -76,5 +76,24 @@ Interlatent Cloud keys for internet-exposed deployments.
 | `interlatent-server` | protocol + test backends (CPU-only OK) |
 | `interlatent-server[lerobot]` | torch + lerobot — real policies |
 | `interlatent-server[recording]` | pyarrow — server-side episode recording to LeRobot datasets |
+| `interlatent-server[s3]` | boto3 — upload recorded datasets to an S3-compatible bucket |
+
+## Recording episodes
+
+When a session opts into recording (the [node](../sdk) and DRTC client do this
+automatically), the server captures every control tick and, at `CloseSession`, builds a
+LeRobot v3 dataset and **publishes it to a destination**:
+
+| Destination | How to set it |
+|---|---|
+| Hosted inbox (default) | requires an Interlatent API key; the backend merges episodes into the environment's dataset |
+| Local directory | `interlatent-serve --output-dir /data/run` (or `INTERLATENT_OUTPUT_DIR`) — no account needed |
+| S3-compatible bucket | `interlatent-serve --s3-uri s3://bucket/prefix [--s3-endpoint-url … --s3-access-key … --s3-secret-key … --s3-region …]` (AWS / R2 / MinIO) |
+
+Local and S3 destinations **merge-on-stop**: each session is appended into one flat,
+training-ready LeRobot dataset (via lerobot's `aggregate_datasets`). Point one destination
+at one robot/policy collection. When driven by the [coordinator](../sdk) the destination is
+configured there and passed per-session, so you don't set it on `interlatent-serve` at all —
+see [docs/self-hosting.md](../../docs/self-hosting.md).
 
 Apache-2.0. Part of [interlatent/interlatent](https://github.com/interlatent/interlatent).
