@@ -119,6 +119,9 @@ docker run -d --name drtc --gpus all \
 | `TS_HOSTNAME`        | `interlatent-drtc`   | Tailnet hostname for this container. |
 | `TS_EXTRA_ARGS`      | *(empty)*            | Extra flags forwarded to `tailscale up` (e.g. `--advertise-tags=tag:gpu --ssh`). |
 | `TS_STATE_DIR`       | `/var/lib/tailscale` | Where tailscaled persists state. Mount a volume here to avoid re-auth on restart. |
+| `INTERLATENT_API_KEY` | *(unset)*           | Your Interlatent API key. When set, the box self-registers with the hosted dashboard and reports status. Unset = no outbound calls. See [Make a personal box discoverable](../docs/self-hosting.md#make-a-personal-box-discoverable-in-the-dashboard). |
+| `INTERLATENT_ADVERTISE_ADDRESS` | *(detected)* | `host:port` robots dial to reach this box, reported to the dashboard. **Set this** behind NAT — e.g. your tailnet `100.x:50051` or `$TS_HOSTNAME:50051`. |
+| `INTERLATENT_BOX_ID` | *(persisted)*        | Pins the box's dashboard identity. Otherwise a UUID is minted once at `~/.interlatent/box-id`; **mount `/root/.interlatent` on a volume** (or set this) so a restart re-attaches to the same box instead of creating a new one. |
 
 You can still pass CLI flags directly — anything after the image name
 is forwarded to `interlatent-serve`:
