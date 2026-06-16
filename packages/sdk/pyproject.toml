@@ -72,3 +72,32 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["interlatent*"]
+
+# ---------------------------------------------------------------------------
+# CPU-only torch wheels.
+#
+# The default PyPI `torch` wheel bundles the full NVIDIA CUDA stack
+# (nvidia-cuda-runtime, cudnn, cublas, nvjitlink, ... — several GB) on Linux
+# x86_64, even on a machine with no GPU. This SDK is the robot-/edge-side
+# package: it uses torch only for CPU-side work — tensor marshalling and
+# `isinstance(model, torch.nn.Module)` framework detection in
+# interlatent._client — and never calls `.cuda()` / moves data to a GPU. GPU
+# inference runs server-side over DRTC (your interlatent-server box or
+# Interlatent Cloud), not here. So we pin torch (and torchvision, pulled in by
+# the [lerobot] extra) to PyTorch's CPU wheel index.
+#
+# This block is honoured by `uv` (uv pip install / uv sync). Plain pip does
+# not read index config from pyproject.toml — see the README "Install" section
+# for the equivalent `--index-url https://download.pytorch.org/whl/cpu` command.
+#
+# Note: lerobot ships this same [tool.uv.sources] mechanism but pins to the
+# *CUDA* (cu128) index; the override below keeps SDK installs on the CPU index.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]

@@ -32,15 +32,42 @@ For inference quickstarts see the [repo README](../../README.md) and
 
 ## Install
 
+The SDK runs robot-/edge-side and uses torch only for CPU-side work (tensor
+marshalling and model type detection) — it never touches CUDA. **Only CPU torch
+wheels are installed**, so installs stay small and don't drag in the multi-GB
+NVIDIA CUDA stack that the default PyPI `torch` ships on Linux. GPU inference
+runs server-side (your `interlatent-server` box or Interlatent Cloud), not here.
+
+**With uv** (recommended) — the CPU wheel index is pinned in `pyproject.toml`,
+so a normal install already resolves CPU-only torch:
+
 ```bash
+uv pip install interlatent
+```
+
+**With pip** — pip can't read the index pin from package metadata, so install
+CPU torch first, then the SDK (already-satisfied torch won't be replaced):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install interlatent
 ```
 
 Optional extras for environment integrations:
 
 ```bash
+# uv: torchvision is pinned to the CPU index too, so this stays CPU-only
+uv pip install 'interlatent[lerobot]'
+
+# pip: install CPU torch + torchvision first, then the extra
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install 'interlatent[lerobot]'    # LeRobot (adds huggingface_hub for checkpoint naming)
 ```
+
+> **Note:** `lerobot` pins torch/torchvision to a CUDA wheel index in its own
+> packaging. With uv, the SDK's `[tool.uv.sources]` override keeps them on the
+> CPU index. With pip, installing CPU torch/torchvision first (as above) keeps
+> the CUDA build from replacing it.
 
 **Requirements:** Python >= 3.11
 
