@@ -11,10 +11,17 @@
 | VQ-BeT | `lerobot` | ✅ | |
 | TDMPC | `lerobot` | ✅ | |
 | MolmoAct2 (released checkpoints) | `molmoact2` | ✅ | auto-routed; needs camera `image_keys` session metadata |
+| SpatialVLA (`IPEC-COMMUNITY/spatialvla-*`) | `spatialvla` | 🧪 | Shanghai AI Lab, MIT; transformers-native, auto-routed; image+instruction → 7-DoF chunk (no proprio). GPU-only, untested in CI |
+| RDT-1B (`robotics-diffusion-transformer/rdt-1b`) | `rdt` | 🧪 | Tsinghua THU-ML, MIT; diffusion, proprio-aware, 64-step chunk. Needs the RDT repo on `PYTHONPATH` + T5-XXL; `action_indices` metadata for the unified→robot DoF map. GPU-only, untested in CI |
 | Your fine-tune | `lerobot` | ✅ | any HF repo id or local checkpoint path |
 | Anything else | custom | 🔌 | `register_backend()` — see [CONTRIBUTING.md](../CONTRIBUTING.md) |
 
-If LeRobot's policy factory can load it, `interlatent-server` can serve it.
+If LeRobot's policy factory can load it, `interlatent-server` can serve it. Model families
+that live *outside* LeRobot (transformers-native or custom-repo VLAs) plug in as their own
+backend and are auto-routed from `policy_backend="lerobot"` by their checkpoint URI — see
+`molmoact2_backend` / `spatialvla_backend` / `rdt_backend` and the `register_router()` seam.
+🧪 = backend wired + unit-tested for routing/observation handling, but the real GPU
+inference path has not yet been validated on hardware.
 
 ## Robots (client side)
 

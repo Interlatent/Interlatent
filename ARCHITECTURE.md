@@ -53,9 +53,11 @@ Uploading to the hosted platform is a separate, optional step.
 |---|---|
 | `server/app.py` | `interlatent-serve` CLI — optional `--policy` pre-warm, then serve |
 | `server/transport.py` | gRPC servicer: sessions, streaming, recording hooks |
-| `server/policy_runtime.py` | Backend registry + process-wide `(backend, policy_uri)` cache — a policy is loaded/compiled once per process |
+| `server/policy_runtime.py` | Backend registry + router registry (`register_router` / `resolve_backend` — URI-based dispatch to transformers-native families) + process-wide `(backend, policy_uri)` cache — a policy is loaded/compiled once per process |
 | `server/lerobot_backend.py` | LeRobot policies (SmolVLA, ACT, Pi0, Diffusion, VQ-BeT, TDMPC) with RTC + torch.compile |
 | `server/molmoact2_backend.py` | MolmoAct2 (transformers-native), routed transparently |
+| `server/spatialvla_backend.py` | SpatialVLA (Shanghai AI Lab, transformers-native); image+instruction → action chunk |
+| `server/rdt_backend.py` | RDT-1B (Tsinghua, diffusion, proprio-aware) via the upstream `create_model` API |
 | `server/chunk_buffer.py`, `server/schedule.py` | Per-session chunk storage + RTC in-painting reconstruction |
 | `server/recorder.py` | Optional server-side episode recording → LeRobot dataset (`storage/lerobot_rebuild.py`) |
 | `server/teleop_relay.py` | WebSocket relay (`:50052`) pairing browser/laptop operators with robot sessions for DAgger |
