@@ -113,6 +113,7 @@ docker run -d --name drtc --gpus all \
 |----------------------|----------------------|---------|
 | `DRTC_PORT`          | `50051`              | Port the gRPC server listens on. |
 | `DRTC_HOST`          | `0.0.0.0`            | Bind host. |
+| `DRTC_COMPILE_MODE`  | `default`            | `torch.compile` mode. **Must not enable CUDA graphs** — `reduce-overhead` / `max-autotune` crash flow-matching policies (SmolVLA/Pi0). Use `max-autotune-no-cudagraphs` on a box with a persistent cache for best latency. See troubleshooting below. |
 | `DRTC_WARMUP_POLICY` | *(unset)*            | HF repo / local path to load+compile at startup. |
 | `HF_TOKEN`           | *(unset)*            | HF token for private policies. Aliased to `HUGGING_FACE_HUB_TOKEN`. |
 | `TS_AUTHKEY`         | *(unset)*            | Tailscale auth key. When set, the container joins your tailnet on startup and exposes `DRTC_PORT` to tailnet peers. See [Tailscale integration](#tailscale-integration). |
@@ -308,6 +309,21 @@ The cache volume is empty or wasn't mounted. Confirm
 prints `Pre-warm complete`. Note this only affects VLA-class policies
 (SmolVLA, Pi0…) — ACT / Diffusion / VQ-BeT load in seconds and don't
 benefit much from warmup.
+
+**Every inference forward crashes with `RuntimeError: Offset increment
+outside graph capture encountered unexpectedly`.**
+A CUDA-graph + RNG incompatibility, not a config error. Flow-matching
+policies (SmolVLA, Pi0, Pi0.5) sample noise inside the compiled region;
+CUDA-graph capture modes (`reduce-overhead`, `max-autotune`) advance the
+Philox RNG offset outside capture and trip this at every forward. Fix:
+run with a non-cudagraph compile mode — set `DRTC_COMPILE_MODE=default`
+(or `max-autotune-no-cudagraphs` for best latency on a box with a
+persistent `/root/.cache`). On managed providers (RunPod, Vast, etc.)
+set it in the provider's **environment-variable** field — that overrides
+the image default; you don't need `docker run -e`. The image default is
+already `default`; this only bites images built before that change or
+pods that pinned a cudagraph mode. See
+[ADR-0004](../docs/adr/0004-no-cudagraphs-for-flow-matching.md).
 
 **"OSError: HEAD /api/models/... 401" during warmup.**
 The policy is private and `HF_TOKEN` wasn't passed.

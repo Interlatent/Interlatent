@@ -94,11 +94,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TRITON_CACHE_DIR=/root/.cache/triton \
     TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
     HF_HOME=/root/.cache/huggingface \
-    # Default torch.compile mode. reduce-overhead trades ~5% inference
-    # speed for ~10x faster cold compile (~60s vs ~20min on a 4090).
-    # Override at runtime with -e DRTC_COMPILE_MODE=max-autotune to
-    # squeeze the last bit of perf out of long-lived boxes.
-    DRTC_COMPILE_MODE=reduce-overhead
+    # Default torch.compile mode. NOTE: must NOT enable CUDA graphs.
+    # `reduce-overhead` and `max-autotune` both capture CUDA graphs, which
+    # crash flow-matching policies (SmolVLA / Pi0 / Pi0.5) at every forward
+    # with "Offset increment outside graph capture encountered unexpectedly"
+    # — their noise sampling advances the Philox RNG offset inside the
+    # captured graph. See docs/adr/0004-no-cudagraphs-for-flow-matching.md.
+    # `default` gives inductor's kernel fusion without cudagraphs. On a box
+    # with a persistent /root/.cache volume, override at runtime with
+    # -e DRTC_COMPILE_MODE=max-autotune-no-cudagraphs for the best
+    # steady-state latency (slow first compile, then cached).
+    DRTC_COMPILE_MODE=default
 
 # --- system packages ----------------------------------------------------
 #
