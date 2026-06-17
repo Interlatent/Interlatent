@@ -61,13 +61,6 @@ These were surfaced in design and deliberately deferred (see the
 `deferred-gpu-server-hardening` project memory). None block the compile-mode fix,
 but each should be consciously ruled in or out of "stable":
 
-- [ ] **Camera-key / schema mismatch** — node `--camera` names that don't match
-  the policy's `input_features`. Today: a deep, unclear error. Accept for v1, or
-  add OpenSession validation first?
-- [ ] **MolmoAct2 two-session metadata divergence** — different `norm_tag` /
-  `image_keys` across sessions silently reuse the first session's config
-  (wrong-normalization correctness bug; `policy_runtime.py:256-281`). Block, or
-  document as a known limitation?
 - [ ] **Two nodes → one GPU** — no guard exists. At minimum *characterize* the
   failure (OOM? garbage output? works?) and document it.
 - [ ] **Policy switch on a warm box** — `PolicyChangeError` surfaces cleanly via
@@ -78,18 +71,3 @@ but each should be consciously ruled in or out of "stable":
 - [ ] Rebuilt image boots on the target provider(s) with `--gpus all`; healthcheck
   reaches `(healthy)`; Tailscale path works if used.
 
----
-
-## Already covered by CI — do not re-test manually
-
-`tests/` covers the control plane: coordinator assignment/state
-(`test_coordinator.py`), routing, sinks, chunk buffer, box_report, action
-schedule, safety gate, latency/cooldown, and the echo/tiny_torch loopback
-(`test_e2e_loopback.py`). The control plane is well-covered; the GPU-side serving
-path is not.
-
-## Highest-value durable addition
-
-A GPU-gated smoke test (`@pytest.mark.gpu`) that loads one small real policy
-(e.g. a fast deterministic ACT checkpoint) and runs a few forwards — so the
-compile path gets *some* CI signal instead of none.
