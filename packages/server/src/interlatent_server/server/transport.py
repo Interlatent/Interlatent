@@ -186,6 +186,24 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
     ) -> pb.OpenSessionResponse:
         self.ensure_gc_started()
 
+        # One session per box (container). The box is the trust boundary
+        # (ADR-0001) and a session can arrive without going through the
+        # coordinator, so the limit is enforced HERE, not only in the
+        # coordinator's start_session. A second concurrent session would hold
+        # a second compiled runtime resident (recompile + possible OOM) and
+        # would serialize behind the single inference worker anyway, so we
+        # refuse rather than queue. Lingering sessions are reclaimed by
+        # CloseSession / the idle-GC, so this never wedges the box for good.
+        if self._sessions:
+            import grpc
+
+            existing = next(iter(self._sessions))
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"box already serving session {existing}; one session per box. "
+                "Stop it before opening another.",
+            )
+
         session_id = str(uuid.uuid4())
         chunk_size = request.chunk_size or 32
         min_horizon = request.min_execution_horizon or max(chunk_size // 4, 1)

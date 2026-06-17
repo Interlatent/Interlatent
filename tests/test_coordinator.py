@@ -65,6 +65,27 @@ def test_session_lifecycle_and_busy_guard(tmp_path):
     assert c.list_sessions() == []
 
 
+def test_one_session_per_gpu_box(tmp_path):
+    # Distinct from the per-node busy guard above: a *second node* must not be
+    # able to open a session on a box that is already serving one.
+    c = _coord(tmp_path)
+    a = c.pair("armA")["id"]
+    b = c.pair("armB")["id"]
+    c.add_gpu("gpu0", "127.0.0.1:50051")
+
+    s = c.start_session(a, "gpu0", {"policy": "lerobot/smolvla_base"})
+
+    # Second node, same box -> refused (busy guard fires before the policy
+    # guard, so it triggers even for an identical policy).
+    with pytest.raises(ValueError, match="already serving"):
+        c.start_session(b, "gpu0", {"policy": "lerobot/smolvla_base"})
+
+    # Freeing the box lets the other node take it.
+    c.stop_session(s["id"])
+    s2 = c.start_session(b, "gpu0", {"policy": "lerobot/smolvla_base"})
+    assert s2["gpu"] == "gpu0"
+
+
 def test_add_gpu_rejects_unknown_method(tmp_path):
     c = _coord(tmp_path)
     with pytest.raises(ValueError):

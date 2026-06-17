@@ -241,6 +241,15 @@ class Coordinator:
             gpu = self._state["gpus"].get(gpu_name)
             if gpu is None:
                 raise ValueError(f"unknown gpu {gpu_name!r} (register with `interlatent gpu add`)")
+            # One session per GPU box: refuse if this box is already serving.
+            # The GPU server enforces this too (it's the trust boundary), but
+            # rejecting here gives a clean error before the node ever dials.
+            for other in self._state["sessions"].values():
+                if other and other.get("gpu") == gpu_name:
+                    raise ValueError(
+                        f"gpu {gpu_name!r} is already serving session "
+                        f"{other.get('id')}; one session per box. Stop it first."
+                    )
             # Onboard-policy guard: a matching policy reuses the box's compiled
             # runtime (instant); a mismatch recompiles + may OOM, so refuse
             # unless the caller confirmed. ``warm_policy`` empty = unknown, so
