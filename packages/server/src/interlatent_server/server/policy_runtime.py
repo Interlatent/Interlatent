@@ -68,6 +68,97 @@ def register_backend(name: str):
 
 
 # ----------------------------------------------------------------------
+# Backend routing
+# ----------------------------------------------------------------------
+#
+# Some model families are transformers-native or custom-repo policies the
+# generic "lerobot" loader can't decode, yet clients still open the session
+# with policy_backend="lerobot" (the wire contract is fixed). Each such
+# backend registers a *router*: (requested_backend, policy_uri) -> a
+# backend name to claim the URI, or None to decline. resolve_backend()
+# chains them so the transport never needs to know any family's detection
+# rule. See molmoact2_backend / spatialvla_backend / rdt_backend.
+
+_ROUTERS: list[Callable[[str, str], Optional[str]]] = []
+
+
+def register_router(fn: Callable[[str, str], Optional[str]]):
+    """Register a backend router (see _ROUTERS). Returns ``fn`` so it can
+    be used as a decorator."""
+    _ROUTERS.append(fn)
+    return fn
+
+
+def resolve_backend(backend: str, policy_uri: str) -> str:
+    """Route ``(backend, policy_uri)`` to a concrete backend name.
+
+    Consults every registered router in registration order; the first one
+    returning a different, truthy name wins. With no match the requested
+    backend is returned unchanged. A router that raises is treated as
+    "declined" — a detector that can't read a checkpoint must never break
+    OpenSession."""
+    for router in _ROUTERS:
+        try:
+            routed = router(backend, policy_uri)
+        except Exception:  # pragma: no cover - defensive
+            routed = None
+        if routed and routed != backend:
+            return routed
+    return backend
+
+
+def read_checkpoint_config_json(policy_uri: str) -> dict:
+    """Read just ``config.json`` from a checkpoint (local dir or HF repo).
+
+    Cheap on purpose: for HF repos we pull the single file, never the
+    multi-GB weights, so backend routing at OpenSession stays fast.
+    Returns ``{}`` on any failure (caller treats that as "can't tell")."""
+    import json
+    import os
+    import os.path as osp
+
+    try:
+        local = osp.join(osp.expanduser(policy_uri), "config.json")
+        if osp.isfile(local):
+            with open(local) as fh:
+                return json.load(fh)
+        from huggingface_hub import hf_hub_download
+
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HF_ACCESS_TOKEN")
+        path = hf_hub_download(policy_uri, "config.json", token=token)
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def as_action_chunk(x: Any, chunk_size: int = 0, action_dim: int = 0) -> np.ndarray:
+    """Coerce a backend's raw model output to a contiguous
+    ``(<=chunk_size, action_dim)`` float32 array.
+
+    Accepts torch tensors (duck-typed via ``.detach`` so this module never
+    imports torch), numpy arrays, or nested lists. Drops a leading batch
+    dim, promotes a single action vector to a length-1 chunk, truncates to
+    ``chunk_size``, and pads/truncates the last axis to ``action_dim`` when
+    those are given (0 = leave that axis as-is)."""
+    if hasattr(x, "detach"):  # torch.Tensor, without importing torch here
+        x = x.detach().to("cpu").float().numpy()
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]            # drop batch dim
+    if arr.ndim == 1:
+        arr = arr[None, :]      # single action -> length-1 chunk
+    if chunk_size and arr.shape[0] > chunk_size:
+        arr = arr[:chunk_size]
+    if action_dim and arr.shape[1] != action_dim:
+        if arr.shape[1] > action_dim:
+            arr = arr[:, :action_dim]
+        else:
+            arr = np.pad(arr, ((0, 0), (0, action_dim - arr.shape[1])))
+    return np.ascontiguousarray(arr.astype(np.float32))
+
+
+# ----------------------------------------------------------------------
 # Activation-hook seam (v2)
 # ----------------------------------------------------------------------
 

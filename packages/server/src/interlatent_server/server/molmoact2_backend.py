@@ -25,11 +25,14 @@ and runs the policy.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Optional
 
 from .lerobot_backend import LeRobotBackend
-from .policy_runtime import register_backend
+from .policy_runtime import (
+    read_checkpoint_config_json as _read_checkpoint_config_json,
+    register_backend,
+    register_router,
+)
 
 log = logging.getLogger(__name__)
 
@@ -37,31 +40,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Released-checkpoint detection + routing
 # ---------------------------------------------------------------------------
-def _read_checkpoint_config_json(policy_uri: str) -> dict:
-    """Read just ``config.json`` from a checkpoint (local dir or HF repo).
-
-    Cheap on purpose: for HF repos we pull the single file, never the
-    multi-GB weights, so format detection at OpenSession stays fast.
-    Returns ``{}`` on any failure (treated as "not molmoact2").
-    """
-    import json
-    import os.path as _osp
-
-    try:
-        local = _osp.join(_osp.expanduser(policy_uri), "config.json")
-        if _osp.isfile(local):
-            with open(local) as fh:
-                return json.load(fh)
-        from huggingface_hub import hf_hub_download
-
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HF_ACCESS_TOKEN")
-        path = hf_hub_download(policy_uri, "config.json", token=token)
-        with open(path) as fh:
-            return json.load(fh)
-    except Exception:
-        return {}
-
-
 def is_released_molmoact2(policy_uri: str) -> bool:
     """True for an AllenAI *released* MolmoAct2 checkpoint.
 
@@ -81,18 +59,28 @@ def is_released_molmoact2(policy_uri: str) -> bool:
     return cfg.get("model_type") == "molmoact2"
 
 
-def resolve_backend(backend: str, policy_uri: str) -> str:
-    """Transparently route released MolmoAct2 checkpoints to this backend.
+@register_router
+def _route_molmoact2(backend: str, policy_uri: str) -> Optional[str]:
+    """Route released MolmoAct2 checkpoints to the ``molmoact2`` backend.
 
     Callers ask for ``"lerobot"``; if the URI is a released MolmoAct2
-    checkpoint we swap in ``"molmoact2"``. Every other (backend, uri)
-    pair is returned unchanged. Keeping this here means neither the
-    transport nor the generic backend needs to know the detection rule —
-    they just call ``resolve_backend(...)`` before ``PolicyRuntime.load``.
+    checkpoint we claim it. Registered with policy_runtime so the transport
+    only ever calls the generic ``resolve_backend`` — it never needs to
+    know this detection rule.
     """
     if backend == "lerobot" and is_released_molmoact2(policy_uri):
         return "molmoact2"
-    return backend
+    return None
+
+
+def resolve_backend(backend: str, policy_uri: str) -> str:
+    """Back-compat shim. Routing now lives in
+    :func:`policy_runtime.resolve_backend`, which consults every registered
+    router (this module's included). Kept so existing callers importing
+    ``resolve_backend`` from here keep working."""
+    from .policy_runtime import resolve_backend as _resolve
+
+    return _resolve(backend, policy_uri)
 
 
 # ---------------------------------------------------------------------------
