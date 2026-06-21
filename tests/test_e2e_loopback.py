@@ -87,13 +87,28 @@ def test_full_loop_receives_actions(server, backend):
     assert received >= 40, f"only {received}/60 ticks had an action"
 
 
-def test_two_sessions_are_isolated(server):
+def test_one_session_per_box(server):
+    """The box enforces one session at a time (ADR-0001): a second concurrent
+    OpenSession is refused, but the box is reusable once the first closes."""
+    import grpc
+
     a = connect_drtc(environment="pytest-a", policy_backend="echo",
                      server_address=server, chunk_size=8, action_dim=ACTION_DIM, fps=30)
+    try:
+        # A second session while A is live must be rejected, not queued.
+        with pytest.raises(grpc.RpcError) as exc:
+            connect_drtc(environment="pytest-b", policy_backend="echo",
+                         server_address=server, chunk_size=8, action_dim=ACTION_DIM, fps=30)
+        assert exc.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+        assert a.session_id in exc.value.details()
+    finally:
+        a.close()
+
+    # Once A is closed the box is free again — a fresh session opens cleanly
+    # and gets a distinct id.
     b = connect_drtc(environment="pytest-b", policy_backend="echo",
                      server_address=server, chunk_size=8, action_dim=ACTION_DIM, fps=30)
     try:
-        assert a.session_id != b.session_id
+        assert b.session_id and b.session_id != a.session_id
     finally:
-        a.close()
         b.close()
