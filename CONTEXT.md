@@ -30,7 +30,15 @@ DRTC link and triggers any recorded dataset to be built/published.
 **GPU pod**:
 A managed cloud GPU that loads a policy and serves action chunks over the DRTC
 gRPC protocol. Pods are provisioned and warm-pooled by the dashboard, not
-self-hosted. List the pods available to your account with `interlatent pods ls`.
+self-hosted. List the pods available to your account with `interlatent gpus ls`.
+
+**Preflight**:
+A non-destructive connectivity check (`interlatent-preflight`) that opens a real
+**Session** against a managed **GPU pod**, streams *synthetic* observations, and
+reports a PASS/WARN/FAIL verdict with the measured network-vs-compute latency. It
+exercises the cloud inference path only — never the robot's cameras, joints, or
+motor bus. _Avoid_: calling it a "GPU test" — there is no user-operated GPU to test;
+it validates the path to a managed pod.
 
 ## Relationships
 

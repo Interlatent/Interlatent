@@ -33,7 +33,7 @@ real GPU pod — that path lives in the cloud and is validated separately.
   an API key (mock the API for CI).
 - [ ] **`interlatent-node run`** — polls the dashboard and converges to the
   assigned session; keeps driving the robot while a session is assigned.
-- [ ] **CLI** — `interlatent pods ls`, `interlatent nodes ls`,
+- [ ] **CLI** — `interlatent gpus ls`, `interlatent nodes ls`,
   `interlatent session ls|start|stop` build correct requests and parse responses.
 - [ ] **Session lifecycle** — `session start` → node converges → `session stop`
   closes the DRTC link and triggers any recorded dataset to build/publish.

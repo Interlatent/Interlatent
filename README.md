@@ -28,7 +28,7 @@ while the model thinks. You bring the robot; the dashboard brings the compute.
 - 🦾 **Drive real hardware** (SO-101, Koch, ALOHA, anything LeRobot supports) over LAN, Tailscale, or the internet
 - ⚡ **Real-time action chunking (DRTC)** — pipelined inference, latency estimation, and chunk merging keep control smooth at 30 Hz even with multi-second model latency
 - 🛰️ **Robot node daemon** — pair a Pi (or any always-on machine) to your account; it converges to whatever inference session the dashboard assigns
-- 🖥️ **CLI utility** — list your pods and nodes and start/stop inference sessions from the terminal (`interlatent pods ls`, `interlatent session start …`)
+- 🖥️ **CLI utility** — list your pods and nodes and start/stop inference sessions from the terminal (`interlatent gpus ls`, `interlatent session start …`)
 - 📦 **Collect LeRobot v3.0 datasets** locally — your data, your disk, no account required
 
 The robot-side stack is Apache-2.0; inference runs on [Interlatent](https://interlatent.com).
@@ -76,16 +76,46 @@ or [`examples/06_connect_hosted.py`](examples/06_connect_hosted.py) for the mini
 interlatent-node pair --name my-arm --api-key ilat_...   # register the robot once
 interlatent-node run  --robot so101 --port /dev/ttyACM0  # converge to assigned sessions
 
-interlatent pods ls          # GPU pods available to your account
+interlatent gpus ls          # GPU pods available to your account
 interlatent nodes ls         # robot nodes paired to your account
+interlatent session ls       # active inference sessions
 interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base
+interlatent session stop <session-id>
 ```
+
+### Check the cloud path (no robot)
+
+```bash
+interlatent-preflight --environment my-arm --policy lerobot/smolvla_base
+```
+
+Opens a real session against a managed GPU pod, streams synthetic observations,
+and prints a **PASS / WARN / FAIL** verdict with the measured network-vs-compute
+latency. It exercises the cloud inference path only — not your cameras, joints, or
+motor bus, so a green preflight is not "my robot is ready".
 
 ### Collect datasets with no account
 
+Local dataset collection and the LeRobot integration need the `lerobot` extra:
+
 ```bash
+pip install 'interlatent[lerobot]'
 python examples/05_collect_dataset.py   # builds a LeRobot v3.0 dataset locally
 ```
+
+### Configuration
+
+The SDK and CLI read a few environment variables. Only `INTERLATENT_API_KEY` is
+required; the rest are optional tuning knobs.
+
+| Env var | What it does |
+|---|---|
+| `INTERLATENT_API_KEY` | Your account API key (`ilat_…`); authenticates the dashboard CLI and DRTC inference. **Required.** |
+| `INTERLATENT_DRTC_URL` | Pin the DRTC inference endpoint (operator/dev override; normally provided per-session). |
+| `INTERLATENT_NUM_INFERENCE_STEPS` | Flow-matching denoising steps for VLA policies (e.g. MolmoAct2). Range 3–10; default 5. Lower = faster, slightly noisier. |
+| `INTERLATENT_IMAGE_RESIZE` | Resize camera frames to this square edge (px) before JPEG-encoding for the GPU. `256` suits MolmoAct2. |
+| `INTERLATENT_NODE_CONFIG` | Path to the node config TOML (default `~/.interlatent/node.toml`). |
+| `INTERLATENT_CALIB_PRESET` | Force or disable a joint-calibration preset (e.g. `so101_pre777`, or `none` to turn migration off). |
 
 ## 🧠 How it works
 

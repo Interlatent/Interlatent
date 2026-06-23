@@ -12,7 +12,7 @@ Requests go through `interlatent._http.HTTPClient`.
 - **Base URL:** `https://interlatent.com` (override `--api-base` / `INTERLATENT_API_BASE`).
 - **Auth:** `x-api-key: ilat_…` on every request. The backend resolves the key to a user +
   access rights and **scopes every response to that user**.
-- **Headers sent:** `Accept: application/json` (plus `x-vercel-protection-bypass` when configured).
+- **Headers sent:** `Accept: application/json`, and `x-api-key` when a key is set.
 - **Error semantics the client depends on:**
   - `401` / `403` → CLI prints "authentication failed — check your INTERLATENT_API_KEY".
   - `404` → CLI prints "not found".

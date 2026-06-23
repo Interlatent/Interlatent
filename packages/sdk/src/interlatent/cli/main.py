@@ -5,7 +5,7 @@ dashboard. This CLI is a small utility view of that dashboard — it resolves
 the caller from an Interlatent API key (``ilat_…``) and lets you, from a
 terminal:
 
-    interlatent pods ls                 # GPU pods available to your account
+    interlatent gpus ls                 # GPU boxes available to your account
     interlatent nodes ls                # robot nodes paired to your account
     interlatent env create --slug ...   # create an environment to collect into
     interlatent session ls              # active inference sessions
@@ -86,14 +86,14 @@ def _print_table(rows: list[dict], columns: list[tuple[str, str]], empty: str) -
 
 
 # ----------------------------------------------------------------------
-# pods
+# gpus
 # ----------------------------------------------------------------------
 
 
-def cmd_pods(args: argparse.Namespace) -> int:
+def cmd_gpus(args: argparse.Namespace) -> int:
     client = _make_client(args)
     # GET /api/v1/gpus -> [{id, name, status, gpu, region, ...}]
-    # (or {"gpus": [...]}). "pod" is the CLI's word for a GPU box.
+    # (or {"gpus": [...]}). A flat projection of the user's ComputeBox rows.
     payload = client.request("GET", "/api/v1/gpus")
     rows = _rows(payload, "gpus")
     if args.json:
@@ -103,7 +103,7 @@ def cmd_pods(args: argparse.Namespace) -> int:
         rows,
         [("ID", "id"), ("NAME", "name"), ("STATUS", "status"), ("GPU", "gpu"),
          ("REGION", "region")],
-        empty="(no pods available)",
+        empty="(no GPUs available)",
     )
     return 0
 
@@ -228,15 +228,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="interlatent",
         description="Command-line client for the Interlatent dashboard: list "
-        "your GPU pods and robot nodes, and start/stop cloud inference sessions.",
+        "your GPU boxes and robot nodes, and start/stop cloud inference sessions.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_pods = sub.add_parser("pods", help="List GPU pods available to your account.")
-    pods_sub = p_pods.add_subparsers(dest="pods_cmd", required=True)
-    p_pods_ls = pods_sub.add_parser("ls", help="List pods.")
-    _add_auth_flags(p_pods_ls)
-    p_pods.set_defaults(func=cmd_pods)
+    p_gpus = sub.add_parser("gpus", help="List GPU boxes available to your account.")
+    gpus_sub = p_gpus.add_subparsers(dest="gpus_cmd", required=True)
+    p_gpus_ls = gpus_sub.add_parser("ls", help="List GPUs.")
+    _add_auth_flags(p_gpus_ls)
+    p_gpus.set_defaults(func=cmd_gpus)
 
     p_nodes = sub.add_parser("nodes", help="List robot nodes paired to your account.")
     nodes_sub = p_nodes.add_subparsers(dest="nodes_cmd", required=True)

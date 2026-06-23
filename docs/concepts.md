@@ -75,7 +75,7 @@ it relies on the dashboard for session assignment, while the loop in
 with `--api-key` or `INTERLATENT_API_KEY` (`ilat_…`); the base URL defaults to
 https://interlatent.com (override with `--api-base` / `INTERLATENT_API_BASE`). Commands:
 
-- `interlatent pods ls` — GPU pods available to your account
+- `interlatent gpus ls` — GPU pods available to your account
 - `interlatent nodes ls` — robot nodes paired to your account
 - `interlatent session ls | start | stop` — e.g.
   `interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base`

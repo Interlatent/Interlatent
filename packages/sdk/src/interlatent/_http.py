@@ -12,13 +12,11 @@ class HTTPClient:
         *,
         base_url: str,
         api_key: str | None = None,
-        bypass_token: str | None = None,
         timeout: float = 30.0,
         session=None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or ""
-        self._bypass_token = bypass_token or ""
         self._timeout = timeout
         if session is None:
             try:
@@ -51,8 +49,6 @@ class HTTPClient:
         req_headers: dict[str, str] = {"Accept": "application/json"}
         if self._api_key:
             req_headers["x-api-key"] = self._api_key
-        if self._bypass_token:
-            req_headers["x-vercel-protection-bypass"] = self._bypass_token
         if headers:
             req_headers.update(headers)
 

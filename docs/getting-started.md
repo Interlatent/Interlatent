@@ -82,9 +82,11 @@ For an always-on robot, pair it once and let the dashboard assign sessions to it
 interlatent-node pair --name my-arm --api-key ilat_...   # register the robot once
 interlatent-node run  --robot so101 --port /dev/ttyACM0  # converge to assigned sessions
 
-interlatent pods ls          # GPU pods available to your account
+interlatent gpus ls          # GPU pods available to your account
 interlatent nodes ls         # robot nodes paired to your account
+interlatent session ls       # active inference sessions
 interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base
+interlatent session stop <session-id>
 ```
 
 The node polls the dashboard and converges to whatever session is assigned; the GPU endpoint
@@ -105,10 +107,12 @@ the staging cache into a standard LeRobot v3.0 dataset on disk. No account invol
 **`client.step()` keeps returning `None`.** Normal for the first ~0.5–2 s of a session:
 the first observation has to reach the pod, run inference, and the chunk has to come back.
 If it never returns an action, check that your API key is valid and that the session shows
-as running with `interlatent session ls`.
+as running with `interlatent session ls`. To isolate the cloud path from your robot, run
+`interlatent-preflight --environment <slug> --policy <uri>` — it drives synthetic
+observations and reports a PASS/WARN/FAIL verdict with the network-vs-compute latency split.
 
 **Connect fails / hangs.** Confirm `INTERLATENT_API_KEY` is set (or `api_key=` is passed)
-and reachable: `interlatent pods ls` should list pods. Across networks,
+and reachable: `interlatent gpus ls` should list pods. Across networks,
 [Tailscale](https://tailscale.com) helps the per-session GPU link if direct routing is
 blocked.
 

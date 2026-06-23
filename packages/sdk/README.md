@@ -14,7 +14,7 @@ What's in this package:
    `interlatent-node run`; it polls the dashboard and converges to whatever inference session
    is assigned to it.
 3. **Dashboard CLI** (`interlatent`) — a thin client over the dashboard API (not a daemon).
-   Auth via `--api-key` or `INTERLATENT_API_KEY`. List GPU pods (`interlatent pods ls`) and
+   Auth via `--api-key` or `INTERLATENT_API_KEY`. List GPU pods (`interlatent gpus ls`) and
    paired nodes (`interlatent nodes ls`), and drive sessions
    (`interlatent session ls | start | stop`), e.g.
    `interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base`.
@@ -113,8 +113,7 @@ client.close()
 ```python
 client = Interlatent(
     api_key="ilat_...",       # API key (or set INTERLATENT_API_KEY env var)
-    base_url=None,            # Override API base URL (default: https://interlatent.com, or INTERLATENT_BASE_URL env var)
-    bypass_token=None,        # Vercel bypass token (or INTERLATENT_BYPASS_TOKEN env var)
+    base_url=None,            # Override API base URL (default: https://interlatent.com, or INTERLATENT_API_BASE env var)
     timeout=30.0,             # HTTP request timeout in seconds
     db_path=None,             # Custom path for the local SQLite staging cache
     fps=30,                   # Frame rate stamped into the LeRobot dataset at upload

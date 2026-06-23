@@ -47,7 +47,7 @@ The CLI is a thin client over the dashboard API. Authenticate with `--api-key` o
 `--api-base` / `INTERLATENT_API_BASE`).
 
 ```bash
-interlatent pods ls          # GPU pods available to your account
+interlatent gpus ls          # GPU pods available to your account
 interlatent nodes ls         # robot nodes paired to your account
 interlatent session ls       # current sessions
 interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base

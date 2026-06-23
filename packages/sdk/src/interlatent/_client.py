@@ -63,18 +63,15 @@ class Interlatent:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
-        bypass_token: str | None = None,
         timeout: float = 30.0,
         db_path: str | None = None,
         fps: int = 30,
     ) -> None:
         self._api_key = api_key
-        self._base_url = base_url or os.environ.get("INTERLATENT_BASE_URL") or self._BASE_URL
-        self._bypass_token = bypass_token or os.environ.get("INTERLATENT_BYPASS_TOKEN") or ""
+        self._base_url = base_url or os.environ.get("INTERLATENT_API_BASE") or self._BASE_URL
         self._http = HTTPClient(
             base_url=self._base_url,
             api_key=api_key,
-            bypass_token=self._bypass_token,
             timeout=timeout,
         )
         self._fps = int(fps)

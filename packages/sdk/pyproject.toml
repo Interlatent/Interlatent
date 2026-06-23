@@ -44,14 +44,14 @@ lerobot = [
 ]
 
 [project.scripts]
-# DRTC connectivity smoke test: synthetic control loop against an inference
-# server — no robot needed.
-interlatent-rollout = "interlatent.inference.integration.rollout:main"
+# Connectivity check: opens a real DRTC session against a managed GPU pod
+# with synthetic observations and reports a latency verdict — no robot needed.
+interlatent-preflight = "interlatent.inference.integration.preflight:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
 # whatever inference session the dashboard has assigned to the Node.
 interlatent-node = "interlatent.node.cli:main"
 # Thin CLI client for the Interlatent dashboard: list pods/nodes and
-# start/stop cloud inference sessions. `interlatent pods ls`, `session start`, ...
+# start/stop cloud inference sessions. `interlatent gpus ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"
 
 [project.urls]
