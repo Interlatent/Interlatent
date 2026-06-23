@@ -1,10 +1,9 @@
 # `interlatent` CLI — backend API reference
 
 The `interlatent` CLI (`cli/main.py`) is a thin client for the Interlatent dashboard.
-This document is the contract it expects from the backend, so the dashboard API can be
-implemented to match. Endpoints marked **TODO(api)** are net-new and the client currently
-codes against the placeholder paths below — pin them down here (or change the client to
-match the real contract).
+This document is the contract it expects from the backend. The hosted backend implements
+all of these; "pod" is the CLI's external word for a **GPU box** (the backend calls the
+model a *compute box*).
 
 ## Transport & auth (all endpoints)
 
@@ -28,9 +27,9 @@ Requests go through `interlatent._http.HTTPClient`.
 
 ---
 
-## 1. List pods — `GET /api/v1/pods`  **TODO(api)**
+## 1. List pods — `GET /api/v1/gpus`
 
-GPU pods the user can run sessions on.
+GPU pods (boxes) the user can run sessions on.
 
 ```json
 [
@@ -40,7 +39,7 @@ GPU pods the user can run sessions on.
 ```
 
 - `status` is free text the CLI prints verbatim (e.g. `ready` / `busy` / `starting`).
-- Bare array or `{"pods": [...]}`.
+- Bare array or `{"gpus": [...]}`.
 
 ## 2. List nodes — `GET /api/v1/nodes`
 
@@ -54,7 +53,7 @@ The user's paired robot nodes (read-only view; same resource the node daemon pai
 
 - Bare array or `{"nodes": [...]}`.
 
-## 3. List sessions — `GET /api/v1/inference/sessions/`  **TODO(api)**
+## 3. List sessions — `GET /api/v1/inference/sessions/`
 
 Active inference sessions for the user.
 
@@ -67,7 +66,7 @@ Active inference sessions for the user.
 
 - Bare array or `{"sessions": [...]}`.
 
-## 4. Start a session — `POST /api/v1/inference/sessions/`  **TODO(api)**
+## 4. Start a session — `POST /api/v1/inference/sessions/`
 
 The one write action. Request body the CLI sends:
 
@@ -89,8 +88,12 @@ Backend responsibilities:
 
 - Authorize that the user owns `node` and `pod`.
 - Enforce one-session-per-node and one-session-per-pod.
-- Bind the pod's DRTC endpoint to the session.
+- Bind the pod's DRTC endpoint to the session (the pod is attached to the resolved
+  environment; the session's endpoint resolves from it).
 - **Persist the session so the node's existing poll picks it up** (the node converges to it).
+- `env_slug` (defaulting to the node name when omitted) **must reference an existing
+  environment** — a missing one is a `400`. Create it first with `interlatent env create`
+  or in the dashboard.
 
 Response — either form is accepted; the CLI only reads `.id`:
 
@@ -98,15 +101,31 @@ Response — either form is accepted; the CLI only reads `.id`:
 {"session": {"id": "sess_77"}}   // or just {"id": "sess_77"}
 ```
 
-## 5. Stop a session — `DELETE /api/v1/inference/sessions/{id}`  **TODO(api)**
+## 5. Stop a session — `DELETE /api/v1/inference/sessions/{id}`
 
 Cancel / unassign a session. Any 2xx is success; the node converges to idle on its next poll.
+
+## 6. Create an environment — `POST /api/v1/environments`
+
+Sessions collect into an **environment** (a data collection), which must exist before
+`session start`. Request body the CLI sends:
+
+```json
+{
+  "slug": "my-arm",                 // required — environment name
+  "display_name": "my-arm",         // defaults to slug
+  "robot_type": "so101",            // optional
+  "task_description": "pick cube"   // optional
+}
+```
+
+Returns the created environment (the CLI reads `slug` / `environment_id` for display).
 
 ---
 
 ## Notes
 
-- These five endpoints are the **only** demands the CLI places on the backend. The robot
+- These endpoints are the **only** demands the CLI places on the backend. The robot
   node daemon (`interlatent-node`) talks to the dashboard independently and is already
   covered by the existing nodes API (pair / heartbeat / poll / hardware / robot-features).
 - Two auth identities exist: the user key (`ilat_…`, used by this CLI and for DRTC inference)

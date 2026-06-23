@@ -7,6 +7,7 @@ terminal:
 
     interlatent pods ls                 # GPU pods available to your account
     interlatent nodes ls                # robot nodes paired to your account
+    interlatent env create --slug ...   # create an environment to collect into
     interlatent session ls              # active inference sessions
     interlatent session start ...       # assign a node+pod+policy session
     interlatent session stop <id>       # cancel a session
@@ -91,11 +92,10 @@ def _print_table(rows: list[dict], columns: list[tuple[str, str]], empty: str) -
 
 def cmd_pods(args: argparse.Namespace) -> int:
     client = _make_client(args)
-    # TODO(api): confirm the pods listing endpoint + response shape with the
-    # dashboard backend. Expected: GET /api/v1/pods -> [{id, name, status,
-    # gpu, region, ...}] (or {"pods": [...]}).
-    payload = client.request("GET", "/api/v1/pods")
-    rows = _rows(payload, "pods")
+    # GET /api/v1/gpus -> [{id, name, status, gpu, region, ...}]
+    # (or {"gpus": [...]}). "pod" is the CLI's word for a GPU box.
+    payload = client.request("GET", "/api/v1/gpus")
+    rows = _rows(payload, "gpus")
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -115,8 +115,8 @@ def cmd_pods(args: argparse.Namespace) -> int:
 
 def cmd_nodes(args: argparse.Namespace) -> int:
     client = _make_client(args)
-    # The nodes API already exists (the node daemon pairs/heartbeats here).
-    # TODO(api): confirm the GET listing shape returned to an api-key caller.
+    # GET /api/v1/nodes -> [{id, name, status, robot_type, ...}]
+    # (or {"nodes": [...]}). Same resource the node daemon pairs against.
     payload = client.request("GET", "/api/v1/nodes")
     rows = _rows(payload, "nodes")
     if args.json:
@@ -141,9 +141,8 @@ _SESSIONS_PATH = "/api/v1/inference/sessions/"
 def cmd_session(args: argparse.Namespace) -> int:
     client = _make_client(args)
     if args.session_cmd == "start":
-        # TODO(api): confirm the create-session payload + response. Expected:
         # POST /api/v1/inference/sessions/ with the node + pod + policy and
-        # optional control knobs; returns the created session object.
+        # optional control knobs; returns the created session object ({id}).
         body: dict[str, Any] = {
             "node": args.node,
             "pod": args.pod,
@@ -162,7 +161,8 @@ def cmd_session(args: argparse.Namespace) -> int:
               f"policy={args.policy})")
         return 0
     if args.session_cmd == "stop":
-        # TODO(api): confirm the cancel endpoint (DELETE vs POST .../cancel).
+        # DELETE /api/v1/inference/sessions/{id} — any 2xx is success; the
+        # node converges to idle on its next poll.
         client.request("DELETE", f"{_SESSIONS_PATH}{args.session_id}")
         print(f"✓ Stopped session {args.session_id}")
         return 0
@@ -179,6 +179,36 @@ def cmd_session(args: argparse.Namespace) -> int:
         empty="(no active sessions)",
     )
     return 0
+
+
+# ----------------------------------------------------------------------
+# env
+# ----------------------------------------------------------------------
+
+
+def cmd_env(args: argparse.Namespace) -> int:
+    client = _make_client(args)
+    if args.env_cmd == "create":
+        # POST /api/v1/environments -> the created environment config.
+        # `session start` requires the env to already exist; this is how you
+        # create one from the terminal (the dashboard is the other way).
+        body: dict[str, Any] = {
+            "slug": args.slug,
+            "display_name": args.display_name or args.slug,
+        }
+        for key, val in (("robot_type", args.robot_type),
+                         ("task_description", args.task)):
+            if val not in (None, ""):
+                body[key] = val
+        resp = client.request("POST", "/api/v1/environments", json_body=body)
+        if isinstance(resp, dict):
+            slug = resp.get("slug", args.slug)
+            env_id = resp.get("environment_id") or resp.get("id") or ""
+        else:
+            slug, env_id = args.slug, ""
+        print(f"✓ Created environment {slug}" + (f" ({env_id})" if env_id else ""))
+        return 0
+    return 1
 
 
 # ----------------------------------------------------------------------
@@ -237,6 +267,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth_flags(s_stop)
 
     p_sess.set_defaults(func=cmd_session)
+
+    p_env = sub.add_parser("env", help="Manage environments (data collections).")
+    env_sub = p_env.add_subparsers(dest="env_cmd", required=True)
+    e_create = env_sub.add_parser("create", help="Create an environment.")
+    e_create.add_argument("--slug", required=True, help="Environment slug/name.")
+    e_create.add_argument("--display-name", default="",
+                          help="Human-readable name (defaults to the slug).")
+    e_create.add_argument("--robot-type", default="", help="Robot type, e.g. so101.")
+    e_create.add_argument("--task", default="", help="Task description.")
+    _add_auth_flags(e_create)
+    p_env.set_defaults(func=cmd_env)
 
     return p
 
