@@ -40,7 +40,7 @@ _LOG = logging.getLogger("interlatent.node.daemon")
 def _reachable_addresses() -> tuple[str, list[str]]:
     """Best-effort list of this host's non-loopback addresses (no extra deps).
 
-    The node is outbound-only today (it dials the coordinator + GPU), so this
+    The node is outbound-only today (it dials the dashboard + GPU), so this
     is informational — useful for debugging and for future routing methods
     where the node must advertise an address.
     """
@@ -262,7 +262,7 @@ class NodeDaemon:
 
         Precedence (preserves the legacy endpoint precedence):
           1. ``INTERLATENT_DRTC_URL`` env var — operator override (direct)
-          2. the session's ``route`` block stamped by the coordinator
+          2. the session's ``route`` block stamped by the dashboard
           3. the session's legacy ``drtc_endpoint`` (direct)
           4. node config ``drtc_url`` — fixed fallback (direct)
         Returns ``None`` when nothing resolves.
@@ -371,7 +371,7 @@ class NodeDaemon:
         from interlatent.inference.integration.connect import connect_drtc
 
         # DRTC route resolution (see _resolve_route for precedence): env-var
-        # override > coordinator-stamped ``route`` > legacy ``drtc_endpoint`` >
+        # override > dashboard-stamped ``route`` > legacy ``drtc_endpoint`` >
         # node-config ``drtc_url``. The route's ``method`` selects a connector
         # (only ``direct`` today); the connector yields the address to dial.
         # If nothing resolves we refuse to start rather than hang against an
@@ -379,9 +379,9 @@ class NodeDaemon:
         route = self._resolve_route(session)
         if not route or not route.get("address"):
             _LOG.error(
-                "No DRTC endpoint for session %s. Register a reachable GPU box "
-                "with the coordinator (`interlatent gpu add`) and assign it to "
-                "this session, or set INTERLATENT_DRTC_URL to a fixed endpoint.",
+                "No DRTC endpoint for session %s. Attach a reachable compute "
+                "pod to this session in the Interlatent dashboard, or set "
+                "INTERLATENT_DRTC_URL to a fixed endpoint.",
                 session.get("id", "?"),
             )
             return
@@ -449,11 +449,11 @@ class NodeDaemon:
             image_resize if image_resize is not None else "native",
         )
 
-        # Recording destination is configured on the coordinator (or backend)
-        # and rides in the session payload's ``recording`` block. The node
-        # forwards it verbatim into OpenSession metadata; the GPU server's
-        # recorder interprets the keys (output_dir / s3_uri / s3_*) to pick a
-        # sink. Opaque to the node. See ADR-0002.
+        # Recording destination is configured on the dashboard and rides in
+        # the session payload's ``recording`` block. The node forwards it
+        # verbatim into OpenSession metadata; the GPU container's recorder
+        # interprets the keys (output_dir / s3_uri / s3_*) to pick a sink.
+        # Opaque to the node.
         recording_cfg = session.get("recording") or {}
         for _k, _v in recording_cfg.items():
             if _v is not None:
@@ -480,27 +480,8 @@ class NodeDaemon:
             env_id=session.get("environment_id"),
         )
 
-        # Browser-driven DAgger teleop channel. The TeleopChannel owns a
-        # background WS to the GPU box for the lifetime of the session
-        # (idle when no dashboard is engaged). The control loop reads
-        # the latest frame and overrides the policy when engaged. We
-        # use ``drtc_api_key`` here because the teleop-token endpoint
-        # is owned by the user, not the node — the node token is
-        # rejected by ``require_auth``.
-        from .teleop_channel import TeleopChannel
-
-        teleop_channel: Optional[TeleopChannel] = None
-        teleop_api_key = self.cfg.drtc_api_key or ""
-        if teleop_api_key and session.get("id"):
-            teleop_channel = TeleopChannel(
-                session_id=session["id"],
-                api_base=self.cfg.api_base,
-                api_key=teleop_api_key,
-            )
-            teleop_channel.start()
-
         loop_fn = self._resolve_loop_fn()
-        handle = _ControlLoopHandle(client=client, teleop_channel=teleop_channel)
+        handle = _ControlLoopHandle(client=client)
         kwargs = {
             "client": client,
             "session": session,
@@ -511,7 +492,6 @@ class NodeDaemon:
             "robot_cameras": self.cfg.robot_cameras,
             "api_key": self.cfg.token,
             "api_base": self.cfg.api_base,
-            "teleop_channel": teleop_channel,
             "node_id": self.cfg.node_id,
             "image_resize": image_resize,
         }
@@ -526,11 +506,6 @@ class NodeDaemon:
                     client.close()
                 except Exception:
                     pass
-                if teleop_channel is not None:
-                    try:
-                        teleop_channel.stop()
-                    except Exception:
-                        pass
 
         handle.thread = threading.Thread(
             target=_runner, name=f"node-loop-{session.get('id','')[:8]}", daemon=True
@@ -546,15 +521,6 @@ class NodeDaemon:
         h = self._active
         self._active = None
         h.stop_flag.set()
-        # The control-loop runner stops the teleop channel inside its
-        # finally clause, but if the loop thread is stuck the teleop
-        # channel would never get torn down — close it here too so the
-        # WS connection isn't leaked.
-        if h.teleop_channel is not None:
-            try:
-                h.teleop_channel.stop()
-            except Exception:
-                pass
         if h.thread is not None:
             h.thread.join(timeout=10.0)
             if h.thread.is_alive():
@@ -564,7 +530,6 @@ class NodeDaemon:
 @dataclass
 class _ControlLoopHandle:
     client: Any
-    teleop_channel: Any = None
     stop_flag: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
 

@@ -93,19 +93,17 @@ def _read_config(path: Path) -> dict[str, str]:
 
 def cmd_pair(args: argparse.Namespace) -> int:
     api_key = args.api_key or os.environ.get("INTERLATENT_API_KEY", "")
-    # An API key is only required when pairing against Interlatent Cloud. A
-    # self-hosted coordinator (`interlatent up`) accepts pairing without one.
-    # In that case DRTC inference falls back to the node token (ignored by an
-    # unguarded self-hosted server) and the teleop channel is auto-disabled
-    # (the daemon gates teleop on a non-empty user key).
+    # Inference is cloud-only: the node pairs against the Interlatent
+    # dashboard, which resolves the caller from the ilat_ API key. Without a
+    # key there is nothing to authenticate against.
     if not api_key:
         print(
-            "No API key provided — pairing without one (self-hosted "
-            "coordinator mode). DRTC auth uses the node token and DAgger "
-            "teleop is disabled. Pass --api-key / INTERLATENT_API_KEY to "
-            "pair against Interlatent Cloud instead.",
+            "error: an Interlatent API key is required to pair. Pass "
+            "--api-key or set INTERLATENT_API_KEY (get one from the "
+            "dashboard).",
             file=sys.stderr,
         )
+        return 2
 
     # DRTC endpoint — normally inherited per session from whichever
     # compute box is attached to the env in the dashboard, so we do
@@ -144,11 +142,9 @@ def cmd_pair(args: argparse.Namespace) -> int:
         "api_base": args.api_base.rstrip("/"),
         "name": payload["name"],
     }
-    # Persist the user API key only when one was given: the node token
-    # authenticates heartbeat/poll, but Cloud DRTC inference auth needs the
-    # ilat_ key. Omitted entirely in self-hosted coordinator mode.
-    if api_key:
-        cfg_data["api_key"] = api_key
+    # Persist the user API key: the node token authenticates heartbeat/poll,
+    # but DRTC inference auth needs the ilat_ key.
+    cfg_data["api_key"] = api_key
     if drtc_url:
         cfg_data["drtc_url"] = drtc_url
     _write_config(cfg_path, cfg_data)

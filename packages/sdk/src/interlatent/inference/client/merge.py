@@ -142,12 +142,9 @@ class ActionSchedule:
     def flush(self) -> int:
         """Drop every queued action without advancing the cursor.
 
-        Used by the teleop intervention path: while a human is driving
-        the robot we don't want policy chunks (in-flight at engage, or
-        landing late from a slow GPU box) to apply after disengage. The
-        cursor stays where it is so the next post-teleop Infer chunk
-        anchors at the same step the policy was about to execute.
-        Returns the number of dropped entries (for telemetry).
+        The cursor stays where it is so the next Infer chunk anchors at
+        the same step the policy was about to execute. Returns the
+        number of dropped entries (for telemetry).
         """
         with self._lock:
             n = len(self._data)

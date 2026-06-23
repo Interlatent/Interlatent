@@ -19,33 +19,26 @@ jobs:
           cache: pip
       - name: Install packages
         run: |
-          pip install -e ./packages/sdk -e ./packages/server -e ./packages/teleop pytest pytest-timeout ruff
+          pip install -e ./packages/sdk pytest pytest-timeout ruff
       - name: Import smoke test
         run: |
-          python -c "import interlatent; import interlatent.inference.client; import interlatent.node.cli"
-          python -c "import interlatent_server.server.transport; import interlatent_server.server.app"
-          python -c "import interlatent_teleop.protocol.teleop_pb2"
+          python -c "import interlatent; import interlatent.inference.client; import interlatent.node.cli; import interlatent.cli.main"
       - name: Test suite (unit + e2e, no GPU, no robot)
         run: |
           pytest tests/ -v --timeout=120
-      - name: Loopback end-to-end (echo backend, no GPU)
-        run: |
-          timeout 120 python examples/01_loopback_no_hardware.py --steps 30
       - name: Lint
         run: |
           ruff check .
-      - name: Wheels build and contain every entry-point module
+      - name: Wheel builds and contains every entry-point module
         run: |
           pip install build
-          for pkg in sdk server teleop; do python -m build --wheel ./packages/$pkg -o /tmp/wheels; done
+          python -m build --wheel ./packages/sdk -o /tmp/wheels
           python - <<'EOF'
           import glob, zipfile
           required = {
               "interlatent-": ["interlatent/node/cli.py",
+                               "interlatent/cli/main.py",
                                "interlatent/inference/integration/rollout.py"],
-              "interlatent_server-": ["interlatent_server/server/app.py"],
-              "interlatent_teleop-": ["interlatent_teleop/pi/__main__.py",
-                                      "interlatent_teleop/laptop/keyboard_cli.py"],
           }
           for prefix, files in required.items():
               [wheel] = [w for w in glob.glob("/tmp/wheels/*.whl") if w.split("/")[-1].startswith(prefix)]

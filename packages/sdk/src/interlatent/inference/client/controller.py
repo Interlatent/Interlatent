@@ -318,9 +318,9 @@ class DRTCClient:
         the actual gRPC call. On queue overflow the row is dropped and a
         single WARN is emitted.
 
-        ``control_source`` is "policy" / "teleop" — recorded as
-        ``annotation.interlatent.control_source`` for DAgger. ``None``
-        means "policy" on the server side.
+        ``control_source`` is recorded as
+        ``annotation.interlatent.control_source``. ``None`` means
+        "policy" on the server side.
         """
         if self.session_id is None or self._stub is None:
             return
@@ -392,22 +392,6 @@ class DRTCClient:
             # Recording failures must never break inference. Log once at
             # debug; the control loop keeps going.
             log.debug("RecordTick failed", exc_info=True)
-
-    # ------------------------------------------------------------------
-    # Teleop / DAgger
-    # ------------------------------------------------------------------
-
-    def flush_buffer(self) -> int:
-        """Drop every queued policy action.
-
-        Called by the control loop while teleop is engaged so chunks
-        that were in-flight at engage time (or that land late from the
-        GPU box) do not apply after the human releases. The cursor is
-        preserved, so the next post-teleop Infer chunk anchors cleanly
-        at the same step the policy was about to execute. Returns the
-        count of dropped entries.
-        """
-        return self.schedule.flush()
 
     # ------------------------------------------------------------------
     # Per-control-step entry point

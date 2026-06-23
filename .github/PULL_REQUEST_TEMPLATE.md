@@ -4,7 +4,7 @@
 
 ## How was it tested?
 
-<!-- e.g. ran examples/01_loopback_no_hardware.py, drove an SO-101 over Tailscale, ... -->
+<!-- e.g. ran examples/05_collect_dataset.py, drove an SO-101 against a cloud pod, ... -->
 
 ## Checklist
 

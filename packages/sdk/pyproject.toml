@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interlatent"
 version = "0.4.35"
-description = "Interlatent SDK — run VLA policies on real robots, teleoperate, and collect LeRobot datasets."
+description = "Interlatent SDK — run VLA policies on real robots and collect LeRobot datasets."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -29,11 +29,6 @@ dependencies = [
   "grpcio-tools>=1.60",
   "protobuf>=4.25",
   "sonora>=0.2.2",
-  # Teleop relay channel on the node uses websockets.sync.client to
-  # ride the GPU box's WS relay for DAgger interventions. Not optional —
-  # every node session opens the channel and was crashing on ImportError
-  # when the host didn't already have websockets installed.
-  "websockets>=12",
 ]
 
 [project.optional-dependencies]
@@ -53,11 +48,10 @@ lerobot = [
 # server — no robot needed.
 interlatent-rollout = "interlatent.inference.integration.rollout:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
-# whatever inference session the dashboard (or local coordinator) has
-# assigned to the Node.
+# whatever inference session the dashboard has assigned to the Node.
 interlatent-node = "interlatent.node.cli:main"
-# Local coordinator + admin CLI: run VLA inference sessions fully offline
-# (no hosted dashboard). `interlatent up`, `gpu add`, `session start`, ...
+# Thin CLI client for the Interlatent dashboard: list pods/nodes and
+# start/stop cloud inference sessions. `interlatent pods ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"
 
 [project.urls]
@@ -82,8 +76,8 @@ include = ["interlatent*"]
 # package: it uses torch only for CPU-side work — tensor marshalling and
 # `isinstance(model, torch.nn.Module)` framework detection in
 # interlatent._client — and never calls `.cuda()` / moves data to a GPU. GPU
-# inference runs server-side over DRTC (your interlatent-server box or
-# Interlatent Cloud), not here. So we pin torch (and torchvision, pulled in by
+# inference runs on managed cloud GPU pods over DRTC, not here. So we pin
+# torch (and torchvision, pulled in by
 # the [lerobot] extra) to PyTorch's CPU wheel index.
 #
 # This block is honoured by `uv` (uv pip install / uv sync). Plain pip does

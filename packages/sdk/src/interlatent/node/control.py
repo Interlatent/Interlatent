@@ -72,7 +72,6 @@ def lerobot_control_loop(
     robot_cameras: Optional[dict[str, str]] = None,
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
-    teleop_channel: Any = None,
     node_id: Optional[str] = None,
     # Pre-encode square-resize target for camera frames (pixels per side).
     # None keeps native camera resolution. Set by the daemon when the
@@ -93,15 +92,6 @@ def lerobot_control_loop(
     ships each tick to the server via the ``RecordTick`` RPC, where the
     server-side recorder builds + uploads the LeRobot dataset on
     ``CloseSession``. Inference latency is unaffected.
-
-    **DAgger / teleop override:** when ``teleop_channel`` carries an
-    engaged frame from the dashboard, this loop short-circuits the
-    policy path. The current held-key set is integrated locally into a
-    joint target, sent to the robot, and recorded with
-    ``control_source="teleop"`` so the resulting LeRobot dataset
-    distinguishes policy vs human-driven steps. The DRTC action buffer
-    is flushed every engaged tick so policy chunks that land late
-    don't fight the human.
 
     Pacing is governed by the DRTC client's internal RTC cooldown plus
     the explicit period below: without it the loop busy-spins while
@@ -162,18 +152,6 @@ def lerobot_control_loop(
     except Exception:
         _LOG.warning("DRTC-DEBUG robot-units introspection failed", exc_info=True)
 
-    # Teleop integrator state. ``teleop_target`` is the running joint
-    # target we accumulate while engaged. It resets to ``None`` on
-    # disengage so the next engage starts from the current actual
-    # joint position (the human doesn't want their last commanded
-    # target to come back after they release).
-    from .keyboard_action import KeyboardActionConfig, next_target as kb_next_target
-
-    teleop_cfg = KeyboardActionConfig()
-    teleop_target: Optional[np.ndarray] = None
-    teleop_last_t: Optional[float] = None
-    teleop_warned_action_dim = False
-
     try:
         period = 1.0 / fps if fps > 0 else 1.0 / 30.0
         step_counter = 0
@@ -190,46 +168,56 @@ def lerobot_control_loop(
 
             obs = robot.get_observation()
 
-            # Sample the latest browser teleop frame. None when no
-            # dashboard is connected or the last frame is stale.
-            frame = teleop_channel.latest_frame() if teleop_channel is not None else None
-            engaged = bool(frame and frame.engaged and frame.deadman)
+            # Encode lazily: client.step() only builds the payload on
+            # ticks where DRTC actually sends an observation, so we
+            # skip the encode on the majority of ticks. With
+            # ``image_resize`` set, frames are downsampled to a
+            # square before JPEG — for MolmoAct2 (224 input) sending
+            # 256x256 cuts payload ~5-10x vs raw 640x480 with no
+            # measurable accuracy loss.
+            action = client.step(
+                lambda o=obs: _encode_npz(
+                    _to_policy_schema(o), image_resize=image_resize
+                ),
+                codec="npz",
+            )
+            if action is not None:
+                action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
 
-            if engaged and action_keys and len(action_keys) == 6:
-                # --- TELEOP PATH ---
-                actual_joints = _extract_joint_state(obs, action_keys)
-                if teleop_target is None:
-                    # First engaged tick — start the integrator at the
-                    # robot's current pose so there is no jump.
-                    teleop_target = actual_joints.copy()
-                    teleop_last_t = loop_start
-                dt = max(0.0, loop_start - (teleop_last_t or loop_start))
-                teleop_last_t = loop_start
-                teleop_target = kb_next_target(
-                    target_joints=teleop_target,
-                    actual_joints=actual_joints,
-                    held_keys=frame.held_keys,
-                    dt=dt,
-                    cfg=teleop_cfg,
-                )
-                action_arr = np.asarray(teleop_target, dtype=np.float32).reshape(-1)
+                # DRTC-DEBUG glass-box: log the actual joint angles, the
+                # commanded ones, and the per-joint jump — for the first
+                # chunk-boundaries of a session and periodically after.
+                # A huge delta on the first policy command is the slam:
+                # the arm leaps from its current pose to the model's
+                # absolute target. Units here are whatever the motor norm
+                # mode reports above (degrees for MolmoAct2).
+                if action_keys and (step_counter < 10 or step_counter % 100 == 0):
+                    try:
+                        _actual = _extract_joint_state(obs, action_keys)
+                        _cmd = action_arr[: len(action_keys)]
+                        _delta = _cmd - _actual[: len(_cmd)]
+                        _pairs = ", ".join(
+                            "%s: %.2f->%.2f (Δ%+.2f)"
+                            % (action_keys[i], _actual[i], _cmd[i], _delta[i])
+                            for i in range(len(_cmd))
+                        )
+                        _LOG.info(
+                            "DRTC-DEBUG joints #%d | max|Δ|=%.2f | %s",
+                            step_counter, float(np.abs(_delta).max()), _pairs,
+                        )
+                    except Exception:
+                        _LOG.warning(
+                            "DRTC-DEBUG joint dump failed", exc_info=True
+                        )
+
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
 
-                # Drop policy chunks that are already queued or land
-                # during teleop so they don't apply when the human
-                # releases.
-                try:
-                    client.flush_buffer()
-                except Exception:
-                    pass
-
-                _capture_tick(
-                    client, obs, action_arr, step_counter,
-                    control_source="teleop",
-                )
                 # Per-tick capture — non-blocking; queues to a background
                 # thread in the DRTC client that ships via RecordTick.
-                state_keys = _capture_tick(client, obs, action_arr, step_counter)
+                state_keys = _capture_tick(
+                    client, obs, action_arr, step_counter,
+                    control_source="policy",
+                )
 
                 # One-time feature-name report (retry a few ticks on failure).
                 if not features_reported and features_report_attempts < 5:
@@ -240,70 +228,6 @@ def lerobot_control_loop(
                         features_reported = True
 
                 step_counter += 1
-            else:
-                if engaged and not teleop_warned_action_dim:
-                    _LOG.warning(
-                        "Teleop engage ignored: keyboard_action expects 6 joints "
-                        "but robot has %d action keys (%s). DAgger is only "
-                        "wired for the SO-101 in this release.",
-                        len(action_keys), action_keys,
-                    )
-                    teleop_warned_action_dim = True
-
-                # --- POLICY PATH ---
-                # Reset the integrator so the next engage starts fresh.
-                teleop_target = None
-                teleop_last_t = None
-
-                # Encode lazily: client.step() only builds the payload on
-                # ticks where DRTC actually sends an observation, so we
-                # skip the encode on the majority of ticks. With
-                # ``image_resize`` set, frames are downsampled to a
-                # square before JPEG — for MolmoAct2 (224 input) sending
-                # 256x256 cuts payload ~5-10x vs raw 640x480 with no
-                # measurable accuracy loss.
-                action = client.step(
-                    lambda o=obs: _encode_npz(
-                        _to_policy_schema(o), image_resize=image_resize
-                    ),
-                    codec="npz",
-                )
-                if action is not None:
-                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-
-                    # DRTC-DEBUG glass-box: log the actual joint angles, the
-                    # commanded ones, and the per-joint jump — for the first
-                    # chunk-boundaries of a session and periodically after.
-                    # A huge delta on the first policy command is the slam:
-                    # the arm leaps from its current pose to the model's
-                    # absolute target. Units here are whatever the motor norm
-                    # mode reports above (degrees for MolmoAct2).
-                    if action_keys and (step_counter < 10 or step_counter % 100 == 0):
-                        try:
-                            _actual = _extract_joint_state(obs, action_keys)
-                            _cmd = action_arr[: len(action_keys)]
-                            _delta = _cmd - _actual[: len(_cmd)]
-                            _pairs = ", ".join(
-                                "%s: %.2f->%.2f (Δ%+.2f)"
-                                % (action_keys[i], _actual[i], _cmd[i], _delta[i])
-                                for i in range(len(_cmd))
-                            )
-                            _LOG.info(
-                                "DRTC-DEBUG joints #%d | max|Δ|=%.2f | %s",
-                                step_counter, float(np.abs(_delta).max()), _pairs,
-                            )
-                        except Exception:
-                            _LOG.warning(
-                                "DRTC-DEBUG joint dump failed", exc_info=True
-                            )
-
-                    robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
-
-                    _capture_tick(
-                        client, obs, action_arr, step_counter,
-                        control_source="policy",
-                    )
-                    step_counter += 1
 
             elapsed = time.perf_counter() - loop_start
             if elapsed < period:
@@ -325,8 +249,7 @@ def _extract_joint_state(obs: dict, action_keys: list) -> np.ndarray:
 
     For follower robots the action features (e.g. ``shoulder_pan.pos``)
     match the observation joint keys exactly. Missing keys are filled
-    with zero — the lead-clip in the keyboard integrator then prevents
-    the target from running away while the robot is still publishing.
+    with zero.
     """
     out = np.zeros(len(action_keys), dtype=np.float32)
     for i, key in enumerate(action_keys):
