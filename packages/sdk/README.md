@@ -17,7 +17,7 @@ What's in this package:
    Auth via `--api-key` or `INTERLATENT_API_KEY`. List GPU pods (`interlatent gpus ls`) and
    paired nodes (`interlatent nodes ls`), and drive sessions
    (`interlatent session ls | start | stop`), e.g.
-   `interlatent session start --node my-arm --pod a100-0 --policy lerobot/smolvla_base`.
+   `interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base`.
 4. **Collection** — `watch()` / `tick()` / `collect()` record per-step observations,
    actions, rewards, and metrics into a local SQLite staging cache; build a local LeRobot
    v3.0 dataset from it (works offline, no account), or `upload()` it to a hosted environment.

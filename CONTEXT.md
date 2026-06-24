@@ -24,7 +24,7 @@ plane; the dashboard is the control plane.
 **Session**:
 A live binding of a node (or a hand-written `connect_drtc()` loop) to a policy URI
 running on a managed **GPU pod**. Created from the dashboard or via
-`interlatent session start --node … --pod … --policy …`; stopping it closes the
+`interlatent session start --node … --gpu … --policy …`; stopping it closes the
 DRTC link and triggers any recorded dataset to be built/published.
 
 **GPU pod**:

@@ -145,7 +145,9 @@ def cmd_session(args: argparse.Namespace) -> int:
         # optional control knobs; returns the created session object ({id}).
         body: dict[str, Any] = {
             "node": args.node,
-            "pod": args.pod,
+            # The backend session body field is "pod" (its word for a GPU box);
+            # the CLI flag is --gpu for symmetry with `interlatent gpus ls`.
+            "pod": args.gpu,
             "policy": args.policy,
             "backend": args.backend,
         }
@@ -157,7 +159,7 @@ def cmd_session(args: argparse.Namespace) -> int:
         resp = client.request("POST", _SESSIONS_PATH, json_body=body)
         sess = resp.get("session", resp) if isinstance(resp, dict) else resp
         sid = sess.get("id") if isinstance(sess, dict) else sess
-        print(f"✓ Started session {sid} (node={args.node}, pod={args.pod}, "
+        print(f"✓ Started session {sid} (node={args.node}, gpu={args.gpu}, "
               f"policy={args.policy})")
         return 0
     if args.session_cmd == "stop":
@@ -252,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s_start = sess_sub.add_parser("start", help="Start an inference session.")
     s_start.add_argument("--node", required=True, help="Node name or id.")
-    s_start.add_argument("--pod", required=True, help="GPU pod name or id.")
+    s_start.add_argument("--gpu", required=True, help="GPU box name or id.")
     s_start.add_argument("--policy", required=True, help="Policy URI.")
     s_start.add_argument("--backend", default="lerobot")
     s_start.add_argument("--task", default="")
