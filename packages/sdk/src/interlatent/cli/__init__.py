@@ -1,8 +1,9 @@
-"""`interlatent` umbrella CLI — manage the local coordinator and sessions.
+"""`interlatent` umbrella CLI — a thin client for the Interlatent dashboard.
 
-A thin client + daemon manager over :mod:`interlatent.coordinator`. Run
-``interlatent up`` to start the coordinator (background), register GPU boxes
-with ``interlatent gpu add``, and drive inference sessions with
-``interlatent session start/stop``. Nodes self-register via
-``interlatent-node pair --api-base http://<host>:<port>``.
+Inference runs in the cloud through the dashboard; this CLI is a small utility
+view of it. List your GPU pods (``interlatent gpus ls``) and robot nodes
+(``interlatent nodes ls``), and drive cloud inference sessions with
+``interlatent session start/stop/ls``. Authenticate with an Interlatent API
+key (``--api-key`` / ``INTERLATENT_API_KEY``). Nodes pair directly with the
+dashboard via ``interlatent-node pair --api-key ilat_…``.
 """

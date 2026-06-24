@@ -9,20 +9,18 @@ Today only ``direct`` exists: the user supplies an address (any reachable
 ``host:port`` or ``http(s)://…`` URL — no lock-in to Tailscale or any single
 transport; the gRPC vs gRPC-web choice is inferred downstream from the address
 scheme). The registries below are the seam for adding NAT-traversal relays,
-MagicDNS resolution, tunnels, etc. **without touching the coordinator or node
-control flow** — a new method just registers a resolver + a connector.
+MagicDNS resolution, tunnels, etc. **without touching the node control flow**
+— a new method just registers a resolver + a connector.
 
 Two pluggable points:
 
-* **resolver** (coordinator-side): ``descriptor -> resolved descriptor``. For
+* **resolver** (control-plane side): ``descriptor -> resolved descriptor``. For
   ``direct`` this is identity. A future ``relay`` resolver might allocate a
   rendezvous session and return its address.
 * **connector** (node-side): ``route -> {"server_address": str}`` — what the
   node feeds to ``connect_drtc``. For ``direct`` it returns the address. A
   future ``relay`` connector would establish its hop and return a local
   address to dial.
-
-See docs/self-hosting.md (Networking).
 """
 
 from __future__ import annotations
@@ -42,7 +40,7 @@ def register_method(
     resolver: Callable[[dict], dict],
     connector: Callable[[dict], dict],
 ) -> None:
-    """Register a routing method's coordinator resolver + node connector."""
+    """Register a routing method's control-plane resolver + node connector."""
     _RESOLVERS[name] = resolver
     _CONNECTORS[name] = connector
 
@@ -57,7 +55,7 @@ def make_descriptor(address: str, *, method: str = DEFAULT_METHOD, **extra: Any)
 
 
 def resolve(descriptor: dict) -> dict:
-    """Coordinator-side: turn a stored descriptor into a session ``route``.
+    """Control-plane side: turn a stored descriptor into a session ``route``.
 
     Raises ``ValueError`` for an unknown method.
     """

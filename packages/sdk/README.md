@@ -1,28 +1,30 @@
 # interlatent (Python SDK)
 
 The robot-side half of [Interlatent](https://github.com/interlatent/interlatent): run VLA
-policies on real hardware against a self-hosted or hosted inference server, teleoperate,
-and collect LeRobot datasets.
+policies on real hardware against managed cloud GPU pods, and collect LeRobot datasets.
 
 What's in this package:
 
-1. **DRTC inference client** (`interlatent.inference`) — `connect_drtc()` opens a real-time
-   action-chunking session against any DRTC server: your own
-   [`interlatent-server`](../server) box (no account needed) or Interlatent Cloud
-   (`api_key=`).
+1. **DRTC inference client** (`interlatent.inference`) — `connect_drtc(api_key="ilat_...")`
+   opens a real-time action-chunking session against a managed GPU pod provisioned by the
+   [Interlatent dashboard](https://interlatent.com). The pod endpoint is resolved from your
+   API key per-session; you never dial it yourself.
 2. **Robot node daemon** (`interlatent-node`) — a long-running daemon for always-on robots,
-   with camera capture and DAgger keyboard takeover. Gets its sessions from a coordinator —
-   your own (below) or Interlatent Cloud.
-3. **Coordinator + CLI** (`interlatent`) — a local control plane for running node sessions
-   with **no dashboard**: `interlatent up` starts it, `interlatent gpu add` /
-   `interlatent session start` register GPU boxes and drive sessions, and recorded episodes
-   land in a local dir or S3 bucket. See [self-hosting.md](../../docs/self-hosting.md) and
-   [examples/07](../../examples/07_offline_no_dashboard.md).
+   with camera capture. Pair it once (`interlatent-node pair --api-key ilat_...`), then
+   `interlatent-node run`; it polls the dashboard and converges to whatever inference session
+   is assigned to it.
+3. **Dashboard CLI** (`interlatent`) — a thin client over the dashboard API (not a daemon).
+   Auth via `--api-key` or `INTERLATENT_API_KEY`. List GPU pods (`interlatent gpus ls`) and
+   paired nodes (`interlatent nodes ls`), and drive sessions
+   (`interlatent session ls | start | stop`), e.g.
+   `interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base`.
 4. **Collection** — `watch()` / `tick()` / `collect()` record per-step observations,
    actions, rewards, and metrics into a local SQLite staging cache; build a local LeRobot
-   v3.0 dataset from it, or `upload()` it to a hosted environment.
+   v3.0 dataset from it (works offline, no account), or `upload()` it to a hosted environment.
 
-For inference quickstarts see the [repo README](../../README.md) and
+For inference quickstarts see the [repo README](../../README.md),
+[docs/getting-started.md](../../docs/getting-started.md),
+[docs/going-to-cloud.md](../../docs/going-to-cloud.md), and
 [examples](../../examples/). The rest of this document covers the collection/upload API.
 
 > **Note (hosted uploads):** a collection session binds to a backend **environment**
@@ -36,7 +38,7 @@ The SDK runs robot-/edge-side and uses torch only for CPU-side work (tensor
 marshalling and model type detection) — it never touches CUDA. **Only CPU torch
 wheels are installed**, so installs stay small and don't drag in the multi-GB
 NVIDIA CUDA stack that the default PyPI `torch` ships on Linux. GPU inference
-runs server-side (your `interlatent-server` box or Interlatent Cloud), not here.
+runs on managed cloud GPU pods through the dashboard, not here.
 
 **With uv** (recommended) — the CPU wheel index is pinned in `pyproject.toml`,
 so a normal install already resolves CPU-only torch:
@@ -111,8 +113,7 @@ client.close()
 ```python
 client = Interlatent(
     api_key="ilat_...",       # API key (or set INTERLATENT_API_KEY env var)
-    base_url=None,            # Override API base URL (default: https://interlatent.com, or INTERLATENT_BASE_URL env var)
-    bypass_token=None,        # Vercel bypass token (or INTERLATENT_BYPASS_TOKEN env var)
+    base_url=None,            # Override API base URL (default: https://interlatent.com, or INTERLATENT_API_BASE env var)
     timeout=30.0,             # HTTP request timeout in seconds
     db_path=None,             # Custom path for the local SQLite staging cache
     fps=30,                   # Frame rate stamped into the LeRobot dataset at upload
@@ -275,19 +276,20 @@ client.close()
 
 ### `interlatent-rollout` — DRTC connectivity smoke test
 
-Opens a DRTC session against an inference server (self-hosted or hosted) and drives a
-synthetic control loop — no robot or cameras needed. Use it to validate your server and
-network path before wiring hardware:
+Opens a DRTC session against a managed cloud GPU pod and drives a synthetic control loop —
+no robot or cameras needed. Use it to validate your account and network path before wiring
+hardware:
 
 ```bash
+export INTERLATENT_API_KEY=ilat_...
 interlatent-rollout \
-    --server gpu-box:50051 \
     --environment my-arm \
+    --policy-uri lerobot/smolvla_base \
     --fps 30 \
     --steps 300
 ```
 
-Pass `--grpc-web` when targeting an HTTPS endpoint (e.g. a Modal deployment).
+The pod endpoint is resolved from your API key; the dashboard provisions it per-session.
 
 ## HTTP Resources
 

@@ -3,14 +3,9 @@
 `messages.proto` is the single source of truth for the DRTC inference contract spoken by:
 
 - the robot-side client (`packages/sdk` → `interlatent/inference/protocol/`)
-- the self-hosted server (`packages/server` → `interlatent_server/protocol/`)
-- Interlatent Cloud's hosted endpoint
+- the cloud-managed GPU pods (Interlatent's hosted endpoint)
 
-`teleop.proto` is the separate laptop ↔ Pi teleoperation contract used by
-`packages/teleop`.
-
-Generated `*_pb2.py` stubs are committed in each package. After editing a proto, regenerate
-everywhere:
+Generated `*_pb2.py` stubs are committed in the SDK. After editing the proto, regenerate:
 
 ```bash
 pip install grpcio-tools

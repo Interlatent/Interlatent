@@ -89,13 +89,12 @@ def connect_drtc(
     key = api_key or os.environ.get("INTERLATENT_API_KEY", "")
     url = server_address or os.environ.get("INTERLATENT_DRTC_URL") or DEFAULT_DRTC_URL
     if not key and url == DEFAULT_DRTC_URL:
-        # Only the hosted endpoint requires an account. Self-hosted servers
-        # (interlatent-serve) run unauthenticated by default.
+        # The hosted endpoint requires an account.
         raise ValueError(
             "An Interlatent API key is required for the hosted endpoint. "
             "Pass api_key=... or set INTERLATENT_API_KEY in your "
-            "environment — or pass server_address= to use a self-hosted "
-            "server (no key needed)."
+            "environment — or pass server_address= to dial an explicit "
+            "compute endpoint."
         )
 
     # Natural-language task (e.g. SmolVLA instruction) flows via

@@ -1,73 +1,56 @@
-# Stability test plan
+# Test plan
 
-What must be exercised before declaring a release of the DRTC serving stack
-(`interlatent-serve` / the docker image) stable.
+What must be exercised before declaring a release of the robot-side stack
+(`packages/sdk` — the DRTC client, the node, and the `interlatent` dashboard CLI)
+stable. Inference runs on managed cloud GPU pods; this repo's job is to drive them
+correctly and to collect datasets locally.
 
-## Why this exists: the compile path has no CI coverage
+## What CI covers vs. what it doesn't
 
-Every automated test uses the `echo` / `tiny_torch` backends — see
-`tests/test_e2e_loopback.py` ("No GPU, no robot — echo and tiny_torch
-backends"). Those backends never call `torch.compile`, so the **real-policy /
-compile / CUDA-graph / warmup path has zero automated coverage**. CI stays green
-even if a real policy is broken. Anything in Tiers 1–2 below therefore requires a
-**manual run on a real GPU**; the control plane (Tier "already covered") does not.
-
-Context for the current release: the default `torch.compile` mode was changed
-from `reduce-overhead` to `default` to stop a CUDA-graph + Philox-RNG crash on
-flow-matching policies — see
-[ADR-0004](docs/adr/0004-no-cudagraphs-for-flow-matching.md). Tier 1 validates
-that fix and guards against regressing the other policy families.
+The pytest suite runs with **no GPU and no robot**. It exercises the DRTC client
+control loop against the `echo` / `tiny_torch` test backends (chunk merging,
+latency estimation, scheduling), the local dataset-collection path, and the
+dashboard CLI argument/URL plumbing. It does **not** exercise a real policy on a
+real GPU pod — that path lives in the cloud and is validated separately.
 
 ---
 
-## Tier 1 — Compile-path fix + regression (real GPU required)
+## Tier 1 — DRTC client + routing (CI, no hardware)
 
-- [ ] **SmolVLA** — load → warmup → sustained inference; **no** `RuntimeError:
-  Offset increment outside graph capture` at any forward. *(the fix itself)*
-- [ ] **Pi0 / Pi0.5** — same flow-matching RNG path; confirm independently, do not
-  assume SmolVLA covers them.
-- [ ] **ACT** (deterministic) — still loads + serves correct actions under
-  `default`. Primary *regression* risk: it previously got CUDA graphs via
-  `max-autotune`. Check output sanity + latency.
-- [ ] **Diffusion / VQ-BeT / TDMPC** — at least load + serve one action chunk
-  under `default`.
-- [ ] **Latency at the control rate** — measure SmolVLA forward latency under
-  `default`. Reference: ~370 ms eager vs ~100 ms CUDA-graph-compiled; `default`
-  sits between. If too slow for the loop, the production answer is
-  `DRTC_COMPILE_MODE=max-autotune-no-cudagraphs`.
-- [ ] **`max-autotune-no-cudagraphs` override** — confirm it *also* doesn't crash
-  and beats `default` on latency (recommended for persistent boxes).
-- [ ] **Persistent cache** — first run compiles; container restart reuses the
-  inductor cache + HF weights (no recompile, no re-download) and still doesn't
-  crash on the cached path. Requires `-v …:/root/.cache`.
+- [ ] **Chunk merge** — overlapping chunks merge last-writer-wins on monotonic
+  control timestamps; a fresher inference overrides stale plans.
+- [ ] **Latency estimator** — Jacobson-Karels split tracks network vs. compute and
+  drives `min_execution_horizon` / `cooldown_steps` sanely.
+- [ ] **`connect_drtc(api_key=…)`** — resolves the account and dials the
+  per-session GPU endpoint the dashboard returns; `INTERLATENT_API_KEY` env var is
+  honored; `--api-base` / `INTERLATENT_API_BASE` override works.
+- [ ] **`step()` returns `None` while the first chunk is in flight**, then streams
+  actions at the control rate.
 
-## Tier 2 — End-to-end stack with a real policy (once, on GPU)
+## Tier 2 — Node + dashboard CLI (CI where possible)
 
-- [ ] **Full coordinator path** — `pair → gpu add → session start → node drives
-  robot → inference → session stop`.
-- [ ] **Graceful stop → CloseSession → dataset build/merge/upload** — the
-  ADR-0001 critical path. Verify the server's idle-GC does **not** discard the
-  episode.
-- [ ] **Recording destinations** flush on stop: local `output_dir`, `s3_uri`, and
-  the hosted inbox (ADR-0002).
-- [ ] **Boot warmup** — `DRTC_WARMUP_POLICY=<smolvla>` under `default` → first
-  session is fast and does not crash.
-- [ ] **Coordinator-absent resilience** — kill the coordinator mid-session; the
-  node keeps driving the robot (control plane vs data plane, ADR-0001).
+- [ ] **`interlatent-node pair`** — registers the robot against the dashboard with
+  an API key (mock the API for CI).
+- [ ] **`interlatent-node run`** — polls the dashboard and converges to the
+  assigned session; keeps driving the robot while a session is assigned.
+- [ ] **CLI** — `interlatent gpus ls`, `interlatent nodes ls`,
+  `interlatent session ls|start|stop` build correct requests and parse responses.
+- [ ] **Session lifecycle** — `session start` → node converges → `session stop`
+  closes the DRTC link and triggers any recorded dataset to build/publish.
 
-## Tier 3 — Known latent gaps: decide **block vs. accept-and-document**
+## Tier 3 — Local dataset collection + storage
 
-These were surfaced in design and deliberately deferred (see the
-`deferred-gpu-server-hardening` project memory). None block the compile-mode fix,
-but each should be consciously ruled in or out of "stable":
+- [ ] **`watch()` / `tick()` / `collect()`** stage per-step state/action/reward to
+  local SQLite + JPEG staging with no account.
+- [ ] **`LeRobotRebuilder`** emits a valid LeRobot v3.0 dataset on disk (parquet
+  frames + MP4 video + JSON metadata).
+- [ ] **Recording destinations** flush on stop: local `output_dir` and `s3_uri`
+  merge-on-stop into one flat dataset; the hosted inbox path requires an API key.
+- [ ] **`examples/05_collect_dataset.py`** runs end-to-end offline.
 
-- [ ] **Two nodes → one GPU** — no guard exists. At minimum *characterize* the
-  failure (OOM? garbage output? works?) and document it.
-- [ ] **Policy switch on a warm box** — `PolicyChangeError` surfaces cleanly via
-  the coordinator (`--confirm-policy-change` to override).
+## Tier 4 — Real policy on a cloud pod (manual, against the dashboard)
 
-## Deployment
-
-- [ ] Rebuilt image boots on the target provider(s) with `--gpus all`; healthcheck
-  reaches `(healthy)`; Tailscale path works if used.
-
+- [ ] **End-to-end rollout** — pair a node, start a session against a real pod with
+  a real policy (e.g. SmolVLA), confirm smooth control at the loop rate.
+- [ ] **Latency at the control rate** — measure round-trip and confirm the client
+  stays scheduled ahead; the arm does not stutter.

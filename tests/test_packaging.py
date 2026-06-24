@@ -22,27 +22,5 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent.inference.integration",   # interlatent-rollout
         "interlatent.storage",
         "interlatent.cli",                     # interlatent
-        "interlatent.coordinator",             # coordinator daemon (interlatent up)
     ):
         assert needed in pkgs, f"{needed} missing from sdk wheel (no __init__.py?)"
-
-
-def test_server_wheel_contains_all_packages():
-    pkgs = set(find_packages(str(REPO / "packages" / "server" / "src")))
-    for needed in (
-        "interlatent_server.server",    # interlatent-serve
-        "interlatent_server.protocol",
-        "interlatent_server.storage",
-    ):
-        assert needed in pkgs, f"{needed} missing from server wheel (no __init__.py?)"
-
-
-def test_teleop_wheel_contains_all_packages():
-    pkgs = set(find_packages(str(REPO / "packages" / "teleop" / "src")))
-    for needed in (
-        "interlatent_teleop.laptop",    # interlatent-teleop-laptop / -keyboard
-        "interlatent_teleop.pi",        # interlatent-teleop-pi
-        "interlatent_teleop.protocol",
-        "interlatent_teleop.common",
-    ):
-        assert needed in pkgs, f"{needed} missing from teleop wheel (no __init__.py?)"

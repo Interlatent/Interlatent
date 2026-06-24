@@ -1,17 +1,13 @@
-"""The cloud upgrade: same code, one different argument.
+"""The minimal cloud connect: pass an API key and run the DRTC loop.
 
-Everything else in examples/ runs against infrastructure you operate.
-This example is the bridge to Interlatent Cloud — drop the
-`server_address` and pass an `api_key`, and the same DRTC loop runs on
-managed warm GPUs with server-side episode recording into your hosted
-datasets:
-
-    -    server_address="gpu-box:50051",
-    +    api_key=os.environ["INTERLATENT_API_KEY"],
+Inference runs on a managed GPU pod provisioned by the Interlatent
+dashboard — pass `api_key=` (or set `INTERLATENT_API_KEY`) and the same
+DRTC loop runs on managed warm GPUs with pod-side episode recording into
+your hosted datasets.
 
 What that buys (see README "OSS vs Cloud" for the honest table):
-  - managed warm GPUs — no box to rent, no torch.compile cold starts
-  - server-side recording into hosted, versioned LeRobot datasets
+  - managed warm GPUs — no box to rent, no cold starts
+  - pod-side recording into hosted, versioned LeRobot datasets
   - the dashboard: episode viewer, policy analysis, reward labeling
     (Robometer)
 
@@ -40,12 +36,12 @@ def main() -> None:
         sys.exit("set INTERLATENT_API_KEY (get one at https://interlatent.com)")
 
     client = connect_drtc(
-        api_key=api_key,                  # <- the one-line upgrade
+        api_key=api_key,                  # resolves your account + attached GPU pod
         environment="my-arm",             # dashboard environment slug
         policy_uri="lerobot/smolvla_base",
         task="pick up the red cube",
         fps=10,
-        record=True,                      # cloud records the episode server-side
+        record=True,                      # cloud records the episode pod-side
     )
     print(f"session={client.session_id} (hosted)")
 
@@ -55,7 +51,7 @@ def main() -> None:
             buf = io.BytesIO()
             np.savez(buf, **{
                 # Replace with your real camera frames + joint reads —
-                # identical to the self-hosted loop in 03_run_on_so101.py.
+                # identical to the loop in 03_run_on_so101.py.
                 "observation.state": (rng.standard_normal(6) * 0.1).astype(np.float32),
                 "task": np.array("pick up the red cube"),
             })

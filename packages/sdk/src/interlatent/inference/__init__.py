@@ -1,8 +1,8 @@
 """Interlatent SDK inference — client side.
 
-Robot-side half of Distributed Real-Time Chunking (DRTC). Talks to the
-Modal-hosted server defined in
-`packages/server/src/interlatent_server/server/`.
+Robot-side half of Distributed Real-Time Chunking (DRTC). Streams
+observations to a cloud-managed GPU pod over the gRPC contract in
+`proto/messages.proto` and merges the action chunks it returns.
 
 References:
     - https://jackvial.com/posts/distributed-real-time-chunking.html
@@ -40,27 +40,20 @@ What lives here
                                 becomes a thin wrapper over this)
 
 ================================================================
-Why client lives in the SDK, server in the engine
+Why the client lives in the SDK
 ================================================================
 
 The DRTC client runs on the robot and is a public surface that SDK
-users consume. The server runs on Modal and is internal. Keeping the
-two halves in their natural packages avoids cross-package imports;
-they only share the protobuf wire format, which is regenerated into
-both `protocol/` folders from the .proto in the engine package
-(via `proto/gen_proto.sh`).
-
-The SDK does not import from `interlatent-engine`. The two packages
-collide on the `interlatent` top-level module name and the engine is
-internal-only.
+users consume. The policy forward pass runs on a cloud-managed GPU
+pod; the two halves share only the protobuf wire format, regenerated
+into `protocol/` from `proto/messages.proto` (via `proto/gen_proto.sh`).
 
 ================================================================
 Activation capture (v2)
 ================================================================
 
 Today's SDK hook path attaches to the policy locally. Once a run uses
-DRTC, the policy forward pass happens on the server, so activations
-will be captured server-side. v1 skips capture; v2 will add it via
-the stubbed seams in `server/policy_runtime.py` and ship activations
+DRTC, the policy forward pass happens on the GPU pod, so activations
+will be captured pod-side. v1 skips capture; v2 will ship activations
 back alongside action chunks (or async to S3 keyed by session).
 """

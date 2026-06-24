@@ -95,9 +95,8 @@ message RecordTickRequest {
   // Per-camera JPEG bytes. Keys are short camera names (e.g. "overhead");
   // the server prepends "observation.images." when building the dataset.
   map<string, bytes> jpegs = 6;
-  // Who drove this tick: "policy" (default) or "teleop" (DAgger
-  // intervention via the dashboard). Recorded into the LeRobot dataset
-  // as annotation.interlatent.control_source.
+  // Who drove this tick. "policy" (default) for policy-driven steps;
+  // recorded into the LeRobot dataset as annotation.interlatent.control_source.
   string control_source = 7;
 }
 

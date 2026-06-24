@@ -9,14 +9,14 @@ labels: bug
 **What did you expect?**
 
 **Setup**
-- Package + version (`pip show interlatent interlatent-server interlatent-teleop`):
+- Package + version (`pip show interlatent`):
 - Robot / hardware (if any):
-- GPU + driver (if serving a policy):
 - Network path (same machine / LAN / Tailscale / WAN):
 - Policy URI (e.g. `lerobot/smolvla_base`):
+- Session id (if a cloud inference session was involved):
 
 **Logs**
-Server log around the session and/or client traceback:
+Node/client traceback around the session:
 
 ```
 paste here

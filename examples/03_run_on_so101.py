@@ -1,27 +1,29 @@
-"""Drive an SO-101-shaped robot against your self-hosted inference server.
+"""Drive an SO-101-shaped robot against a cloud GPU pod.
 
-Without hardware this still runs: it introspects the policy's expected
-observation schema locally (camera keys + state shape, config json only —
-no weights downloaded) and synthesizes matching observations, so you can
-validate your server + network path before touching a robot. When you
-wire real hardware, replace `synth_observation()`'s per-key logic with
-camera capture + joint reads — keys and shapes stay identical.
+Inference runs on a managed pod provisioned by the Interlatent dashboard;
+you authenticate with an API key (`ilat_...`). Without hardware this still
+runs: it introspects the policy's expected observation schema locally
+(camera keys + state shape, config json only — no weights downloaded) and
+synthesizes matching observations, so you can validate your account +
+network path before touching a robot. When you wire real hardware, replace
+`synth_observation()`'s per-key logic with camera capture + joint reads —
+keys and shapes stay identical.
 
-Run (after `interlatent-serve --policy lerobot/smolvla_base` on your GPU box):
+Run:
 
     pip install interlatent lerobot
-    python examples/03_run_on_so101.py --server gpu-box:50051 \\
-        --task "pick up the red cube"
+    export INTERLATENT_API_KEY=ilat_...
+    python examples/03_run_on_so101.py --task "pick up the red cube"
 
-For a hands-off daemon on the robot (auto camera capture, DAgger teleop
-takeover, dashboard-assigned sessions) see `interlatent-node` — that path
-uses Interlatent Cloud for session management.
+For a hands-off daemon on the robot (auto camera capture, dashboard-assigned
+sessions) see `interlatent-node`.
 """
 
 from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 import time
 from typing import Any
@@ -31,8 +33,8 @@ import numpy as np
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--server", default="localhost:50051",
-                   help="your interlatent-serve address (host:port)")
+    p.add_argument("--api-key", default=os.environ.get("INTERLATENT_API_KEY"),
+                   help="Interlatent API key (ilat_...); or set INTERLATENT_API_KEY")
     p.add_argument("--policy-uri", default="lerobot/smolvla_base")
     p.add_argument("--task", default="pick up the red cube")
     p.add_argument("--fps", type=float, default=10.0,
@@ -95,13 +97,16 @@ def main() -> None:
 
     from interlatent.inference.integration import connect_drtc
 
-    print(f"connecting to {args.server} ...")
-    print("  (first session on a fresh server loads the policy — can take a "
-          "while unless the server was started with --policy)")
+    if not args.api_key:
+        sys.exit("set INTERLATENT_API_KEY or pass --api-key ilat_...")
+
+    print("connecting to Interlatent ...")
+    print("  (the dashboard provisions a GPU pod for the session — the first "
+          "action chunk can take a second or two to arrive)")
     client = connect_drtc(
-        environment="so101-selfhost-demo",
+        environment="so101-cloud-demo",
         policy_uri=args.policy_uri,
-        server_address=args.server,    # self-hosted: no api_key needed
+        api_key=args.api_key,          # resolves your account + attached GPU pod
         chunk_size=chunk_size,
         action_dim=action_dim,
         task=args.task,
@@ -130,7 +135,7 @@ def main() -> None:
 
     print(f"\nactions received: {received}/{args.steps}")
     if received == 0:
-        sys.exit("FAIL: no actions — check the server log and network path")
+        sys.exit("FAIL: no actions — check your API key, the session, and the network path")
     print("OK")
 
 
