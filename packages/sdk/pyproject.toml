@@ -69,6 +69,9 @@ interlatent-preflight = "interlatent.inference.integration.preflight:main"
 # Daemon that runs on a Pi (or any always-on machine) and converges to
 # whatever inference session the dashboard has assigned to the Node.
 interlatent-node = "interlatent.node.cli:main"
+# One-shot manual move: drive a robot to absolute joint targets and exit.
+# `interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30`. Needs [lerobot].
+interlatent-act = "interlatent.node.act_cli:main"
 # Thin CLI client for the Interlatent dashboard: list pods/nodes and
 # start/stop cloud inference sessions. `interlatent gpus ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"

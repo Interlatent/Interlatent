@@ -40,6 +40,24 @@ finally:
 
 Runnable version: [examples/04_manual_action.py](../examples/04_manual_action.py).
 
+### From the command line: `interlatent-act`
+
+For a one-shot move without writing Python, `interlatent-act` drives the same seam —
+name the joints as `name=value`, it connects, blocks until the arm settles, and exits:
+
+```bash
+# move two joints, hold the rest where they are
+interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30 gripper=80 --hold-missing
+
+# just read and print the current joint pose (no motion)
+interlatent-act --robot so101 --port /dev/ttyACM0 --show
+```
+
+Same safety as the Python path: it refuses a robot kind with no `RobotProfile`, and the
+contract errors (unknown/missing joint, out-of-range) exit non-zero **before** any motion.
+`--timeout`/`--rate-hz` tune the settle loop. This is the manual path only — for a cloud
+policy use `interlatent-node run`.
+
 ### The contract
 
 `action(**named, hold_missing=False, timeout=10.0, rate_hz=30.0)`:
