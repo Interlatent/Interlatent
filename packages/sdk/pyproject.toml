@@ -29,6 +29,9 @@ dependencies = [
   "grpcio-tools>=1.60",
   "protobuf>=4.25",
   "sonora>=0.2.2",
+  # Node-side teleop receiver stub (node/teleop/channel.py) opens a sync
+  # WebSocket to the hosted DAgger relay. Small, pure-Python.
+  "websockets>=12",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +46,22 @@ lerobot = [
   "Pillow>=9",
 ]
 
+# pip install 'interlatent[axol]'
+# Drives the Almond Axol dual-arm robot via its native async SDK, through a
+# native control loop (robot kind "axol"; see interlatent.adapters.axol). The
+# onboard ZED cameras use almond-axol's lerobot ZedCamera (opened by serial), so
+# this extra pulls in lerobot via almond-axol.
+# Requires Python >= 3.13 (almond-axol's floor).
+# Host requirement NOT installed here: the ZED SDK + its `pyzed` Python bindings
+# (not on PyPI — install the ZED SDK, then `axol zed.install`). opencv (cv2) is
+# pulled below for the BGRA->RGB frame conversion.
+# NOTE: almond-axol pins some sources (e.g. pyroki) via [tool.uv.sources], which
+# only `uv` honors — install this extra with `uv`.
+axol = [
+  "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae",
+  "opencv-python-headless>=4.8",
+]
+
 [project.scripts]
 # Connectivity check: opens a real DRTC session against a managed GPU pod
 # with synthetic observations and reports a latency verdict — no robot needed.
@@ -53,6 +72,9 @@ interlatent-node = "interlatent.node.cli:main"
 # Thin CLI client for the Interlatent dashboard: list pods/nodes and
 # start/stop cloud inference sessions. `interlatent gpus ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"
+# Drop-in replacement for `lerobot-record` that captures policy activations
+# during recording and uploads them for interpretability. Needs `interlatent[lerobot]`.
+interlatent-sync-rollout = "interlatent.adapters.lerobot.sync_inference.sync_rollout:main"
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"

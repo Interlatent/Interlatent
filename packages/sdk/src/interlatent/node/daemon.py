@@ -345,17 +345,32 @@ class NodeDaemon:
     # Control-loop lifecycle
     # ------------------------------------------------------------------
 
+    # Robot kinds that ship their own native (non-LeRobot) control loop, mapped
+    # to the "module:function" the daemon imports. A native loop talks to its
+    # robot's own SDK and reuses only the LeRobot-free DRTC wire helpers — so the
+    # bundled LeRobot wrapper (and lerobot itself) is never imported for it. This
+    # is the single place a vendor robot registers a native loop.
+    # See docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md.
+    _NATIVE_LOOPS: dict[str, str] = {
+        "axol": "interlatent.adapters.axol:control_loop",
+    }
+
     def _resolve_loop_fn(self) -> Callable[..., None]:
         """Pick the control-loop function exactly once.
 
-        --loop module:fn wins. Otherwise the built-in LeRobot wrapper.
+        --loop module:fn wins. Else a robot kind with a registered native loop
+        uses that. Else the bundled LeRobot wrapper.
         """
         if self._loop_fn is not None:
             return self._loop_fn
 
+        from .control import import_callable
+
+        kind = (self.cfg.robot_kind or "").lower().strip()
         if self.cfg.loop_override:
-            from .control import import_callable
             self._loop_fn = import_callable(self.cfg.loop_override)
+        elif kind in self._NATIVE_LOOPS:
+            self._loop_fn = import_callable(self._NATIVE_LOOPS[kind])
         else:
             if not self.cfg.robot_kind:
                 raise RuntimeError(
@@ -480,8 +495,27 @@ class NodeDaemon:
             env_id=session.get("environment_id"),
         )
 
+        # Hosted DAgger teleop receiver. The TeleopChannel owns a background WS
+        # to the GPU-box relay for the session lifetime (idle when no producer
+        # is engaged); the control loop reads the latest frame and overrides the
+        # policy when engaged. We use ``drtc_api_key`` because the teleop-token
+        # endpoint is owned by the user, not the node — the node token is
+        # rejected by the relay's auth. Skipped (teleop disabled) when no user
+        # key or session id is available.
+        from .teleop.channel import TeleopChannel
+
+        teleop_channel: Optional[TeleopChannel] = None
+        teleop_api_key = self.cfg.drtc_api_key or ""
+        if teleop_api_key and session.get("id"):
+            teleop_channel = TeleopChannel(
+                session_id=session["id"],
+                api_base=self.cfg.api_base,
+                api_key=teleop_api_key,
+            )
+            teleop_channel.start()
+
         loop_fn = self._resolve_loop_fn()
-        handle = _ControlLoopHandle(client=client)
+        handle = _ControlLoopHandle(client=client, teleop_channel=teleop_channel)
         kwargs = {
             "client": client,
             "session": session,
@@ -492,6 +526,7 @@ class NodeDaemon:
             "robot_cameras": self.cfg.robot_cameras,
             "api_key": self.cfg.token,
             "api_base": self.cfg.api_base,
+            "teleop_channel": teleop_channel,
             "node_id": self.cfg.node_id,
             "image_resize": image_resize,
         }
@@ -506,6 +541,11 @@ class NodeDaemon:
                     client.close()
                 except Exception:
                     pass
+                if teleop_channel is not None:
+                    try:
+                        teleop_channel.stop()
+                    except Exception:
+                        pass
 
         handle.thread = threading.Thread(
             target=_runner, name=f"node-loop-{session.get('id','')[:8]}", daemon=True
@@ -521,6 +561,14 @@ class NodeDaemon:
         h = self._active
         self._active = None
         h.stop_flag.set()
+        # The control-loop runner stops the teleop channel in its finally
+        # clause, but if the loop thread is stuck the channel would never get
+        # torn down — close it here too so the WS connection isn't leaked.
+        if h.teleop_channel is not None:
+            try:
+                h.teleop_channel.stop()
+            except Exception:
+                pass
         if h.thread is not None:
             h.thread.join(timeout=10.0)
             if h.thread.is_alive():
@@ -530,6 +578,7 @@ class NodeDaemon:
 @dataclass
 class _ControlLoopHandle:
     client: Any
+    teleop_channel: Any = None
     stop_flag: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
 

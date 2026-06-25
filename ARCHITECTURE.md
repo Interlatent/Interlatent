@@ -41,12 +41,32 @@ Key properties:
 | Wire protocol | `inference/protocol/` | Generated stubs from `proto/messages.proto` |
 | Integration | `inference/integration/connect.py` | `connect_drtc()` — one-call session against a cloud-provisioned GPU pod (`api_key=`) |
 | Node daemon | `node/` (cli, daemon, control) | `interlatent-node` — long-running daemon that pairs to your account, polls the dashboard, and runs assigned inference sessions on real hardware (LeRobot robot classes) |
+| Teleop stub | `node/teleop/` (channel, frame, safety, robot_profile) | Thin receiver for hosted DAgger takeover — see below |
 | Dashboard CLI | `cli/` | `interlatent` — thin client over the dashboard API: `gpus ls`, `nodes ls`, `session ls\|start\|stop` |
 | Collection | `_client.py`, `_watcher.py`, `_db.py`, `_step_source.py` | `watch()/tick()/collect()` — stage per-step state/action/reward into local SQLite |
 | Dataset build | `storage/lerobot_rebuild.py`, `_dataset.py` | Turn the staging cache into a LeRobot v3.0 dataset on disk |
 
 Collection is **local-first**: `watch()`/`tick()` write only to local SQLite + JPEG staging.
 Uploading to the hosted platform is a separate, optional step.
+
+### Teleop (DAgger takeover)
+
+A human can take over a robot mid-policy and have the intervention recorded
+(`control_source="teleop"`). The split is **engine on the platform, thin stub on
+the client** (see [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md)):
+
+- The hosted platform runs the teleop *engine* — keyboard integration, WebXR
+  pose IK, retargeting — and streams **absolute joint targets** to the robot.
+- `node/teleop/` keeps only the receiver: `TeleopChannel` (a WebSocket to the
+  hosted relay) decodes `TeleopFrame`s; the control loop applies engaged
+  `mode="targets"` frames through the **`SafetyGate`** (the last-hop
+  workspace/velocity/deadman clamp) before driving the arm, and records the
+  commanded action as `control_source="teleop"`.
+
+**Layered client-side safety** (both run next to the motors, never across the
+network): the per-adapter **delta clamp** (`--robot.max_step`) caps the per-tick
+joint jump for *all* actions — policy and teleop alike — and the `SafetyGate`
+adds workspace/velocity/deadman limits on the teleop path.
 
 ### `proto/`
 

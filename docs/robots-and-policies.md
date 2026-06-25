@@ -25,8 +25,8 @@ Python, you can drive it (that's the whole of
 
 | Robot | Path | Notes |
 |---|---|---|
-| SO-101 | `interlatent-node --robot so101` / examples | reference platform |
-| Koch v1.1 | `interlatent-node --robot koch` | via LeRobot robot classes |
+| SO-101 | `interlatent-node --robot so101` / examples | reference platform; manual [`action()`](action-interface.md) |
+| Koch v1.1 | `interlatent-node --robot koch` | via LeRobot robot classes; manual [`action()`](action-interface.md) |
 | ALOHA | `interlatent-node --robot aloha` | via LeRobot robot classes |
 | Any LeRobot-supported robot | `interlatent-node --robot <type>` | cameras attach as `observation.images.<name>` |
 | Custom hardware | `--loop module:fn` or hand-written loop | bring your own I/O |

@@ -73,6 +73,12 @@ def lerobot_control_loop(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     node_id: Optional[str] = None,
+    # Browser/VR DAgger teleop receiver (set by the daemon when a session is
+    # teleop-capable). The node consumes ``mode="targets"`` frames — absolute
+    # joint vectors the hosted teleop engine already computed — and routes them
+    # through the SafetyGate. None disables teleop (pure policy). See
+    # docs/adr/0012-teleop-receiver-stub-open-core-boundary.md.
+    teleop_channel: Optional[Any] = None,
     # Pre-encode square-resize target for camera frames (pixels per side).
     # None keeps native camera resolution. Set by the daemon when the
     # GPU-side policy is known to downsample anyway (e.g. MolmoAct2 →
@@ -152,6 +158,68 @@ def lerobot_control_loop(
     except Exception:
         _LOG.warning("DRTC-DEBUG robot-units introspection failed", exc_info=True)
 
+    # --- Teleop receiver setup (hosted DAgger path) ---------------------
+    # The SafetyGate is the single safety authority for human-driven motion:
+    # the platform streams absolute joint targets (``mode="targets"``) and they
+    # route through the gate's workspace + velocity clamp here on the node. It
+    # needs a static per-robot profile (limits + velocity cap + rest pose) that
+    # lerobot cannot supply; without one for this robot kind we refuse the gated
+    # teleop path and stay on policy. The keyboard/pose modality compute lives
+    # on the platform (see ADR 0012), so the node handles only ``mode="targets"``.
+    from .teleop.robot_profile import get_profile
+    from .teleop.safety import SafetyGate, TargetSample
+
+    _teleop_dt = 1.0 / fps if fps > 0 else 1.0 / 30.0
+    teleop_profile = get_profile(robot_kind)
+    teleop_gate = (
+        SafetyGate(profile=teleop_profile, control_dt=_teleop_dt)
+        if teleop_profile is not None
+        else None
+    )
+    # Reported to the backend (→ Environment.teleop_profile → the teleop-token
+    # response) so the producer can retarget against this robot's schema.
+    _teleop_schema = teleop_profile.to_schema_dict() if teleop_profile is not None else None
+    teleop_warned = False
+
+    # --- Delta clamp (execution safety, all action sources) -------------
+    # Last-line guard against a single-tick joint slam (model glitch, bad
+    # chunk, or teleop frame). The per-step limit is configured by the adapter
+    # via the ``--robot.max_step`` extra (units match the motor-norm mode the
+    # loop logs above). Unset ⇒ disabled with a one-time warning. See A6 /
+    # ADR 0012. ``None`` disables.
+    _max_step = _parse_max_step(robot_extra or {})
+    if _max_step is None:
+        _LOG.warning(
+            "Delta clamp DISABLED: no --robot.max_step set. A single-tick joint "
+            "slam will execute unclamped. Set --robot.max_step=<units> (motor-norm "
+            "units, e.g. degrees for MolmoAct2) to enable the execution-safety guard."
+        )
+
+    # --- Action smoothing (policy path) ---------------------------------
+    # Low-pass the per-tick policy action stream to attenuate chunk-boundary /
+    # model jitter before it reaches the motors. 2nd-order Butterworth, designed
+    # at the control rate; default 3 Hz cutoff, tunable via
+    # ``--robot.action_filter_hz`` (0/none disables). Smoothing runs BEFORE the
+    # delta clamp so the clamp remains the final execution-safety guard. Not
+    # applied on the teleop path (human input is already velocity-clamped by the
+    # SafetyGate and should stay responsive). See node/smoothing.py.
+    from .smoothing import ButterworthLowPass
+
+    _filter_hz = _parse_action_filter_hz(robot_extra or {})
+    action_filter = (
+        ButterworthLowPass(cutoff_hz=_filter_hz, sample_hz=float(fps if fps > 0 else 30))
+        if _filter_hz is not None
+        else None
+    )
+    if action_filter is not None:
+        _LOG.info(
+            "Action smoothing ENABLED: 2nd-order Butterworth low-pass, cutoff=%.2f Hz "
+            "@ %d Hz control rate (policy path). Set --robot.action_filter_hz=none to "
+            "disable.", action_filter.cutoff_hz, int(fps if fps > 0 else 30),
+        )
+    else:
+        _LOG.info("Action smoothing DISABLED (--robot.action_filter_hz=none).")
+
     try:
         period = 1.0 / fps if fps > 0 else 1.0 / 30.0
         step_counter = 0
@@ -168,66 +236,153 @@ def lerobot_control_loop(
 
             obs = robot.get_observation()
 
-            # Encode lazily: client.step() only builds the payload on
-            # ticks where DRTC actually sends an observation, so we
-            # skip the encode on the majority of ticks. With
-            # ``image_resize`` set, frames are downsampled to a
-            # square before JPEG — for MolmoAct2 (224 input) sending
-            # 256x256 cuts payload ~5-10x vs raw 640x480 with no
-            # measurable accuracy loss.
-            action = client.step(
-                lambda o=obs: _encode_npz(
-                    _to_policy_schema(o), image_resize=image_resize
-                ),
-                codec="npz",
+            # Sample the latest teleop frame. None when no producer is
+            # connected or the last frame is stale (channel drops > 250 ms).
+            frame = teleop_channel.latest_frame() if teleop_channel is not None else None
+            engaged = bool(frame and frame.engaged and frame.deadman)
+
+            # Set by whichever branch records a tick; drives the one-time
+            # feature/teleop-profile report after the branch.
+            state_keys = None
+
+            teleop_ok = (
+                engaged
+                and teleop_gate is not None
+                and action_keys
+                and len(action_keys) == len(teleop_profile.joint_names)
             )
-            if action is not None:
-                action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-
-                # DRTC-DEBUG glass-box: log the actual joint angles, the
-                # commanded ones, and the per-joint jump — for the first
-                # chunk-boundaries of a session and periodically after.
-                # A huge delta on the first policy command is the slam:
-                # the arm leaps from its current pose to the model's
-                # absolute target. Units here are whatever the motor norm
-                # mode reports above (degrees for MolmoAct2).
-                if action_keys and (step_counter < 10 or step_counter % 100 == 0):
-                    try:
-                        _actual = _extract_joint_state(obs, action_keys)
-                        _cmd = action_arr[: len(action_keys)]
-                        _delta = _cmd - _actual[: len(_cmd)]
-                        _pairs = ", ".join(
-                            "%s: %.2f->%.2f (Δ%+.2f)"
-                            % (action_keys[i], _actual[i], _cmd[i], _delta[i])
-                            for i in range(len(_cmd))
-                        )
-                        _LOG.info(
-                            "DRTC-DEBUG joints #%d | max|Δ|=%.2f | %s",
-                            step_counter, float(np.abs(_delta).max()), _pairs,
-                        )
-                    except Exception:
+            if teleop_ok:
+                # --- TELEOP PATH (mode="targets" only) ---
+                # The hosted teleop engine already resolved an absolute joint
+                # target; we route it through the SafetyGate (workspace +
+                # velocity clamp — the single safety authority for human-driven
+                # motion) and the delta clamp, then record the *commanded*
+                # (post-gate) action so the dataset reflects what the robot was
+                # actually told to do. Non-"targets" modes can't be computed on
+                # the node (engine is on the platform) — hold the current pose.
+                actual_joints = _extract_joint_state(obs, action_keys)
+                if (
+                    frame.mode == "targets"
+                    and frame.joint_targets is not None
+                    and len(frame.joint_targets) == len(action_keys)
+                ):
+                    target = np.asarray(frame.joint_targets, dtype=np.float32)
+                else:
+                    # Malformed/length-mismatched, or a keys/pose frame the node
+                    # can't compute locally: hold pose (gate idles toward it).
+                    if frame.mode in ("keys", "pose") and not teleop_warned:
                         _LOG.warning(
-                            "DRTC-DEBUG joint dump failed", exc_info=True
+                            "Teleop frame mode=%r received but the node only "
+                            "handles 'targets' (the modality engine runs on the "
+                            "platform); holding pose. See ADR 0012.", frame.mode,
                         )
+                        teleop_warned = True
+                    target = actual_joints.copy()
 
+                teleop_gate.submit(TargetSample(
+                    joints=target.reshape(-1),
+                    deadman_active=frame.deadman,
+                    confidence=frame.confidence,
+                    received_at=loop_start,
+                    producer_timestamp_ns=time.monotonic_ns(),
+                ))
+                commanded, _gate_status = teleop_gate.step(actual_joints, now=loop_start)
+                action_arr = np.asarray(commanded, dtype=np.float32).reshape(-1)
+                # Uniform final guard. SafetyGate already velocity-clamped, so
+                # this is typically a no-op, but keeps one execution-safety
+                # invariant across all action sources.
+                action_arr = _clamp_action_delta(
+                    action_arr, actual_joints, _max_step, action_keys,
+                    step_counter, source="teleop",
+                )
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
 
-                # Per-tick capture — non-blocking; queues to a background
-                # thread in the DRTC client that ships via RecordTick.
+                # Drop policy chunks queued or landing during teleop so they
+                # don't apply when the human releases.
+                try:
+                    client.flush_buffer()
+                except Exception:
+                    pass
+
+                # Discontinuity: the policy stream is interrupted, so drop the
+                # smoother's state. The first action after release warm-starts
+                # from the live pose instead of carrying stale pre-teleop state.
+                if action_filter is not None:
+                    action_filter.reset()
+
                 state_keys = _capture_tick(
                     client, obs, action_arr, step_counter,
-                    control_source="policy",
+                    control_source="teleop",
                 )
-
-                # One-time feature-name report (retry a few ticks on failure).
-                if not features_reported and features_report_attempts < 5:
-                    features_report_attempts += 1
-                    if _report_robot_features(
-                        api_base, node_id, api_key, state_keys, action_keys,
-                    ):
-                        features_reported = True
-
                 step_counter += 1
+            else:
+                # Reset the gate so the next engage starts from the live pose
+                # (the gate is only stepped while engaged).
+                if teleop_gate is not None:
+                    teleop_gate.reset()
+
+                # --- POLICY PATH ---
+                # Encode lazily: client.step() only builds the payload on
+                # ticks where DRTC actually sends an observation, so we
+                # skip the encode on the majority of ticks. With
+                # ``image_resize`` set, frames are downsampled to a
+                # square before JPEG — for MolmoAct2 (224 input) sending
+                # 256x256 cuts payload ~5-10x vs raw 640x480 with no
+                # measurable accuracy loss.
+                action = client.step(
+                    lambda o=obs: _encode_npz(
+                        _to_policy_schema(o), image_resize=image_resize
+                    ),
+                    codec="npz",
+                )
+                if action is not None:
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+
+                    # Low-pass the policy stream to damp per-tick volatility
+                    # (chunk-boundary / model jitter) before any safety guard.
+                    # Warm-started from the first post-engage action, so it does
+                    # not ramp from zero.
+                    if action_filter is not None:
+                        action_arr = action_filter.filter(action_arr)
+
+                    # Execution-safety delta clamp (+ DRTC-DEBUG glass-box log).
+                    # A huge delta on the first policy command is the slam: the
+                    # arm leaps from its current pose to the model's absolute
+                    # target. The clamp limits the per-tick jump; units match
+                    # the motor-norm mode logged at connect.
+                    if action_keys:
+                        actual_joints = _extract_joint_state(obs, action_keys)
+                        action_arr = _clamp_action_delta(
+                            action_arr, actual_joints, _max_step, action_keys,
+                            step_counter, source="policy",
+                        )
+
+                    robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+
+                    # Per-tick capture — non-blocking; queues to a background
+                    # thread in the DRTC client that ships via RecordTick.
+                    state_keys = _capture_tick(
+                        client, obs, action_arr, step_counter,
+                        control_source="policy",
+                    )
+                    step_counter += 1
+
+            # One-time robot-features + teleop-profile report (retry a few
+            # ticks on failure). Runs on BOTH paths so the teleop_profile
+            # reaches the backend during normal policy operation — the hosted
+            # producer needs it *before* the first teleop engage. Gated on a
+            # capture so observation.state names are present.
+            if (
+                state_keys is not None
+                and not features_reported
+                and features_report_attempts < 5
+            ):
+                features_report_attempts += 1
+                if _report_robot_features(
+                    api_base, node_id, api_key, state_keys, action_keys,
+                    teleop_profile=_teleop_schema,
+                ):
+                    features_reported = True
 
             elapsed = time.perf_counter() - loop_start
             if elapsed < period:
@@ -384,17 +539,21 @@ def _report_robot_features(
     token: Optional[str],
     state_names: Optional[list],
     action_names: Optional[list],
+    teleop_profile: Optional[dict] = None,
 ) -> bool:
-    """POST the robot's per-element feature names to the node endpoint.
+    """POST the robot's per-element feature names + teleop profile to the node endpoint.
 
     Returns True when the report was sent (or there is nothing actionable to
     send / no config to send it with — so the caller stops retrying), and
     False only on a network error worth one more attempt. The backend stores
-    them first-writer-wins, so re-reports are harmless.
+    both first-writer-wins, so re-reports are harmless.
 
     Names are reported verbatim from the lerobot robot — modern LeRobot's
     own flat-list convention (e.g. ``["shoulder_pan.pos", ...]``) — keyed by
     the canonical feature keys ``observation.state`` / ``action``.
+    ``teleop_profile`` is the static teleop schema (``RobotProfile.to_schema_dict()``)
+    reported so the hosted teleop producer can retarget against this robot's
+    schema, or ``None`` for robots with no registered profile.
     """
     if not api_base or not node_id or not token:
         return True  # unconfigured — nothing to do, don't spin
@@ -403,25 +562,29 @@ def _report_robot_features(
         names["observation.state"] = list(state_names)
     if action_names:
         names["action"] = list(action_names)
-    if not names:
-        return True  # robot exposed no labelable features
+    if not names and not teleop_profile:
+        return True  # nothing labelable to report
     try:
         import httpx
 
         url = f"{api_base.rstrip('/')}/api/v1/nodes/{node_id}/robot-features"
+        payload: dict = {"feature_element_names": names}
+        if teleop_profile:
+            payload["teleop_profile"] = teleop_profile
         resp = httpx.post(
             url,
             headers={"x-api-key": token},
-            json={"feature_element_names": names},
+            json=payload,
             timeout=10.0,
         )
         _LOG.info(
-            "Reported robot feature names (%s) -> %s",
-            {k: len(v) for k, v in names.items()}, resp.status_code,
+            "Reported robot features (names=%s, teleop_profile=%s) -> %s",
+            {k: len(v) for k, v in names.items()},
+            bool(teleop_profile), resp.status_code,
         )
         return True
     except Exception:
-        _LOG.warning("Failed to report robot feature names (will retry)", exc_info=True)
+        _LOG.warning("Failed to report robot features (will retry)", exc_info=True)
         return False
 
 
@@ -721,6 +884,108 @@ def _encode_npz(obs: dict, image_resize: Optional[int] = None) -> bytes:
     buf = io.BytesIO()
     np.savez(buf, **flat)
     return buf.getvalue()
+
+
+def _parse_max_step(extra: dict) -> Optional[float]:
+    """Read the per-tick delta-clamp limit from the ``--robot.*`` extras.
+
+    Configured as part of the adapter (the ``--robot.max_step=<v>`` extra).
+    Units match the motor-norm mode the loop logs at connect (e.g. degrees for
+    MolmoAct2). Returns ``None`` (clamp disabled) when unset, non-numeric, or
+    non-positive.
+    """
+    raw = extra.get("max_step")
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        _LOG.warning("Ignoring non-numeric --robot.max_step=%r", raw)
+        return None
+    return v if v > 0 else None
+
+
+# Default low-pass cutoff for the policy action stream. 3 Hz at the typical 30 Hz
+# control rate: deliberate arm motion is well below this, per-tick jitter sits above.
+_DEFAULT_ACTION_FILTER_HZ = 3.0
+
+
+def _parse_action_filter_hz(extra: dict) -> Optional[float]:
+    """Read the policy action-smoothing cutoff from the ``--robot.*`` extras.
+
+    Configured as part of the adapter (``--robot.action_filter_hz=<hz>``). Returns
+    the Butterworth low-pass cutoff in Hz, defaulting to
+    :data:`_DEFAULT_ACTION_FILTER_HZ` when unset. ``0`` / ``none`` / ``off`` (or a
+    non-positive / non-numeric value) disables smoothing and returns ``None``.
+    """
+    raw = extra.get("action_filter_hz")
+    if raw is None:
+        return _DEFAULT_ACTION_FILTER_HZ
+    if isinstance(raw, str) and raw.strip().lower() in ("none", "off", "disabled", ""):
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        _LOG.warning(
+            "Ignoring non-numeric --robot.action_filter_hz=%r; using default %.1f Hz",
+            raw, _DEFAULT_ACTION_FILTER_HZ,
+        )
+        return _DEFAULT_ACTION_FILTER_HZ
+    return v if v > 0 else None
+
+
+def _clamp_action_delta(
+    action: "np.ndarray",
+    actual: "np.ndarray",
+    max_step: Optional[float],
+    action_keys: list,
+    step: int,
+    *,
+    source: str,
+) -> "np.ndarray":
+    """Execution-safety guard: cap the per-tick joint jump to ``max_step``.
+
+    Applied to every action about to execute, regardless of source (policy or
+    teleop), as the last line of defense against a single-tick slam. Each joint
+    is limited so ``|cmd_i - actual_i| <= max_step`` (a *clamp*: the arm advances
+    toward the target by at most ``max_step`` and never stalls). Also emits the
+    sampled DRTC-DEBUG glass-box line. ``max_step is None`` ⇒ log only, no clamp.
+    """
+    arr = np.asarray(action, dtype=np.float32).reshape(-1)
+    act = np.asarray(actual, dtype=np.float32).reshape(-1)
+    n = min(len(action_keys), len(arr), len(act))
+    if n == 0:
+        return arr
+    cmd = arr[:n]
+    a = act[:n]
+    delta = cmd - a
+    # Sampled glass-box: first few ticks of a session + periodically after.
+    if step < 10 or step % 100 == 0:
+        try:
+            pairs = ", ".join(
+                "%s: %.2f->%.2f (Δ%+.2f)" % (action_keys[i], a[i], cmd[i], delta[i])
+                for i in range(n)
+            )
+            _LOG.info(
+                "DRTC-DEBUG joints #%d (%s) | max|Δ|=%.2f | %s",
+                step, source, float(np.abs(delta).max()), pairs,
+            )
+        except Exception:
+            _LOG.warning("DRTC-DEBUG joint dump failed", exc_info=True)
+    if max_step is None:
+        return arr
+    exceeded = np.abs(delta) > max_step
+    if np.any(exceeded):
+        out = arr.copy()
+        out[:n] = a + np.clip(delta, -max_step, max_step)
+        j = int(np.argmax(np.abs(delta)))
+        _LOG.warning(
+            "Delta clamp (%s) #%d: %d joint(s) exceeded max_step=%.3f; worst %s "
+            "Δ=%.3f capped — sent clamped command.",
+            source, step, int(exceeded.sum()), max_step, action_keys[j], float(delta[j]),
+        )
+        return out
+    return arr
 
 
 def _coerce_action_for_robot(action: np.ndarray, action_keys: list) -> Any:

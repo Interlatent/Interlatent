@@ -1,0 +1,125 @@
+# The action interface
+
+Every robot adapter exposes one **action interface** that both the cloud policy
+(engine path) and your own code (manual path) drive — a final actuator sitting
+*below* the DRTC action schedule. Actions are **joint-space**: a vector of joint
+targets, one per joint. There is no inverse kinematics or Cartesian frame; `action(x,
+y, z, …)` means joint angles, not a workspace point.
+
+There are two levels on the same adapter object:
+
+| Call | Used by | Semantics |
+|---|---|---|
+| `send_action(action)` | the engine loop | non-blocking, fire-and-forget, latest-wins — one waypoint per control tick |
+| `action(**named, …)` | your code (manual) | **named joints**, **blocks until the arm settles** (raises on timeout) |
+
+See [ADR 0013](adr/0013-manual-action-interface-below-schedule.md) for why it sits
+below the schedule and reuses the teleop safety model.
+
+## Manual control: `action()`
+
+```python
+from interlatent.adapters.lerobot.robot import LeRobotAdapter
+
+adapter = LeRobotAdapter("so101", port="/dev/ttyACM0")
+adapter.connect()
+try:
+    # Absolute joint targets, in the robot's own frame (degrees for SO-101).
+    # Blocks until the arm settles at the target.
+    adapter.action(
+        shoulder_pan=0.0, shoulder_lift=0.0, elbow_flex=0.0,
+        wrist_flex=0.0, wrist_roll=0.0, gripper=50.0,
+        timeout=8.0,
+    )
+
+    # Move one joint, hold the rest where they are.
+    adapter.action(shoulder_pan=30.0, hold_missing=True)
+finally:
+    adapter.disconnect()
+```
+
+Runnable version: [examples/04_manual_action.py](../examples/04_manual_action.py).
+
+### The contract
+
+`action(**named, hold_missing=False, timeout=10.0, rate_hz=30.0)`:
+
+- **Named joints are the contract.** Pass joints by name (`shoulder_pan=…`). Use the
+  names in `adapter.action_features` (without the `.pos` suffix). Positional vectors
+  are the *internal* form used by the engine path — not how you call `action()`.
+- **Unknown joint name → `ValueError`.** A name the robot doesn't have (typo, or a
+  policy/robot mismatch) is always an error; no flag suppresses it.
+- **Omitted joint → `ValueError`, unless `hold_missing=True`.** With the flag, any joint
+  you don't name is held at its **measured present position** (read once, up front),
+  and the held joints are logged. Without it, you must name every joint.
+- **Out-of-range target → `ValueError` before any motion.** Targets are validated
+  against the robot's joint limits up front, so a bad target never moves the arm.
+- **Blocks until settled, or raises `TimeoutError`.** A *position* joint settles when it
+  is within its tolerance of the target. A *gripper* (or any non-position joint) settles
+  as soon as it is commanded — a gripper closing on an object never reaches its position
+  target, so the call does not wait on it. `timeout` is mandatory and has a default.
+
+### Safety
+
+Manual motion is human-driven, so it routes through the same client-side safety model
+as teleop:
+
+- The **SafetyGate** velocity/workspace/deadman-clamps every commanded step, walking
+  the arm to the target at a safe speed (this is also what drives "settle").
+- The adapter's **delta clamp** caps the per-tick joint jump inside `send_action`.
+
+Both require a [`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
+for the robot kind (joint limits + velocity caps). **If there is no profile for the
+kind, `action()` refuses to run** (raises) rather than driving the arm unguarded.
+Built-in profiles: `so101`, `koch`. The engine path (`send_action`) does not need a
+profile.
+
+### Smoothing the engine stream
+
+The policy's per-tick action stream (`send_action`, engine path) is low-pass
+filtered on the node before it reaches the motors, to damp chunk-boundary and model
+jitter. It is a **2nd-order Butterworth** low-pass designed at the control rate,
+default cutoff **3 Hz** — deliberate arm motion sits well below it, per-tick wobble
+above. It runs *before* the delta clamp, so the clamp stays the final execution-safety
+guard, and is warm-started from the live pose (no zero-ramp) and reset across teleop
+takeovers. Tune or disable it via the adapter extra:
+
+```
+interlatent-node --robot so101 --robot.action_filter_hz=3     # default
+interlatent-node --robot so101 --robot.action_filter_hz=none  # disable
+```
+
+Smoothing applies only to the **engine path**. The manual `action()` path is already
+velocity-limited and settles to a target, so it is not filtered. See
+[`node/smoothing.py`](../packages/sdk/src/interlatent/node/smoothing.py).
+
+### Caveats
+
+- **Don't hand-roll a tight loop of partial `action()` calls.** Holding joints at their
+  *measured* position every tick re-injects measurement (and gravity sag) as the next
+  setpoint, which can slowly droop a gravity-loaded joint. One-shot manual calls are
+  safe; for streaming, that's the engine path's job.
+- **`action()` is not for the engine path.** The engine streams waypoints through
+  `send_action`; blocking-to-settle there would break DRTC. Never call `action()` from a
+  control loop.
+
+## Adding a robot
+
+A robot kind becomes manually drivable in two steps:
+
+1. **A `RobotProfile`** in
+   [`robot_profile.py`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py):
+   ordered `joint_names`, per-joint `joint_limits` and `max_velocity`, and a `rest_pose`,
+   registered in `_PROFILES` under the `--robot` kind(s). The `joint_names` **must match
+   the order** of the adapter's `action_features` (bare names) — `action()` raises a
+   clear mismatch error otherwise. Start conservative (tighter limits, lower velocities)
+   and widen only after checking the `DRTC-DEBUG joints` log on real hardware.
+2. **An adapter.** For a LeRobot-supported arm, `LeRobotAdapter("<kind>", …)` already
+   works once the profile exists. For non-LeRobot hardware, implement the
+   [`RobotAdapter`](../packages/sdk/src/interlatent/adapters/base.py) duck type
+   (`connect` / `get_observation` / `send_action` / `disconnect`, `action_features`,
+   `joint_specs`) and inherit `ManualActionInterface` to get `action()` for free — see
+   [`adapters/axol/robot.py`](../packages/sdk/src/interlatent/adapters/axol/robot.py).
+
+`joint_specs` declares only per-joint `control_mode` (`"position"` vs gripper/effort) and
+`settle_tolerance`; ranges come from the profile, so limits live in exactly one place.
