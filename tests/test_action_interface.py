@@ -146,6 +146,32 @@ def test_koch_profile_registered_and_consistent():
     assert a.get_observation()["shoulder_pan.pos"] == pytest.approx(20.0, abs=2.0)
 
 
+def test_gripper_commanded_when_arm_already_in_tolerance():
+    # Regression: the arm starts within settle_tolerance of every position target,
+    # but the gripper must still move. The loop must NOT return before commanding
+    # the gripper just because the position joints look settled.
+    a = FakeAdapter(track="full", start=0.0)
+    # All position joints commanded to ~their current pose (within 2 deg), gripper 0->80.
+    a.action(
+        shoulder_pan=1.0, shoulder_lift=0.0, elbow_flex=0.0,
+        wrist_flex=0.0, wrist_roll=0.0, gripper=80.0,
+        **_FAST,
+    )
+    assert a.commands, "expected at least one command to be sent"
+    assert a.get_observation()["gripper.pos"] == pytest.approx(80.0, abs=1.0)
+
+
+def test_at_target_still_sends_one_command():
+    # Commanding the exact current pose should still issue a command (not no-op).
+    a = FakeAdapter(track="full", start=0.0)
+    a.action(
+        shoulder_pan=0.0, shoulder_lift=0.0, elbow_flex=0.0,
+        wrist_flex=0.0, wrist_roll=0.0, gripper=0.0,
+        **_FAST,
+    )
+    assert len(a.commands) >= 1
+
+
 def test_gripper_excluded_from_settle():
     # Arm reaches target; gripper is frozen far from its commanded value. The move
     # must still settle because the gripper (control_mode != position) is excluded.

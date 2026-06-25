@@ -213,18 +213,38 @@ class ManualActionInterface:
         """Measured joint positions in ``action_features`` order."""
         return _extract_joint_state(obs, list(self.action_features))
 
-    def _settled(self, current: np.ndarray, target: np.ndarray) -> bool:
-        """True once every *position* joint is within tolerance.
+    def _settled(
+        self,
+        current: np.ndarray,
+        target: np.ndarray,
+        commanded: "np.ndarray | None" = None,
+    ) -> bool:
+        """True once the move is complete.
 
-        Non-position joints (gripper / effort / velocity) are excluded — a gripper
-        closing on an object never reaches its position target, so waiting on it
-        would always time out.
+        - **Position joints** settle when the *measured* position is within
+          ``settle_tolerance`` of the target.
+        - **Non-position joints** (gripper / effort / velocity) don't track to a
+          measured position — a gripper closing on an object never reaches its
+          position target — so they settle once the *commanded* trajectory has
+          reached the target (the SafetyGate has finished issuing the move). This
+          still **waits for the command to be fully issued**, so the joint isn't
+          cut off mid-approach, but does not block on a measured value it may never
+          reach.
+
+        Until the first command has been issued (``commanded is None``) the move is
+        never considered settled, so at least one action is always sent — a target
+        that happens to start within tolerance still gets commanded.
         """
-        for spec, cur, tgt in zip(self.joint_specs, current, target):
-            if spec.control_mode != _POSITION_MODE:
-                continue
-            if abs(float(cur) - float(tgt)) > spec.settle_tolerance:
-                return False
+        if commanded is None:
+            return False
+        for i, (spec, cur, tgt) in enumerate(zip(self.joint_specs, current, target)):
+            if spec.control_mode == _POSITION_MODE:
+                if abs(float(cur) - float(tgt)) > spec.settle_tolerance:
+                    return False
+            else:
+                # Non-position: wait until the commanded trajectory reaches target.
+                if abs(float(commanded[i]) - float(tgt)) > 1e-3:
+                    return False
         return True
 
     def _run_settle(
@@ -240,11 +260,16 @@ class ManualActionInterface:
         gate = SafetyGate(profile=profile, control_dt=control_dt)
         deadline = time.monotonic() + timeout
 
+        # The last vector we actually commanded. ``None`` until the first command is
+        # issued — _settled() treats that as "not settled yet", so we always send at
+        # least one action even if the arm starts within tolerance of the target.
+        last_commanded: "np.ndarray | None" = None
+
         while True:
             now = time.monotonic()
             current = self._joint_vector(self.get_observation())
 
-            if self._settled(current, target):
+            if self._settled(current, target, last_commanded):
                 return
             if now >= deadline:
                 err = np.abs(current - target)
@@ -269,6 +294,7 @@ class ManualActionInterface:
                 # next tick. It should reach "ok" once a fresh engaged sample is seen.
                 _LOG.debug("action(): gate status=%s (not commanding this tick)", status)
             else:
+                last_commanded = np.asarray(commanded, dtype=np.float32)
                 self.send_action(
                     {f: float(commanded[i]) for i, f in enumerate(self.action_features)}
                 )
