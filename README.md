@@ -4,8 +4,10 @@
 
 ### Run any VLA policy on your robot — open source.
 
-The open-source robot-side stack for SmolVLA, Pi0, ACT, MolmoAct2 and friends: stream
-observations to managed cloud GPUs, drive a real arm in real time, and collect LeRobot datasets.
+The open-source robot-side extension of the [Interlatent dashboard](https://interlatent.com).
+The dashboard manages your GPU pods, nodes, and inference sessions; this SDK reaches that
+platform out onto your robot — streaming observations to managed cloud GPUs, driving a real
+arm in real time, and collecting LeRobot datasets.
 
 [![PyPI](https://img.shields.io/pypi/v/interlatent?color=7C5CFF&label=interlatent)](https://pypi.org/project/interlatent/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -20,9 +22,11 @@ observations to managed cloud GPUs, drive a real arm in real time, and collect L
 ---
 
 Modern robot policies (VLAs) are too big to run on the robot. Interlatent splits the problem:
-**managed cloud GPUs** run the policy, and a **lightweight open-source client** on the robot
-streams observations up and actions back with real-time chunking, so the arm never stutters
-while the model thinks. You bring the robot; the dashboard brings the compute.
+the **[Interlatent dashboard](https://interlatent.com)** runs the policy on managed cloud GPUs
+and orchestrates your pods, nodes, and sessions; this **SDK is the dashboard's open-source
+robot-side extension** — a lightweight client that streams observations up and actions back with
+real-time chunking, so the arm never stutters while the model thinks. The dashboard brings the
+compute; the SDK brings it to your robot.
 
 - 🚀 **Run any LeRobot policy** — SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, TDMPC, MolmoAct2 — on managed warm GPUs, no cold starts
 - 🦾 **Drive real hardware** (SO-101, Koch, ALOHA, anything LeRobot supports) over LAN, Tailscale, or the internet
@@ -31,7 +35,8 @@ while the model thinks. You bring the robot; the dashboard brings the compute.
 - 🖥️ **CLI utility** — list your pods and nodes and start/stop inference sessions from the terminal (`interlatent gpus ls`, `interlatent session start …`)
 - 📦 **Collect LeRobot v3.0 datasets** locally — your data, your disk, no account required
 
-The robot-side stack is Apache-2.0; inference runs on [Interlatent](https://interlatent.com).
+This robot-side extension is Apache-2.0; the dashboard it plugs into — inference, GPU pods, and
+session orchestration — runs on [Interlatent](https://interlatent.com).
 
 ## ⚡ Quickstart
 
@@ -144,14 +149,15 @@ is smooth high-rate control on top of slow, big models. Read more in
 
 | Package | PyPI | What it does |
 |---|---|---|
-| [`packages/sdk`](packages/sdk) | `interlatent` | Robot-side stack: DRTC inference client, robot node daemon, dashboard CLI (`interlatent`), LeRobot integration, local dataset collection |
+| [`packages/sdk`](packages/sdk) | `interlatent` | The dashboard's robot-side extension: DRTC inference client, robot node daemon, dashboard CLI (`interlatent`), LeRobot integration, local dataset collection |
 | [`proto/`](proto) | — | The gRPC wire contract shared by the client and the hosted cloud |
 
 ## ☁️ Open source vs. Interlatent Cloud
 
-The robot-side stack is open source and yours to run. Inference itself runs on managed GPUs
-through the [Interlatent dashboard](https://interlatent.com) — so you never operate GPUs,
-warm pools, or storage.
+This robot-side extension is open source and yours to run, but it's built to plug into the
+[Interlatent dashboard](https://interlatent.com): the dashboard runs inference on managed GPUs
+and orchestrates your pods, nodes, and sessions — so you never operate GPUs, warm pools, or
+storage.
 
 | Capability | Open source | [Interlatent](https://interlatent.com) |
 |---|:---:|:---:|
