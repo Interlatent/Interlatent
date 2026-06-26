@@ -6,8 +6,9 @@ serial arms driven through LeRobot's own follower configs. Built by
 matching LeRobot `*FollowerConfig` dataclass.
 
 SO-101 is the **reference platform** for this project. Koch v1.1 shares the same code
-path but has no `RobotProfile` yet, so its manual [`action()`](../../../../../../docs/action-interface.md)
-fails closed (the policy/engine path still works).
+path and is **planned but untested** — it is wired up (and has a placeholder
+`RobotProfile`) but has not been verified on hardware, so it is not advertised as
+functional. Treat `--robot koch` as experimental.
 
 Arguments are passed the same way across `interlatent-node` and `interlatent-act`:
 

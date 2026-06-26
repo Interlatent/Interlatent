@@ -27,7 +27,7 @@ the **[dashboard](https://interlatent.com)** runs the policy on managed cloud GP
 with real-time chunking, so the arm never stutters while the model thinks.
 
 - 🚀 **Run any policy the GPU pod can serve** — if LeRobot's policy factory can load it (SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, TDMPC, your fine-tune), or it's a supported native backend (MolmoAct2), a pod can serve it
-- 🦾 **Drive real hardware** — SO-101 (reference platform), Koch, plus native robots like YAM and Axol — over LAN, Tailscale, or the internet
+- 🦾 **Drive real hardware** — SO-101 (reference platform), plus native robots like YAM and Axol — over LAN, Tailscale, or the internet
 - ⚡ **Real-time action chunking (DRTC)** — pipelined inference, latency estimation, and chunk merging keep control smooth at 30 Hz even with multi-second model latency
 - 🛰️ **Robot node daemon** — pair a Pi (or any always-on machine) to your account; it converges to whatever inference session the dashboard assigns
 - 🖥️ **Dashboard CLI** — list your pods and nodes and start/stop inference sessions from the terminal
@@ -50,7 +50,7 @@ export INTERLATENT_API_KEY=ilat_...
 > **Per-robot extras.** The base package is robot-agnostic. Driving real hardware needs the
 > extra for your robot — install **one** of:
 > ```bash
-> pip install 'interlatent[lerobot]'   # SO-101, Koch
+> pip install 'interlatent[lerobot]'   # SO-101
 > pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
 > pip install 'interlatent[axol]'      # Almond Axol (install with uv; Python ≥ 3.13)
 > ```
@@ -186,7 +186,7 @@ declarations, joint names/units, and worked examples.
 | Robot | `--robot` | Extra | Config doc |
 |---|---|---|---|
 | **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| Koch v1.1 | `koch` | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| Koch v1.1 🚧 **(planned — untested)** | `koch` | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | Almond Axol (dual-arm) | `axol` | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
 | Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
@@ -204,8 +204,8 @@ Directions we're excited about. Each is a direction, not a dated commitment — 
 contributions are welcome on any of them.
 
 - **VR teleoperation** — drive and demonstrate on your arm from a VR headset, streaming teleop straight into the same DRTC path and dataset recording.
-- **More first-class robots** — broaden tested support beyond SO-101/Koch/YAM/Axol. This is where the project grows; bring yours.
-- **URDF-derived robot profiles** — read joint names/limits/rest-pose straight from a robot's URDF instead of hand-transcribed `RobotProfile` literals, so limits track the hardware. Design notes in [FUTURE.md](FUTURE.md).
+- **More first-class robots** — finish and test Koch (wired but unverified), and broaden tested support beyond SO-101/YAM/Axol. This is where the project grows; bring yours.
+- **URDF-derived robot profiles** — read joint names/limits/rest-pose straight from a robot's URDF instead of hand-transcribed `RobotProfile` literals, so limits track the hardware. Design notes in [Future directions](#-future-directions) below.
 
 ## 🧠 How it works
 
@@ -263,3 +263,41 @@ This project uses the [Developer Certificate of Origin](https://developercertifi
 
 "Interlatent Cloud" and the hosted service at interlatent.com are operated separately from
 this open-source project.
+
+## 🔭 Future directions
+
+Forward-looking work that isn't scheduled yet. Each item is a direction, not a spec.
+
+### Robots should consume URDFs directly
+
+Today a robot's kinematic facts — joint names, order, limits, velocity caps, rest
+pose — are hand-transcribed into static `RobotProfile` literals in
+[`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py). That
+is a transcription step that drifts from the hardware: the YAM profile shipped with a
+conservative placeholder envelope, and the real limits only landed once we pulled the
+joint `<limit>` values out of the i2rt YAM URDF by hand. The URDF is the manufacturer's
+source of truth; the robot should read it rather than restate it.
+
+**Direction:** let a robot derive its profile (and eventually FK/collision data)
+from the robot's URDF, so limits/order/rest-pose come from one authoritative file.
+
+**What we know already:**
+- I2RT ships a real YAM URDF at `i2rt/robot_models/arm/yam/yam.urdf` (joints listed
+  reversed vs i2rt command order; `joint1..joint6` map to our `joint_0..joint_5`).
+  The arm `joint_limits` in our profile are now transcribed from it; `max_velocity`
+  and the gripper range are still hand-chosen (the gripper is combined in separately
+  from the `LINEAR_4310` model, so it is not in `yam.urdf`).
+- Axol has no URDF in the picture yet — needs investigation before this generalizes.
+
+**Open design questions (resolve before building):**
+- Parse the URDF at build time into a static profile (keeps the current convention,
+  no runtime parse-dep) vs. at `connect()` (always matches the installed driver, adds
+  a `yourdfpy`-style dependency on the import path)?
+- Vendor the URDF + meshes into the robot package, or read it from the installed vendor
+  package (e.g. i2rt's `ARM_YAM_XML_PATH`)? Meshes/asset paths complicate vendoring.
+- How does URDF joint order reconcile with `action_features` ordering (the policy
+  binds to order, not names)? The reversed YAM ordering shows this needs an explicit
+  mapping, not a blind import.
+- Keep the static literal as a hand-verified fallback / safety-tightened override, or
+  treat the URDF as canonical? URDF limits are mechanical max — we currently inset
+  velocity below them on purpose, which a naive import would lose.
