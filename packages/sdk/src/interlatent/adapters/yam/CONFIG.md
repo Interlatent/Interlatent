@@ -1,4 +1,4 @@
-# YAM adapter configuration
+# YAM robot configuration
 
 Robot-specific arguments for `--robot yam` (I2RT YAM bimanual arms, driven through the
 `i2rt` CAN driver). Parsed by [`config.py`](config.py) `build_adapter_config`.

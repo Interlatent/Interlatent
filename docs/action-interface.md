@@ -1,12 +1,12 @@
 # The action interface
 
-Every robot adapter exposes one **action interface** that both the cloud policy
+Every robot exposes one **action interface** that both the cloud policy
 (engine path) and your own code (manual path) drive — a final actuator sitting
 *below* the DRTC action schedule. Actions are **joint-space**: a vector of joint
 targets, one per joint. There is no inverse kinematics or Cartesian frame; `action(x,
 y, z, …)` means joint angles, not a workspace point.
 
-There are two levels on the same adapter object:
+There are two levels on the same robot object:
 
 | Call | Used by | Semantics |
 |---|---|---|
@@ -21,21 +21,21 @@ below the schedule and reuses the teleop safety model.
 ```python
 from interlatent.adapters.lerobot.robot import LeRobotAdapter
 
-adapter = LeRobotAdapter("so101", port="/dev/ttyACM0")
-adapter.connect()
+robot = LeRobotAdapter("so101", port="/dev/ttyACM0")
+robot.connect()
 try:
     # Absolute joint targets, in the robot's own frame (degrees for SO-101).
     # Blocks until the arm settles at the target.
-    adapter.action(
+    robot.action(
         shoulder_pan=0.0, shoulder_lift=0.0, elbow_flex=0.0,
         wrist_flex=0.0, wrist_roll=0.0, gripper=50.0,
         timeout=8.0,
     )
 
     # Move one joint, hold the rest where they are.
-    adapter.action(shoulder_pan=30.0, hold_missing=True)
+    robot.action(shoulder_pan=30.0, hold_missing=True)
 finally:
-    adapter.disconnect()
+    robot.disconnect()
 ```
 
 Runnable version: [examples/04_manual_action.py](../examples/04_manual_action.py).
@@ -63,7 +63,7 @@ policy use `interlatent-node run`.
 `action(**named, hold_missing=False, timeout=10.0, rate_hz=30.0)`:
 
 - **Named joints are the contract.** Pass joints by name (`shoulder_pan=…`). Use the
-  names in `adapter.action_features` (without the `.pos` suffix). Positional vectors
+  names in `robot.action_features` (without the `.pos` suffix). Positional vectors
   are the *internal* form used by the engine path — not how you call `action()`.
 - **Unknown joint name → `ValueError`.** A name the robot doesn't have (typo, or a
   policy/robot mismatch) is always an error; no flag suppresses it.
@@ -84,7 +84,7 @@ as teleop:
 
 - The **SafetyGate** velocity/workspace/deadman-clamps every commanded step, walking
   the arm to the target at a safe speed (this is also what drives "settle").
-- The adapter's **delta clamp** caps the per-tick joint jump inside `send_action`.
+- The robot's **delta clamp** caps the per-tick joint jump inside `send_action`.
 
 Both require a [`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
 for the robot kind (joint limits + velocity caps). **If there is no profile for the
@@ -100,7 +100,7 @@ jitter. It is a **2nd-order Butterworth** low-pass designed at the control rate,
 default cutoff **3 Hz** — deliberate arm motion sits well below it, per-tick wobble
 above. It runs *before* the delta clamp, so the clamp stays the final execution-safety
 guard, and is warm-started from the live pose (no zero-ramp) and reset across teleop
-takeovers. Tune or disable it via the adapter extra:
+takeovers. Tune or disable it via the robot smoothing arg:
 
 ```
 interlatent-node --robot so101 --robot.action_filter_hz=3     # default
@@ -129,10 +129,10 @@ A robot kind becomes manually drivable in two steps:
    [`robot_profile.py`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py):
    ordered `joint_names`, per-joint `joint_limits` and `max_velocity`, and a `rest_pose`,
    registered in `_PROFILES` under the `--robot` kind(s). The `joint_names` **must match
-   the order** of the adapter's `action_features` (bare names) — `action()` raises a
+   the order** of the robot's `action_features` (bare names) — `action()` raises a
    clear mismatch error otherwise. Start conservative (tighter limits, lower velocities)
    and widen only after checking the `DRTC-DEBUG joints` log on real hardware.
-2. **An adapter.** For a LeRobot-supported arm, `LeRobotAdapter("<kind>", …)` already
+2. **A robot driver.** For a LeRobot-supported arm, `LeRobotAdapter("<kind>", …)` already
    works once the profile exists. For non-LeRobot hardware, implement the
    [`RobotAdapter`](../packages/sdk/src/interlatent/adapters/base.py) duck type
    (`connect` / `get_observation` / `send_action` / `disconnect`, `action_features`,
@@ -145,11 +145,11 @@ A robot kind becomes manually drivable in two steps:
 
 ### Example: I2RT YAM bimanual arms (`--robot yam`)
 
-The [`yam` adapter](../packages/sdk/src/interlatent/adapters/yam/) drives I2RT's YAM arms
+The [`yam` robot](../packages/sdk/src/interlatent/adapters/yam/) drives I2RT's YAM arms
 through the `i2rt` CAN driver directly (no raiden dependency). Each follower is 7-DOF
 (6 revolute joints in radians + a gripper in `[0, 1]`); topology is configurable
 (`--robot-arg arms=both|left|right`), and bimanual order is left arm then right. It ships
-three profiles (`yam` / `yam_left` / `yam_right`) selected by the adapter's per-instance
+three profiles (`yam` / `yam_left` / `yam_right`) selected by the robot's per-instance
 `robot_kind`. `connect()` preflights the CAN buses, opens each arm, sets the follower PD
 gains, opens any RGB cameras (`--camera wrist=realsense:1234`), and — unless
 `--robot-arg auto_home=false` — homes to the rest pose. Install with

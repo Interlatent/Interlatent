@@ -1,4 +1,4 @@
-# Axol adapter configuration
+# Axol robot configuration
 
 Robot-specific arguments for `--robot axol` (Almond Axol dual-arm robot, driven through
 the native async `almond_axol` SDK). Parsed by [`config.py`](config.py)

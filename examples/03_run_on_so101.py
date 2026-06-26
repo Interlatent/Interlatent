@@ -83,26 +83,26 @@ def synth_observation(shapes: dict[str, tuple[int, ...]], task: str,
     return buf.getvalue()
 
 
-def apply_action(action: np.ndarray, adapter: Any = None) -> None:
+def apply_action(action: np.ndarray, robot: Any = None) -> None:
     """Write one streamed action vector to the motors (engine path).
 
-    This synthetic demo runs without hardware, so ``adapter`` is None and this is a
-    no-op. With a real robot, pass a connected adapter: the flat action vector is
-    zipped onto the adapter's ordered joints and written fire-and-forget — one
+    This synthetic demo runs without hardware, so ``robot`` is None and this is a
+    no-op. With a real robot, pass a connected robot: the flat action vector is
+    zipped onto the robot's ordered joints and written fire-and-forget — one
     waypoint per control tick (this is the engine seam, not the manual ``action()``
     call; see ``examples/04_manual_action.py`` for that)::
 
         from interlatent.adapters.lerobot.robot import LeRobotAdapter
-        adapter = LeRobotAdapter("so101", port="/dev/ttyACM0")
-        adapter.connect()
+        robot = LeRobotAdapter("so101", port="/dev/ttyACM0")
+        robot.connect()
         ...
-        apply_action(action, adapter)
+        apply_action(action, robot)
     """
-    if adapter is None:
+    if robot is None:
         return
     vec = np.asarray(action, dtype=np.float32).reshape(-1)
-    adapter.send_action(
-        {f: float(vec[i]) for i, f in enumerate(adapter.action_features)}
+    robot.send_action(
+        {f: float(vec[i]) for i, f in enumerate(robot.action_features)}
     )
 
 

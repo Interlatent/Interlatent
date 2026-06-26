@@ -11,7 +11,10 @@ git clone https://github.com/interlatent/interlatent && cd interlatent   # for t
 pip install interlatent
 ```
 
-Python 3.11+ required.
+Python 3.11+ required. The base package is robot-agnostic; driving real hardware needs the
+extra for your robot — `pip install 'interlatent[lerobot]'` for SO-101/Koch (SO-101 also
+needs `feetech-servo-sdk` if the serial bus won't open), `[yam]`, or `[axol]`. See
+[robots-and-policies.md](robots-and-policies.md).
 
 ## 2. Get an API key
 
@@ -92,17 +95,7 @@ interlatent session stop <session-id>
 The node polls the dashboard and converges to whatever session is assigned; the GPU endpoint
 is provided per-session by the dashboard.
 
-## 5. Collect data (no account)
-
-```bash
-pip install 'interlatent[lerobot]' gymnasium
-python examples/05_collect_dataset.py
-```
-
-`watch()` / `tick()` stage every step locally (SQLite + JPEGs); `LeRobotRebuilder` turns
-the staging cache into a standard LeRobot v3.0 dataset on disk. No account involved.
-
-## 6. Troubleshooting
+## 5. Troubleshooting
 
 **`client.step()` keeps returning `None`.** Normal for the first ~0.5–2 s of a session:
 the first observation has to reach the pod, run inference, and the chunk has to come back.
@@ -118,7 +111,7 @@ blocked.
 
 **Which robots/policies work:** [robots-and-policies.md](robots-and-policies.md).
 
-## 7. Where next
+## 6. Where next
 
 - Concepts (DRTC, sessions, chunks, the node): [concepts.md](concepts.md)
 - Which robots/policies work: [robots-and-policies.md](robots-and-policies.md)

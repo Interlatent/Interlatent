@@ -8,11 +8,8 @@ open source and yours to run; the dashboard brings the compute, storage, and lab
   no box to rent, no cold starts, no torch.compile babysitting.
 - **"I want my data stored, versioned, and viewable."** Episodes record into a hosted
   canonical LeRobot dataset per environment, with a dashboard episode viewer.
-- **"I want my data labeled with rewards so I can actually train on it."** **Robometer**
-  labels your episodes with dense rewards / value estimates — this is the part that doesn't
-  exist in the OSS and isn't DIY-able from it.
-- **"I have several robots and a team."** Nodes, session assignment, sharing, access
-  control.
+- **"I want automatic policy analysis."** Hosted sessions get policy analysis and reports
+  off the recorded rollouts — the part that isn't DIY-able from the OSS alone.
 
 ## Connect with an API key
 
