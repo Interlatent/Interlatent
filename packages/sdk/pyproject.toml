@@ -62,6 +62,21 @@ axol = [
   "opencv-python-headless>=4.8",
 ]
 
+# pip install 'interlatent[yam]'
+# Drives I2RT's YAM bimanual arms over CAN via the i2rt driver directly (robot kind
+# "yam"; see interlatent.adapters.yam), through a native control loop. No raiden
+# dependency — only i2rt + RGB camera libs.
+# PYTHON VERSION: i2rt/raiden pin YAM to Python >=3.11,<3.12; confirm i2rt's actual
+# floor on install — it may constrain this extra's interpreter below the SDK's range.
+# Host requirement NOT pinned here: the ZED SDK + its `pyzed` Python bindings (not on
+# PyPI) are needed only for ZED cameras; RealSense cameras use pyrealsense2 below.
+# Linux + SocketCAN is required (the arms speak CAN; cameras are RGB-only).
+yam = [
+  "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git",
+  "pyrealsense2>=2.54",
+  "numpy",
+]
+
 [project.scripts]
 # Connectivity check: opens a real DRTC session against a managed GPU pod
 # with synthetic observations and reports a latency verdict — no robot needed.

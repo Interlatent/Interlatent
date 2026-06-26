@@ -50,9 +50,12 @@ the `--loop module:function` override, which is a generic escape hatch, not a ki
 A **robot adapter** — a subpackage under `interlatent.adapters.<vendor>` that maps
 a specific robot family to the loop the **Node** daemon drives, reusing the
 LeRobot-free DRTC wire helpers so its recorded payload matches the built-in loop.
-Vendor-specific and dependency-heavy, so it is optional (`interlatent[axol]`) and
-imported lazily — the base install never loads it. _Avoid_: overloading "adapter"
-for a server-side policy backend, a collection `--loop` adapter, or a LoRA adapter.
+Vendor-specific and dependency-heavy, so it is optional (`interlatent[axol]`,
+`interlatent[yam]`) and imported lazily — the base install never loads it. _Avoid_:
+overloading "adapter" for a server-side policy backend, a collection `--loop`
+adapter, or a LoRA adapter. Vendor adapters today: **axol** (Almond Axol, native
+async SDK) and **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
+directly — not raiden — joint-space only, configurable left/right/both followers).
 See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md).
 
 **Action interface**:

@@ -172,6 +172,102 @@ KOCH_PROFILE = RobotProfile(
 )
 
 
+# ---------------------------------------------------------------------------
+# I2RT YAM follower (bimanual; see interlatent.adapters.yam)
+# ---------------------------------------------------------------------------
+#
+# Each YAM follower is 7-DOF: 6 revolute joints + 1 gripper. The gripper is the
+# LAST index of each arm block, matching raiden's `FOLLOWER_HOME_POS = [0]*6 + [1.0]`
+# (gripper open = 1.0). Bimanual order is left arm then right arm (matches raiden's
+# server `joint` action `l(7)+r(7)` and the axol left-then-right precedent), so the
+# `joint_names` order here equals `YAMNativeRobot.action_features` — `base.py` raises
+# if they ever diverge.
+#
+# Units are i2rt/MuJoCo native: RADIANS for the revolute joints, gripper in [0, 1].
+# This differs from the SO-101/Koch profiles above, which are in degrees.
+#
+# joint_0..joint_5 are i2rt command/chain order (= URDF joint1..joint6; the URDF lists
+# them reversed). Limits are the EXACT hardware limits transcribed from the i2rt YAM
+# URDF `i2rt/robot_models/arm/yam/yam.urdf` (each joint's `<limit lower=… upper=…>`).
+# They are NOT inset below the mechanical range because the all-zeros home pose sits at
+# the lower edge of joint_1/joint_2 (URDF lower=0), and an inset there would reject
+# homing. The gripper joint is not in yam.urdf (it is combined in separately from the
+# LINEAR_4310 gripper model), so its [0, 1] range is still a placeholder — verify on hw.
+_YAM_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "joint_0",
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+)
+_YAM_GRIPPER_NAME = "gripper"
+
+# Per revolute joint, radians — exact yam.urdf `<limit lower/upper>` (joint1..joint6).
+_YAM_ARM_LIMITS: tuple[tuple[float, float], ...] = (
+    (-2.61799, 3.13),     # joint_0 / URDF joint1
+    (0.0, 3.65),          # joint_1 / URDF joint2  (lower=0: home sits at this edge)
+    (0.0, 3.13),          # joint_2 / URDF joint3  (lower=0: home sits at this edge)
+    (-1.5708, 1.5708),    # joint_3 / URDF joint4
+    (-1.5708, 1.5708),    # joint_4 / URDF joint5
+    (-2.0944, 2.0944),    # joint_5 / URDF joint6
+)
+_YAM_GRIPPER_LIMIT: tuple[float, float] = (0.0, 1.0)  # 0 closed, 1 open (verify on hw)
+
+# Per revolute joint, rad/sec. The URDF declares velocity=10 for every joint (the motor
+# max); that is far too fast for the per-tick SafetyGate clamp, so we cap conservatively
+# at 2.0 rad/s and widen only after checking the `DRTC-DEBUG joints` log on hardware.
+_YAM_ARM_MAX_VELOCITY: tuple[float, ...] = tuple(2.0 for _ in _YAM_ARM_JOINT_NAMES)
+_YAM_GRIPPER_MAX_VELOCITY: float = 4.0
+
+# Per-arm rest/home pose: 6 zeros + gripper open (raiden FOLLOWER_HOME_POS).
+_YAM_ARM_REST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+_YAM_GRIPPER_REST: float = 1.0
+
+
+def _yam_arm_block(
+    prefix: str,
+) -> tuple[
+    tuple[str, ...], tuple[tuple[float, float], ...], tuple[float, ...], tuple[float, ...]
+]:
+    """One side's 7-joint block (6 revolute + gripper), prefixed ``left``/``right``."""
+    names = tuple(f"{prefix}_{n}" for n in _YAM_ARM_JOINT_NAMES) + (
+        f"{prefix}_{_YAM_GRIPPER_NAME}",
+    )
+    limits = _YAM_ARM_LIMITS + (_YAM_GRIPPER_LIMIT,)
+    velocity = _YAM_ARM_MAX_VELOCITY + (_YAM_GRIPPER_MAX_VELOCITY,)
+    rest = _YAM_ARM_REST + (_YAM_GRIPPER_REST,)
+    return names, limits, velocity, rest
+
+
+def _yam_profile(name: str, sides: tuple[str, ...]) -> RobotProfile:
+    """Compose a YAM profile from one or both arm blocks (left then right)."""
+    names: tuple[str, ...] = ()
+    limits: tuple[tuple[float, float], ...] = ()
+    velocity: tuple[float, ...] = ()
+    rest: tuple[float, ...] = ()
+    for side in sides:
+        n, lim, vel, rp = _yam_arm_block(side)
+        names += n
+        limits += lim
+        velocity += vel
+        rest += rp
+    return RobotProfile(
+        name=name,
+        joint_names=names,
+        joint_limits=limits,
+        max_velocity=velocity,
+        rest_pose=rest,
+    )
+
+
+# Three topologies, keyed by the adapter's per-instance ``robot_kind``. The
+# bimanual order is left arm then right arm.
+YAM_PROFILE = _yam_profile("yam", ("left", "right"))
+YAM_LEFT_PROFILE = _yam_profile("yam_left", ("left",))
+YAM_RIGHT_PROFILE = _yam_profile("yam_right", ("right",))
+
+
 # Registry keyed by robot kind. Keys match the `--robot` kinds resolved in
 # `control.py._make_lerobot_robot` (and their aliases). Each new teleop-capable
 # robot adds an entry here.
@@ -180,6 +276,10 @@ _PROFILES: dict[str, RobotProfile] = {
     "so101_follower": SO101_PROFILE,
     "koch": KOCH_PROFILE,
     "koch_follower": KOCH_PROFILE,
+    "yam": YAM_PROFILE,
+    "yam_bimanual": YAM_PROFILE,
+    "yam_left": YAM_LEFT_PROFILE,
+    "yam_right": YAM_RIGHT_PROFILE,
 }
 
 
@@ -193,4 +293,12 @@ def get_profile(robot_kind: str) -> Optional[RobotProfile]:
     return _PROFILES.get(str(robot_kind).lower().strip())
 
 
-__all__ = ["RobotProfile", "SO101_PROFILE", "KOCH_PROFILE", "get_profile"]
+__all__ = [
+    "RobotProfile",
+    "SO101_PROFILE",
+    "KOCH_PROFILE",
+    "YAM_PROFILE",
+    "YAM_LEFT_PROFILE",
+    "YAM_RIGHT_PROFILE",
+    "get_profile",
+]

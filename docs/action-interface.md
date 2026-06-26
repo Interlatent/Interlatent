@@ -137,7 +137,30 @@ A robot kind becomes manually drivable in two steps:
    [`RobotAdapter`](../packages/sdk/src/interlatent/adapters/base.py) duck type
    (`connect` / `get_observation` / `send_action` / `disconnect`, `action_features`,
    `joint_specs`) and inherit `ManualActionInterface` to get `action()` for free — see
-   [`adapters/axol/robot.py`](../packages/sdk/src/interlatent/adapters/axol/robot.py).
+   [`adapters/axol/robot.py`](../packages/sdk/src/interlatent/adapters/axol/robot.py)
+   and [`adapters/yam/robot.py`](../packages/sdk/src/interlatent/adapters/yam/robot.py).
 
 `joint_specs` declares only per-joint `control_mode` (`"position"` vs gripper/effort) and
 `settle_tolerance`; ranges come from the profile, so limits live in exactly one place.
+
+### Example: I2RT YAM bimanual arms (`--robot yam`)
+
+The [`yam` adapter](../packages/sdk/src/interlatent/adapters/yam/) drives I2RT's YAM arms
+through the `i2rt` CAN driver directly (no raiden dependency). Each follower is 7-DOF
+(6 revolute joints in radians + a gripper in `[0, 1]`); topology is configurable
+(`--robot-arg arms=both|left|right`), and bimanual order is left arm then right. It ships
+three profiles (`yam` / `yam_left` / `yam_right`) selected by the adapter's per-instance
+`robot_kind`. `connect()` preflights the CAN buses, opens each arm, sets the follower PD
+gains, opens any RGB cameras (`--camera wrist=realsense:1234`), and — unless
+`--robot-arg auto_home=false` — homes to the rest pose. Install with
+`pip install 'interlatent[yam]'` (Linux + SocketCAN; the ZED SDK is host-installed).
+
+```bash
+# one-shot manual move of the left arm's base joint (radians), holding the rest
+interlatent-act --robot yam --robot-arg arms=left left_joint_0=0.2 --hold-missing
+```
+
+> The YAM arm `joint_limits` are the exact hardware limits transcribed from the i2rt
+> YAM URDF (`i2rt/robot_models/arm/yam/yam.urdf`). The `max_velocity` is capped
+> conservatively (2 rad/s, well below the URDF's 10) and the gripper `[0, 1]` range is
+> still a placeholder — verify both on hardware (`DRTC-DEBUG joints`) before widening.

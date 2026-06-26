@@ -353,6 +353,7 @@ class NodeDaemon:
     # See docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md.
     _NATIVE_LOOPS: dict[str, str] = {
         "axol": "interlatent.adapters.axol:control_loop",
+        "yam": "interlatent.adapters.yam:control_loop",
     }
 
     def _resolve_loop_fn(self) -> Callable[..., None]:

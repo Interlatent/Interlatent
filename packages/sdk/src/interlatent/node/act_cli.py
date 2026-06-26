@@ -70,15 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--port",
-        required=True,
-        help="Serial port for the robot, e.g. /dev/ttyACM0.",
+        default=None,
+        help="Serial port for the robot, e.g. /dev/ttyACM0. Required for LeRobot "
+        "kinds (so101/koch); not used by native CAN kinds like yam (use --robot-arg "
+        "left_channel=/right_channel=).",
     )
     p.add_argument(
         "--robot-arg",
         type=_extra_kv,
         action="append",
         metavar="key=value",
-        help="Extra key=value passed to the LeRobot robot config (repeatable).",
+        help="Extra key=value passed to the robot config (repeatable). For yam: "
+        "arms=both|left|right, left_channel=, right_channel=, auto_home=, etc.",
     )
     p.add_argument(
         "--hold-missing",
@@ -134,11 +137,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    # Imported here so --help / arg errors don't pay the adapter import cost.
-    from ..adapters.lerobot.robot import LeRobotAdapter
-
     extra = dict(args.robot_arg or [])
-    adapter = LeRobotAdapter(args.robot, port=args.port, extra=extra)
+    kind = (args.robot or "").lower().strip()
+
+    # Imported here so --help / arg errors don't pay the adapter import cost.
+    if kind == "yam":
+        # Native CAN kind: build the YAM adapter directly. Default auto_home off for a
+        # one-shot CLI move (the action() itself drives the arm; --show must not move
+        # it) — pass --robot-arg auto_home=true to re-enable.
+        extra.setdefault("auto_home", "false")
+        from ..adapters.yam.config import build_adapter_config
+        from ..adapters.yam.robot import YAMNativeRobot
+
+        adapter = YAMNativeRobot(build_adapter_config(extra, None))
+    else:
+        if not args.port:
+            print(
+                f"error: --port is required for robot kind {args.robot!r}.",
+                file=sys.stderr,
+            )
+            return 2
+        from ..adapters.lerobot.robot import LeRobotAdapter
+
+        adapter = LeRobotAdapter(args.robot, port=args.port, extra=extra)
 
     try:
         adapter.connect()
