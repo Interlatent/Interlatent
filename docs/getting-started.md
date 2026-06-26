@@ -12,7 +12,7 @@ pip install interlatent
 ```
 
 Python 3.11+ required. The base package is robot-agnostic; driving real hardware needs the
-extra for your robot — `pip install 'interlatent[lerobot]'` for SO-101/Koch (SO-101 also
+extra for your robot — `pip install 'interlatent[lerobot]'` for SO-101 (SO-101 also
 needs `feetech-servo-sdk` if the serial bus won't open), `[yam]`, or `[axol]`. See
 [robots-and-policies.md](robots-and-policies.md).
 

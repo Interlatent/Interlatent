@@ -28,7 +28,6 @@ paths:
 | Robot | `--robot` | Extra | Config doc | Notes |
 |---|---|---|---|---|
 | SO-101 | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](../packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) | reference platform; manual [`action()`](action-interface.md) |
-| Koch v1.1 | `koch` | `[lerobot]` | [config](../packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) | via LeRobot classes; no `RobotProfile` yet, so manual `action()` fails closed |
 | I2RT YAM | `yam` | `[yam]` | [config](../packages/sdk/src/interlatent/adapters/yam/CONFIG.md) | bimanual, native CAN via i2rt |
 | Almond Axol | `axol` | `[axol]` | [config](../packages/sdk/src/interlatent/adapters/axol/CONFIG.md) | dual-arm, native async SDK |
 | Any LeRobot robot | `<type>` | `[lerobot]` | — | cameras attach as `observation.images.<name>` |

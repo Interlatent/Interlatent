@@ -89,8 +89,8 @@ as teleop:
 Both require a [`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
 for the robot kind (joint limits + velocity caps). **If there is no profile for the
 kind, `action()` refuses to run** (raises) rather than driving the arm unguarded.
-Built-in profiles: `so101`, `koch`. The engine path (`send_action`) does not need a
-profile.
+Built-in profiles: `so101` (`koch` is wired with a placeholder profile but untested —
+treat it as experimental). The engine path (`send_action`) does not need a profile.
 
 ### Smoothing the engine stream
 

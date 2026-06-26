@@ -186,7 +186,6 @@ declarations, joint names/units, and worked examples.
 | Robot | `--robot` | Extra | Config doc |
 |---|---|---|---|
 | **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| Koch v1.1 🚧 **(planned — untested)** | `koch` | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | Almond Axol (dual-arm) | `axol` | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
 | Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
