@@ -7,12 +7,12 @@
 The robot-side SDK for the [Interlatent dashboard](https://interlatent.com). The dashboard
 runs the policy on managed cloud GPUs and orchestrates your pods, nodes, and sessions; this
 SDK streams your robot's observations up and drives the arm with the action chunks that come
-back — smooth real-time control on top of big, slow models.
+back, allowing for smooth real-time control on top of big, slow models.
 
 [![PyPI](https://img.shields.io/pypi/v/interlatent?color=7C5CFF&label=interlatent)](https://pypi.org/project/interlatent/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![LeRobot](https://img.shields.io/badge/built%20for-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
+[![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
 [Quickstart](#-quickstart) · [Dashboard](#-using-the-dashboard) · [Robots](#-supported-robots) · [Roadmap](#-roadmap) · [Docs](docs/)
