@@ -55,10 +55,13 @@ lerobot = [
 # Host requirement NOT installed here: the ZED SDK + its `pyzed` Python bindings
 # (not on PyPI — install the ZED SDK, then `axol zed.install`). opencv (cv2) is
 # pulled below for the BGRA->RGB frame conversion.
-# NOTE: almond-axol pins some sources (e.g. pyroki) via [tool.uv.sources], which
-# only `uv` honors — install this extra with `uv`.
+# NOTE: almond-axol maps some deps (e.g. pyroki) to git via [tool.uv.sources], which
+# ONLY uv honors. Under pip those bare names fall through to PyPI and fail — pyroki
+# isn't published there ("No matching distribution"). We mirror that git source as a
+# direct URL here (pinned to almond-axol's rev) so this extra also installs under pip.
 axol = [
   "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae",
+  "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
   "opencv-python-headless>=4.8",
 ]
 
@@ -73,7 +76,12 @@ axol = [
 # Linux + SocketCAN is required (the arms speak CAN; cameras are RGB-only).
 yam = [
   "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git",
-  "pyrealsense2>=2.54",
+  # pyrealsense2 ships wheels ONLY (no sdist) and only for x86_64 Linux/Windows
+  # across all Pythons; aarch64 wheels stop at cp310, and there are no macOS wheels
+  # at any version. Gating to x86_64 keeps `pip install interlatent[yam]` from hard-
+  # failing with "No matching distribution" on ARM/macOS. On those hosts install the
+  # RealSense binding out-of-band (apt python3-pyrealsense2, or build librealsense).
+  "pyrealsense2>=2.54; platform_machine == 'x86_64'",
   "numpy",
 ]
 
