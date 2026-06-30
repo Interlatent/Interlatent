@@ -43,6 +43,72 @@ at 640×480 @ 30; ZED captures at its SDK-default resolution and 30 fps. Resolut
 are not yet CLI-configurable for YAM. Cameras are optional — a manual `interlatent-act`
 joint move needs none.
 
+## CAN bus setup
+
+The arms speak CAN, not serial — each follower is one SocketCAN interface, so a bimanual
+set needs **two** buses up before `connect()`. The adapter does **not** configure CAN for
+you (that needs root and could disturb a bus another process owns); on `connect()` it only
+runs `ip link show <channel>` per arm and refuses to start unless each reports `state UP`
+(or `UNKNOWN`). Bringing them up is a host responsibility.
+
+**1. Bring up the buses.** A USB-CAN adapter enumerates under kernel-default names
+(`can0`, `can1`) until renamed. The bitrate **must** be `1000000` (1 Mbit/s) — both ends
+of a CAN bus must agree:
+
+```bash
+sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can1 up type can bitrate 1000000
+ip -details link show type can      # confirm each is state UP / UNKNOWN
+```
+
+If `ip link set …` reports **`Cannot find device "can_follower_l"`**, the renamed
+interfaces don't exist yet — the buses are still `can0`/`can1` (see step 3). If they don't
+appear under any name, check the adapter is enumerated (`lsusb`, `dmesg | grep -i can`) and
+the kernel module is loaded (e.g. `sudo modprobe gs_usb`).
+
+**2. Point the SDK at the right names.** The adapter defaults to `can_follower_l` /
+`can_follower_r`. If you brought up `can0`/`can1`, override the channels — but note
+`can0`/`can1` are assigned by USB enumeration order and **can swap on reboot or replug**,
+so verify which physical arm each drives before trusting the mapping:
+
+```bash
+# moves whichever arm is on can0 — watch which one physically moves:
+interlatent-act --robot yam --robot-arg arms=left --robot-arg left_channel=can0 \
+  left_joint_0=0.2 --hold-missing
+```
+
+Then map left/right accordingly, e.g. if `can0` turned out to be the **right** arm:
+
+```bash
+interlatent-node run --robot yam --robot-arg arms=both \
+  --robot-arg left_channel=can1 --robot-arg right_channel=can0
+```
+
+**3. Lock in stable names (recommended).** Pin each adapter to the SDK's default names by
+USB serial so left is always left and you never pass `*_channel` flags again. Get the
+serials (`udevadm info -a -p $(udevadm info -q path -n can0) | grep -m1 serial`), then add
+`/etc/udev/rules.d/90-yam-can.rules`:
+
+```
+SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="<left-arm-serial>",  NAME="can_follower_l"
+SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="<right-arm-serial>", NAME="can_follower_r"
+```
+
+```bash
+sudo udevadm control --reload-rules && sudo udevadm trigger   # then replug the adapters
+```
+
+After that `ip link show type can` lists `can_follower_l` / `can_follower_r` and plain
+`interlatent-node run --robot yam --robot-arg arms=both` works with no channel overrides.
+i2rt/raiden's `rd reset_can` installs equivalent naming if you have raiden.
+
+> **Note on shutdown noise.** On a clean exit, i2rt's background motor-control thread can
+> log one round of `Bad file descriptor [9]` / `file descriptor cannot be a negative
+> integer (-1)` / `Failed to communicate with motor … Retrying` *after*
+> `YAMNativeRobot disconnected`. This is a teardown race inside the i2rt driver (the
+> control thread outliving the closed CAN socket); torque is already zeroed by then, so it
+> is cosmetic and safe to ignore.
+
 ## Joint names & units
 
 `left_joint_0 … left_joint_5`, `left_gripper`, then the `right_*` block (left arm before
@@ -67,5 +133,5 @@ interlatent-node run --robot yam \
 ```
 
 **Host requirements:** `pip install 'interlatent[yam]'`, Linux + SocketCAN, CAN buses up
-(`ip link set <iface> up type can bitrate 1000000`, or raiden's `rd reset_can`). The ZED
-SDK / `pyzed` is host-installed (not on PyPI) and needed only for ZED cameras.
+(see [CAN bus setup](#can-bus-setup) above). The ZED SDK / `pyzed` is host-installed (not
+on PyPI) and needed only for ZED cameras.
