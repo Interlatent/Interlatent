@@ -3,7 +3,7 @@
 The node hands robot construction a flat ``extra`` dict (``--robot-arg key=value``)
 and a ``cameras`` dict (``--camera name=device``). YAM runs the I2RT arms over CAN
 via the ``i2rt`` driver directly (one bus per follower), and captures RGB from
-RealSense / ZED cameras (see :mod:`.cameras`).
+RealSense / ZED or generic UVC/V4L2 webcams (see :mod:`.cameras`).
 
 Nothing here imports ``i2rt`` or a camera SDK — those are resolved lazily inside the
 adapter — so importing this module never requires the ``[yam]`` extra.
@@ -75,9 +75,11 @@ def build_adapter_config(
     ``left_channel`` / ``right_channel``, ``max_step_rad``, ``auto_home``,
     ``gripper_mode`` / ``gripper_threshold``. Unrecognized keys warn + are ignored.
 
-    ``--camera <name>=<type>:<serial>`` declares an RGB camera (``realsense`` or
-    ``zed``); names must match the policy's training camera keys. Cameras are
-    optional (a manual ``interlatent-act`` joint move needs none).
+    ``--camera <name>=<device>`` declares an RGB camera: ``realsense[:serial]``,
+    ``zed[:serial]``, or a generic UVC/V4L2 webcam given by ``/dev/video*`` path,
+    bare index, or ``uvc:<path-or-index>``. Names must match the policy's training
+    camera keys. Cameras are optional (a manual ``interlatent-act`` joint move needs
+    none).
     """
     extra = dict(extra or {})
     cameras = dict(cameras or {})

@@ -171,8 +171,15 @@ def test_home_pose_matches_raiden_follower():
 def test_camera_device_parsing():
     assert parse_camera_device("w", "realsense:123") == CameraSpec("w", "realsense", "123")
     assert parse_camera_device("t", "zed") == CameraSpec("t", "zed", "")
-    with pytest.raises(ValueError, match="camera type must be"):
-        parse_camera_device("x", "webcam:9")
+    # Generic UVC/V4L2 webcams: explicit prefix, bare /dev path, and bare index.
+    assert parse_camera_device("f", "uvc:/dev/video2") == CameraSpec("f", "uvc", "/dev/video2")
+    assert parse_camera_device("f", "/dev/video2") == CameraSpec("f", "uvc", "/dev/video2")
+    assert parse_camera_device("f", "webcam:9") == CameraSpec("f", "uvc", "9")
+    assert parse_camera_device("f", "2") == CameraSpec("f", "uvc", "2")
+    with pytest.raises(ValueError, match="a UVC camera needs a device"):
+        parse_camera_device("x", "uvc:")
+    with pytest.raises(ValueError, match="camera must be a vendor type"):
+        parse_camera_device("x", "potato")
 
 
 def test_invalid_arms_and_gripper_mode_rejected():

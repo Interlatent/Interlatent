@@ -31,17 +31,25 @@ Bool values accept `1/true/yes/on` (case-insensitive); anything else is false.
 
 ## `--camera` declarations
 
-`--camera <name>=<type>:<serial>`
+`--camera <name>=<device>` — `<name>` is the observation key and **must match the
+policy's training camera keys**. `<device>` selects the backend three ways:
 
-- `<name>` — observation key; **must match the policy's training camera keys**.
-- `<type>` — `realsense` (Intel RealSense, `pyrealsense2`) or `zed` (Stereolabs, `pyzed`).
-- `<serial>` — vendor serial number; optional (omit → first available of that type, e.g.
-  `--camera wrist=realsense`).
+| `<device>` form | Backend | Example |
+|---|---|---|
+| `realsense[:<serial>]` | Intel RealSense (`pyrealsense2`) | `--camera wrist=realsense:1234` (omit serial → first found: `realsense`) |
+| `zed[:<serial>]` | Stereolabs ZED (`pyzed`, host-installed) | `--camera overhead=zed:5678` |
+| `/dev/videoN`, a bare index, or `uvc:<path-or-index>` | Generic UVC/V4L2 webcam via OpenCV (`opencv-python-headless`) | `--camera front=/dev/video2`, `--camera front=2`, `--camera front=uvc:/dev/video2` |
 
-Capture is **RGB only** (the learned-depth backends stay in raiden). RealSense captures
-at 640×480 @ 30; ZED captures at its SDK-default resolution and 30 fps. Resolution/fps
-are not yet CLI-configurable for YAM. Cameras are optional — a manual `interlatent-act`
-joint move needs none.
+So you are **not** limited to RealSense/ZED — any standard USB webcam (e.g. a Logitech on
+`/dev/video2`) works through the OpenCV backend. The `uvc`/`opencv`/`v4l2`/`webcam`
+prefixes are interchangeable; a bare `/dev/video*` path or numeric index is treated as a
+UVC webcam automatically. Find your device with `v4l2-ctl --list-devices`.
+
+Capture is **RGB only** (the learned-depth backends stay in raiden). RealSense captures at
+640×480 @ 30; ZED captures at its SDK-default resolution and 30 fps; UVC requests 640×480 @
+30 (OpenCV falls back to the nearest mode the webcam supports). Resolution/fps are not yet
+CLI-configurable for YAM. Cameras are optional — a manual `interlatent-act` joint move
+needs none.
 
 ## CAN bus setup
 

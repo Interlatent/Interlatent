@@ -82,6 +82,8 @@ yam = [
   # failing with "No matching distribution" on ARM/macOS. On those hosts install the
   # RealSense binding out-of-band (apt python3-pyrealsense2, or build librealsense).
   "pyrealsense2>=2.54; platform_machine == 'x86_64'",
+  # Generic UVC/V4L2 webcams (e.g. a Logitech on /dev/video2) capture via OpenCV.
+  "opencv-python-headless>=4.8",
   "numpy",
 ]
 
