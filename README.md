@@ -52,7 +52,6 @@ export INTERLATENT_API_KEY=ilat_...
 > ```bash
 > pip install 'interlatent[lerobot]'   # SO-101
 > pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
-> pip install 'interlatent[axol]'      # Almond Axol (install with uv; Python ≥ 3.13)
 > ```
 > SO-101's Feetech servos additionally need the Feetech servo SDK; if the serial bus won't
 > open, `pip install feetech-servo-sdk`. See each robot's config doc under
@@ -187,7 +186,6 @@ declarations, joint names/units, and worked examples.
 |---|---|---|---|
 | **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
-| Almond Axol (dual-arm) | `axol` | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
 | Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
 | Custom hardware | `--loop module:fn` | — | bring your own I/O loop |
 
@@ -286,7 +284,6 @@ from the robot's URDF, so limits/order/rest-pose come from one authoritative fil
   The arm `joint_limits` in our profile are now transcribed from it; `max_velocity`
   and the gripper range are still hand-chosen (the gripper is combined in separately
   from the `LINEAR_4310` model, so it is not in `yam.urdf`).
-- Axol has no URDF in the picture yet — needs investigation before this generalizes.
 
 **Open design questions (resolve before building):**
 - Parse the URDF at build time into a static profile (keeps the current convention,
