@@ -68,7 +68,7 @@ hardware, pass a custom loop with `--loop module:fn`.
 ## Reporting issues
 
 Use the issue templates. For latency/control problems, include: robot type, network path
-(LAN/Tailscale/WAN), policy URI, and the session id (from `interlatent session ls`).
+(LAN/VPN/WAN), policy URI, and the session id (from `interlatent session ls`).
 
 ## Security
 

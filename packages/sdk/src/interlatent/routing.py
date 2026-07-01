@@ -3,14 +3,14 @@
 A **route descriptor** is a small dict describing how to connect, tagged by
 ``method``::
 
-    {"method": "direct", "address": "100.x.y.z:50051"}
+    {"method": "direct", "address": "203.0.113.7:50051"}
 
 Today only ``direct`` exists: the user supplies an address (any reachable
-``host:port`` or ``http(s)://…`` URL — no lock-in to Tailscale or any single
-transport; the gRPC vs gRPC-web choice is inferred downstream from the address
-scheme). The registries below are the seam for adding NAT-traversal relays,
-MagicDNS resolution, tunnels, etc. **without touching the node control flow**
-— a new method just registers a resolver + a connector.
+``host:port`` or ``http(s)://…`` URL — no lock-in to any single transport;
+the gRPC vs gRPC-web choice is inferred downstream from the address scheme).
+The registries below are the seam for adding NAT-traversal relays, name
+resolution, tunnels, etc. **without touching the node control flow** — a new
+method just registers a resolver + a connector.
 
 Two pluggable points:
 

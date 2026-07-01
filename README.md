@@ -27,7 +27,7 @@ the **[dashboard](https://interlatent.com)** runs the policy on managed cloud GP
 with real-time chunking, so the arm never stutters while the model thinks.
 
 - 🚀 **Run any policy the GPU pod can serve** — if LeRobot's policy factory can load it (SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, TDMPC, your fine-tune), or it's a supported native backend (MolmoAct2), a pod can serve it
-- 🦾 **Drive real hardware** — SO-101 (reference platform), plus native robots like YAM and Axol — over LAN, Tailscale, or the internet
+- 🦾 **Drive real hardware** — SO-101 (reference platform), plus native robots like YAM and Axol — over LAN, a VPN, or the internet
 - ⚡ **Real-time action chunking (DRTC)** — pipelined inference, latency estimation, and chunk merging keep control smooth at 30 Hz even with multi-second model latency
 - 🛰️ **Robot node daemon** — pair a Pi (or any always-on machine) to your account; it converges to whatever inference session the dashboard assigns
 - 🖥️ **Dashboard CLI** — list your pods and nodes and start/stop inference sessions from the terminal

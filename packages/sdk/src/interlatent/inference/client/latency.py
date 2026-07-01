@@ -31,9 +31,8 @@ class JacobsonKarels:
     _initialized: bool = False
 
     # Cap for the very first RTT sample. The first Infer of a session
-    # pays one-time costs the rest never do — gRPC HTTP/2 handshake over
-    # a fresh Tailscale tunnel (userspace WireGuard + NAT discovery +
-    # potential DERP-relay fallback) can take 10-20s on cold paths, and
+    # pays one-time costs the rest never do — the gRPC HTTP/2 handshake
+    # and TCP connect over a cold path can take several seconds, and
     # MTU/path-MTU discovery on the first sizeable payload (JPEG frames)
     # adds more. Seeding ``srtt`` with that outlier inflates the cooldown
     # counter for seconds at a time while ``alpha=1/8`` slowly decays it,

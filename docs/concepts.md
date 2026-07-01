@@ -22,7 +22,7 @@ requests.
    (`min_execution_horizon`) and how often to request inference (`cooldown_steps`).
 
 The result: smooth 30 Hz control over a model that thinks in seconds — across a LAN, a
-tailnet, or the public internet.
+VPN, or the public internet.
 
 ## Sessions
 

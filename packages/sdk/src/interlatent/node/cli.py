@@ -295,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--drtc-url",
         default=None,
         help="DRTC inference endpoint to persist (e.g. "
-        "http://100.x.y.z:8000 for a Runpod box reached over Tailscale, "
+        "203.0.113.7:50051 for a Runpod box's public IP:port, "
         "or https://<workspace>--interlatent-drtc-inference-web.modal.run "
         "for a Modal deployment). If omitted on a TTY, you'll be prompted.",
     )

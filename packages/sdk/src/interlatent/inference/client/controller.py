@@ -220,13 +220,12 @@ class DRTCClient:
             )
         self._stub = pb_grpc.InferenceServiceStub(self._channel)
 
-        # Force the gRPC channel to fully establish (TCP + HTTP/2 +
-        # whatever Tailscale needs to bring its tunnel up to this peer)
+        # Force the gRPC channel to fully establish (TCP + HTTP/2)
         # BEFORE any RPC we measure. Without this, the first Infer pays
-        # the cold-tunnel cost — easily 10-20s when Tailscale falls back
-        # to DERP relay on first contact — and seeds the latency
-        # estimator at an outlier value that freezes the cooldown
-        # counter for ages. ``channel_ready_future`` blocks until the
+        # the cold-connection cost — the TCP connect + HTTP/2 handshake
+        # to a fresh peer can take seconds on a high-latency path — and
+        # seeds the latency estimator at an outlier value that freezes
+        # the cooldown counter for ages. ``channel_ready_future`` blocks until the
         # connection actually transitions to READY; we don't care about
         # the result, only the side effect. 30s ceiling so a genuinely
         # broken endpoint surfaces as a hard error instead of hanging.

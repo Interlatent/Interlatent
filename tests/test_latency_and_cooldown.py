@@ -10,7 +10,7 @@ def test_estimate_zero_before_first_sample():
 
 def test_first_sample_is_seed_capped():
     jk = JacobsonKarels()
-    jk.observe(20.0)  # cold Tailscale path outlier
+    jk.observe(20.0)  # cold-connection path outlier
     assert jk.estimate_s <= jk.SEED_CAP_S * (1 + jk.k / 2) + 1e-9
 
 

@@ -105,9 +105,9 @@ as running with `interlatent session ls`. To isolate the cloud path from your ro
 observations and reports a PASS/WARN/FAIL verdict with the network-vs-compute latency split.
 
 **Connect fails / hangs.** Confirm `INTERLATENT_API_KEY` is set (or `api_key=` is passed)
-and reachable: `interlatent gpus ls` should list pods. Across networks,
-[Tailscale](https://tailscale.com) helps the per-session GPU link if direct routing is
-blocked.
+and reachable: `interlatent gpus ls` should list pods. The node dials the box's public
+`host:port`; if direct routing is blocked, a VPN or SSH tunnel between the node and the
+box can bridge it.
 
 **Which robots/policies work:** [robots-and-policies.md](robots-and-policies.md).
 

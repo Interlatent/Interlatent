@@ -78,7 +78,7 @@ pods. Generated stubs are committed in the SDK; regenerate with
 
 Inference is gRPC (HTTP/2): OpenSession / Stream / Infer / RecordTick / CloseSession.
 The DRTC GPU endpoint is provisioned per-session by the dashboard and returned to the
-client (or node) when a session is assigned. Plain LAN, Tailscale, or the public internet
+client (or node) when a session is assigned. Plain LAN, a VPN, or the public internet
 all work — the client merges chunks the same way regardless of the path's latency.
 
 ## Relationship to Interlatent Cloud
