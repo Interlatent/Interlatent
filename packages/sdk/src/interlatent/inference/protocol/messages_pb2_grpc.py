@@ -5,7 +5,7 @@ import warnings
 
 from . import messages_pb2 as messages__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.74.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in messages_pb2_grpc.py depends on'
+        + f' but the generated code in messages_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -50,6 +50,10 @@ class InferenceServiceStub(object):
                 '/interlatent.inference.v1.InferenceService/RecordTick',
                 request_serializer=messages__pb2.RecordTickRequest.SerializeToString,
                 response_deserializer=messages__pb2.RecordTickResponse.FromString)
+        self.RecordTicks = channel.unary_unary(
+                '/interlatent.inference.v1.InferenceService/RecordTicks',
+                request_serializer=messages__pb2.RecordTicksRequest.SerializeToString,
+                response_deserializer=messages__pb2.RecordTicksResponse.FromString)
         self.CloseSession = channel.unary_unary(
                 '/interlatent.inference.v1.InferenceService/CloseSession',
                 request_serializer=messages__pb2.CloseSessionRequest.SerializeToString,
@@ -91,6 +95,16 @@ class InferenceServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RecordTicks(self, request, context):
+        """Batched RecordTick. The client's recorder drain coalesces queued
+        ticks and ships them in one RPC to keep the remote link from
+        becoming the capture bottleneck. Falls back to unary RecordTick
+        against servers that predate this method.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CloseSession(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -119,6 +133,11 @@ def add_InferenceServiceServicer_to_server(servicer, server):
                     servicer.RecordTick,
                     request_deserializer=messages__pb2.RecordTickRequest.FromString,
                     response_serializer=messages__pb2.RecordTickResponse.SerializeToString,
+            ),
+            'RecordTicks': grpc.unary_unary_rpc_method_handler(
+                    servicer.RecordTicks,
+                    request_deserializer=messages__pb2.RecordTicksRequest.FromString,
+                    response_serializer=messages__pb2.RecordTicksResponse.SerializeToString,
             ),
             'CloseSession': grpc.unary_unary_rpc_method_handler(
                     servicer.CloseSession,
@@ -231,6 +250,32 @@ class InferenceService(object):
             '/interlatent.inference.v1.InferenceService/RecordTick',
             messages__pb2.RecordTickRequest.SerializeToString,
             messages__pb2.RecordTickResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata)
+
+    @staticmethod
+    def RecordTicks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/interlatent.inference.v1.InferenceService/RecordTicks',
+            messages__pb2.RecordTicksRequest.SerializeToString,
+            messages__pb2.RecordTicksResponse.FromString,
             options,
             channel_credentials,
             insecure,

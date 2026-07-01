@@ -62,6 +62,18 @@ log = logging.getLogger(__name__)
 # or a server pause without blocking the control loop.
 _RECORDER_QUEUE_MAXSIZE = 256
 
+# Cap the wire size of one batched RecordTicks RPC. The server's default
+# gRPC receive limit is 4 MiB; we coalesce ticks only up to half that so
+# a full batch (plus protobuf framing) can never trip it. A batch is
+# flushed early once the accumulated JPEG bytes would cross this line,
+# regardless of the tick-count cap.
+_REC_BATCH_MAX_BYTES = 2 * 1024 * 1024
+
+# Per-RPC RecordTicks timeout. The server enqueue is non-blocking, so the
+# call time is dominated by uploading the batch's JPEG bytes over the
+# link; 30s comfortably covers a ~2 MiB batch even on a slow uplink.
+_REC_BATCH_TIMEOUT_S = 30.0
+
 # Close-path drain bounds. Recording is off the control-critical path at
 # close (the robot has already disconnected), so we drain the whole backlog
 # rather than dropping the tail. We only give up if the sender stops
@@ -92,6 +104,8 @@ class DRTCConfig:
     use_grpc_web: bool = False             # set True when talking to Modal asgi
     metadata: dict[str, str] = field(default_factory=dict)
     stats_interval_s: float = 5.0          # period of the DRTC telemetry log line; 0 disables
+    rec_batch_max_ticks: int = 16          # coalesce up to N queued ticks per RecordTicks RPC
+
 
 
 class DRTCClient:
@@ -168,6 +182,9 @@ class DRTCClient:
         self._rec_dropped_close = 0
         self._rec_first_warn = False
         self._rec_sent = 0
+        # Set once if the server 404s RecordTicks (an older node that only
+        # speaks unary RecordTick); after that the drain ships tick-by-tick.
+        self._rec_batch_unsupported = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -451,55 +468,155 @@ class DRTCClient:
                 self._rec_first_warn = True
 
     def _rec_loop(self) -> None:
-        """Drain the recorder queue and ship each tick via RecordTick."""
+        """Drain the recorder queue, shipping ticks in coalesced batches.
+
+        A remote RecordTick link is round-trip-bound: one unary RPC per
+        tick tops out well below the 30 Hz capture rate, so under load the
+        queue fills and drops most ticks (see the DRTC recording summary).
+        Here we pop the first item blocking, then greedily pull whatever
+        else is already queued into one batch and ship it via RecordTicks.
+        Batching amortizes the RTT across the whole batch, so the drain
+        keeps up and the queue stays shallow.
+
+        This is the sole writer of ``_rec_sent`` and the ``_stat_rec_*``
+        window counters, so those stay lock-free.
+        """
         while True:
             try:
-                item = self._rec_q.get(timeout=0.25)
+                first = self._rec_q.get(timeout=0.25)
             except queue.Empty:
                 if self._stop.is_set():
                     return
                 continue
-            if item is None:
-                # poison pill — drain remaining items then exit
-                try:
-                    while True:
-                        leftover = self._rec_q.get_nowait()
-                        if leftover is None:
-                            continue
-                        self._send_record_tick(leftover)
-                except queue.Empty:
-                    return
+            if first is None:
+                # poison pill — flush remaining backlog in batches, then exit
+                self._flush_backlog()
                 return
-            self._send_record_tick(item)
+            batch, saw_pill = self._collect_batch(first)
+            self._send_batch(batch)
+            if saw_pill:
+                self._flush_backlog()
+                return
+
+    def _flush_backlog(self) -> None:
+        """Ship everything still queued (at close) in batches, then return."""
+        while True:
+            try:
+                first = self._rec_q.get_nowait()
+            except queue.Empty:
+                return
+            if first is None:
+                continue  # stray sentinel — ignore
+            batch, _ = self._collect_batch(first)
+            self._send_batch(batch)
+
+    def _collect_batch(self, first: dict) -> tuple[list, bool]:
+        """Greedily pull already-queued ticks onto ``first`` into one batch.
+
+        Stops at the tick-count cap, when the queue drains, or when adding
+        the next tick would cross the wire-size cap. Returns the batch and
+        whether the close sentinel was pulled (so the caller can finish
+        draining and exit).
+        """
+        max_ticks = max(1, int(self.cfg.rec_batch_max_ticks))
+        batch = [first]
+        batch_bytes = self._item_bytes(first)
+        while len(batch) < max_ticks:
+            try:
+                nxt = self._rec_q.get_nowait()
+            except queue.Empty:
+                break
+            if nxt is None:
+                return batch, True
+            nb = self._item_bytes(nxt)
+            if batch_bytes + nb > _REC_BATCH_MAX_BYTES:
+                # Ship what we have; ``nxt`` seeds the next batch so it is
+                # never dropped. A lone oversized tick still goes out solo.
+                self._send_batch(batch)
+                batch = [nxt]
+                batch_bytes = nb
+                continue
+            batch.append(nxt)
+            batch_bytes += nb
+        return batch, False
+
+    @staticmethod
+    def _item_bytes(item: dict) -> int:
+        """Approximate wire size of a tick — dominated by JPEG payloads."""
+        jpegs = item.get("jpegs") or {}
+        return sum(len(data) for data in jpegs.values() if data)
+
+    def _build_tick_req(self, item: dict) -> "pb.RecordTickRequest":
+        req = pb.RecordTickRequest(
+            session_id=self.session_id,
+            step=int(item["step"]),
+            control_timestamp=int(item["control_timestamp_ns"]),
+            action=[float(x) for x in item["action"]],
+        )
+        state = item.get("observation_state")
+        if state:
+            req.observation_state.extend(float(x) for x in state)
+        jpegs = item.get("jpegs") or {}
+        for cam, data in jpegs.items():
+            if data:
+                req.jpegs[cam] = data
+        cs = item.get("control_source")
+        if cs:
+            req.control_source = str(cs)
+        return req
+
+    def _send_batch(self, batch: list) -> None:
+        """Ship a batch via RecordTicks, falling back to unary RecordTick.
+
+        Recording failures must never break inference — every path logs at
+        debug and returns; the control loop keeps running regardless.
+        """
+        if not batch or self._stub is None or self.session_id is None:
+            return
+        if self._rec_batch_unsupported:
+            for item in batch:
+                self._send_record_tick(item)
+            return
+        import grpc
+
+        batch_bytes = sum(self._item_bytes(item) for item in batch)
+        try:
+            req = pb.RecordTicksRequest(
+                ticks=[self._build_tick_req(item) for item in batch],
+            )
+            resp = self._stub.RecordTicks(
+                req, metadata=self._auth_metadata, timeout=_REC_BATCH_TIMEOUT_S,
+            )
+            accepted = int(getattr(resp, "accepted", 0))
+            self._rec_sent += accepted
+            # Window telemetry — count only successfully-shipped ticks/bytes,
+            # so rec_hz / rec_bytes_s measure the drain capacity (post-drop).
+            self._stat_rec_sent += accepted
+            self._stat_rec_bytes += batch_bytes
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+                # Older node without RecordTicks; ship the batch tick-by-tick
+                # and stay on the unary path for the rest of the session.
+                log.info(
+                    "server has no RecordTicks; falling back to unary RecordTick"
+                )
+                self._rec_batch_unsupported = True
+                for item in batch:
+                    self._send_record_tick(item)
+            else:
+                log.debug("RecordTicks failed", exc_info=True)
+        except Exception:
+            log.debug("RecordTicks failed", exc_info=True)
 
     def _send_record_tick(self, item: dict) -> None:
         if self._stub is None or self.session_id is None:
             return
         try:
-            req = pb.RecordTickRequest(
-                session_id=self.session_id,
-                step=int(item["step"]),
-                control_timestamp=int(item["control_timestamp_ns"]),
-                action=[float(x) for x in item["action"]],
-            )
-            state = item.get("observation_state")
-            if state:
-                req.observation_state.extend(float(x) for x in state)
-            jpegs = item.get("jpegs") or {}
-            tick_bytes = 0
-            for cam, data in jpegs.items():
-                if data:
-                    req.jpegs[cam] = data
-                    tick_bytes += len(data)
-            cs = item.get("control_source")
-            if cs:
-                req.control_source = str(cs)
+            req = self._build_tick_req(item)
             self._stub.RecordTick(req, metadata=self._auth_metadata, timeout=10)
             self._rec_sent += 1
-            # Window telemetry — count only successfully-shipped ticks/bytes,
-            # so rec_hz / rec_bytes_s measure the drain capacity (post-drop).
             self._stat_rec_sent += 1
-            self._stat_rec_bytes += tick_bytes
+            self._stat_rec_bytes += self._item_bytes(item)
         except Exception:
             # Recording failures must never break inference. Log once at
             # debug; the control loop keeps going.

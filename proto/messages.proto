@@ -95,13 +95,29 @@ message RecordTickRequest {
   // Per-camera JPEG bytes. Keys are short camera names (e.g. "overhead");
   // the server prepends "observation.images." when building the dataset.
   map<string, bytes> jpegs = 6;
-  // Who drove this tick. "policy" (default) for policy-driven steps;
-  // recorded into the LeRobot dataset as annotation.interlatent.control_source.
+  // Who drove this tick: "policy" (default) or "teleop" (DAgger
+  // intervention via the dashboard). Recorded into the LeRobot dataset
+  // as annotation.interlatent.control_source.
   string control_source = 7;
 }
 
 message RecordTickResponse {
   bool ok = 1;
+}
+
+// A batch of captured control ticks shipped in a single RPC. A remote
+// recorder link is round-trip-bound: one unary RecordTick per tick tops
+// out well below the 30 Hz control rate, so a loaded episode drops most
+// of its ticks to queue-full backpressure. Coalescing many ticks into
+// one RecordTicks call amortizes that RTT across the whole batch and
+// lets the drain keep up. Ticks carry their own ``step`` so ordering is
+// reconstructed server-side regardless of batching.
+message RecordTicksRequest {
+  repeated RecordTickRequest ticks = 1;
+}
+
+message RecordTicksResponse {
+  uint32 accepted = 1;  // number of ticks the server enqueued
 }
 
 service InferenceService {
@@ -120,6 +136,12 @@ service InferenceService {
   // server's recorder. Decoupled from Infer so the recorder gets every
   // control tick instead of just the ones where Infer happened to fire.
   rpc RecordTick(RecordTickRequest) returns (RecordTickResponse);
+
+  // Batched RecordTick. The client's recorder drain coalesces queued
+  // ticks and ships them in one RPC to keep the remote link from
+  // becoming the capture bottleneck. Falls back to unary RecordTick
+  // against servers that predate this method.
+  rpc RecordTicks(RecordTicksRequest) returns (RecordTicksResponse);
 
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
 }
