@@ -117,6 +117,12 @@ class DRTCClient:
         self._receiver: Optional[ActionReceiver] = None
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # close() can be driven from two threads: the control-loop runner's
+        # finally AND the node daemon's stop path (which force-closes when a
+        # robot teardown wedges). Guard the body so exactly one caller runs
+        # it — CloseSession/upload must fire once, not race.
+        self._closed = False
+        self._close_lock = threading.Lock()
         self._auth_metadata: tuple[tuple[str, str], ...] = (
             (("x-api-key", cfg.api_key),) if cfg.api_key else ()
         )
@@ -287,6 +293,12 @@ class DRTCClient:
         self._rec_thread.start()
 
     def close(self) -> None:
+        # Idempotent + single-writer: whichever thread arrives first (runner
+        # finally or daemon force-close) runs the teardown; the other returns.
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         self._stop.set()
         if self._stats_thread:
             self._stats_thread.join(timeout=2.0)

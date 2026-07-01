@@ -573,7 +573,23 @@ class NodeDaemon:
         if h.thread is not None:
             h.thread.join(timeout=10.0)
             if h.thread.is_alive():
-                _LOG.warning("Control-loop thread did not exit within 10s")
+                # The control loop wedged in its teardown — e.g. a robot
+                # disconnect blocked on a downed bus (i2rt YAM arm.close()
+                # selecting on a closed CAN fd). Its finally never ran, so
+                # client.close() — and thus CloseSession + the server-side
+                # upload — never fired, and the recording would be lost to
+                # the idle-GC. Force the close ourselves. client.close() is
+                # idempotent, so if the thread later unwedges its own finally
+                # is a harmless no-op.
+                _LOG.warning(
+                    "Control-loop thread did not exit within 10s (robot "
+                    "teardown wedged); force-closing DRTC client to flush "
+                    "the recorder and trigger upload"
+                )
+                try:
+                    h.client.close()
+                except Exception:  # noqa: BLE001
+                    _LOG.warning("Force client.close() failed", exc_info=True)
 
 
 @dataclass
