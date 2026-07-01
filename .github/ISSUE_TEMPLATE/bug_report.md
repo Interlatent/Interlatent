@@ -11,7 +11,7 @@ labels: bug
 **Setup**
 - Package + version (`pip show interlatent`):
 - Robot / hardware (if any):
-- Network path (same machine / LAN / Tailscale / WAN):
+- Network path (same machine / LAN / VPN / WAN):
 - Policy URI (e.g. `lerobot/smolvla_base`):
 - Session id (if a cloud inference session was involved):
 
