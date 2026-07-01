@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Interlatent" width="420"/>
+<img src="assets/Final Logo pt6.png" alt="Interlatent" width="420"/>
 
 ### Run any VLA policy on your robot — open source.
 
