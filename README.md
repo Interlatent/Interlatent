@@ -27,7 +27,7 @@ the **[dashboard](https://interlatent.com)** runs the policy on managed cloud GP
 with real-time chunking, so the arm never stutters while the model thinks.
 
 - 🚀 **Run any policy the GPU pod can serve** — if LeRobot's policy factory can load it (SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, TDMPC, your fine-tune), or it's a supported native backend (MolmoAct2), a pod can serve it
-- 🦾 **Drive real hardware** — SO-101 (reference platform), plus native robots like YAM and Axol — over LAN, a VPN, or the internet
+- 🦾 **Drive real hardware** — SO-101 (reference platform), plus native robots like YAM — over LAN, a VPN, or the internet
 - ⚡ **Real-time action chunking (DRTC)** — pipelined inference, latency estimation, and chunk merging keep control smooth at 30 Hz even with multi-second model latency
 - 🛰️ **Robot node daemon** — pair a Pi (or any always-on machine) to your account; it converges to whatever inference session the dashboard assigns
 - 🖥️ **Dashboard CLI** — list your pods and nodes and start/stop inference sessions from the terminal
@@ -201,7 +201,7 @@ Directions we're excited about. Each is a direction, not a dated commitment — 
 contributions are welcome on any of them.
 
 - **VR teleoperation** — drive and demonstrate on your arm from a VR headset, streaming teleop straight into the same DRTC path and dataset recording.
-- **More first-class robots** — finish and test Koch (wired but unverified), and broaden tested support beyond SO-101/YAM/Axol. This is where the project grows; bring yours.
+- **More first-class robots** — finish and test Koch (wired but unverified), and broaden tested support beyond SO-101/YAM. This is where the project grows; bring yours.
 - **URDF-derived robot profiles** — read joint names/limits/rest-pose straight from a robot's URDF instead of hand-transcribed `RobotProfile` literals, so limits track the hardware. Design notes in [Future directions](#-future-directions) below.
 
 ## 🧠 How it works
