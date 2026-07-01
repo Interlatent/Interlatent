@@ -62,6 +62,15 @@ log = logging.getLogger(__name__)
 # or a server pause without blocking the control loop.
 _RECORDER_QUEUE_MAXSIZE = 256
 
+# Close-path drain bounds. Recording is off the control-critical path at
+# close (the robot has already disconnected), so we drain the whole backlog
+# rather than dropping the tail. We only give up if the sender stops
+# shipping for _REC_DRAIN_STALL_S (a dead link — set above the 10s per-RPC
+# RecordTick timeout so a merely-slow link is not mistaken for a dead one),
+# or a hard ceiling elapses as an ultimate backstop.
+_REC_DRAIN_STALL_S = 12.0
+_REC_DRAIN_CEILING_S = 120.0
+
 
 @dataclass
 class DRTCConfig:
@@ -128,6 +137,8 @@ class DRTCClient:
         self._last_action: Optional[np.ndarray] = None
         self._last_rtt_s = 0.0        # most recent measured Infer round-trip
         self._last_compute_s = 0.0    # server-reported compute time of that Infer
+        self._stat_rec_sent = 0       # RecordTicks shipped this window
+        self._stat_rec_bytes = 0      # JPEG bytes shipped this window
 
         # --- per-tick recorder pipeline ---------------------------------
         # The hot path (step()) only does a non-blocking put_nowait into
@@ -138,7 +149,17 @@ class DRTCClient:
             maxsize=_RECORDER_QUEUE_MAXSIZE,
         )
         self._rec_thread: Optional[threading.Thread] = None
-        self._rec_dropped = 0
+        # Drop accounting is split by failure mode so telemetry can tell
+        # distributed thinning apart from tail loss:
+        #   _rec_dropped_full  — queue-full drops during the run (thinning)
+        #   _rec_dropped_close — backlog abandoned at close (the tail)
+        #   _rec_captured      — every record_tick() call (intended count)
+        #   _rec_sent          — RecordTicks the server actually accepted
+        # Invariant when the session ends cleanly:
+        #   captured == sent + dropped_full + dropped_close
+        self._rec_captured = 0
+        self._rec_dropped_full = 0
+        self._rec_dropped_close = 0
         self._rec_first_warn = False
         self._rec_sent = 0
 
@@ -273,15 +294,10 @@ class DRTCClient:
         if self._sender:
             self._sender.stop()
         # Flush remaining RecordTicks BEFORE CloseSession so the server's
-        # recorder receives them while the session is still alive. The
-        # poison-pill (None) tells the rec thread to drain and exit.
-        try:
-            self._rec_q.put_nowait(None)
-        except queue.Full:
-            pass
-        if self._rec_thread is not None:
-            self._rec_thread.join(timeout=15.0)
-            self._rec_thread = None
+        # recorder receives them while the session is still alive. Drains the
+        # whole backlog (the tail) rather than the old 15s guillotine — see
+        # _drain_recorder.
+        self._drain_recorder()
         if self._stub and self.session_id:
             try:
                 self._stub.CloseSession(
@@ -295,6 +311,80 @@ class DRTCClient:
                 self._channel.close()
             except Exception:
                 pass
+        # Authoritative, loud end-of-episode accounting — replaces the old
+        # silent truncation.
+        self._log_recording_summary()
+
+    def _drain_recorder(self) -> None:
+        """Flush the RecordTick backlog before CloseSession.
+
+        Sends an ordered poison-pill, then waits while the sender is still
+        shipping ticks. Bails only if the sender stops making progress for
+        _REC_DRAIN_STALL_S (link down) or the hard ceiling elapses; whatever
+        is still queued at that point is counted as tail loss
+        (``_rec_dropped_close``).
+        """
+        thread = self._rec_thread
+        if thread is None:
+            self._rec_dropped_close = self._rec_q.qsize()
+            return
+        # Ordered sentinel. Blocking put guarantees it lands *after* the
+        # current backlog (unlike the old put_nowait, which the poison-pill
+        # silently lost whenever the queue was full — exactly the loaded
+        # case). Bounded so a wedged sender can't hang close() forever.
+        try:
+            self._rec_q.put(None, timeout=_REC_DRAIN_CEILING_S)
+        except queue.Full:
+            pass
+        deadline = time.monotonic() + _REC_DRAIN_CEILING_S
+        last_sent = self._rec_sent
+        last_progress = time.monotonic()
+        while thread.is_alive():
+            thread.join(timeout=0.5)
+            now = time.monotonic()
+            # Progress = the server accepted another tick. Using _rec_sent
+            # (not qsize) means a dead link — which still *consumes* items as
+            # each RPC fails — is correctly seen as "no progress".
+            if self._rec_sent > last_sent:
+                last_sent = self._rec_sent
+                last_progress = now
+            if now - last_progress > _REC_DRAIN_STALL_S:
+                log.warning(
+                    "DRTC recorder drain stalled (%d ticks queued, sender not "
+                    "shipping — link down?); abandoning tail",
+                    self._rec_q.qsize(),
+                )
+                break
+            if now > deadline:
+                log.warning(
+                    "DRTC recorder drain hit %.0fs ceiling (%d ticks queued); "
+                    "abandoning tail",
+                    _REC_DRAIN_CEILING_S, self._rec_q.qsize(),
+                )
+                break
+        self._rec_thread = None
+        # Whatever is still queued is tail loss (± the sentinel if we bailed
+        # before it was consumed — immaterial for accounting).
+        self._rec_dropped_close = self._rec_q.qsize()
+
+    def _log_recording_summary(self) -> None:
+        """One authoritative line on how complete the recording was."""
+        captured = self._rec_captured
+        if captured == 0:
+            return
+        dropped = self._rec_dropped_full + self._rec_dropped_close
+        if dropped:
+            log.warning(
+                "DRTC recording finished: captured=%d sent=%d dropped_full=%d "
+                "dropped_close=%d (%.1f%% lost) — episode is lossy",
+                captured, self._rec_sent, self._rec_dropped_full,
+                self._rec_dropped_close, 100.0 * dropped / captured,
+            )
+        else:
+            log.info(
+                "DRTC recording finished: captured=%d sent=%d (complete)",
+                captured, self._rec_sent,
+            )
 
     # ------------------------------------------------------------------
     # Recorder (per-tick capture → background RecordTick RPC)
@@ -324,6 +414,9 @@ class DRTCClient:
         """
         if self.session_id is None or self._stub is None:
             return
+        # Count every captured tick (the node-side "intended" count) before
+        # the queue can reject it, so captured == sent + dropped_* holds.
+        self._rec_captured += 1
         item = {
             "step": int(step),
             "observation_state": observation_state,
@@ -335,11 +428,12 @@ class DRTCClient:
         try:
             self._rec_q.put_nowait(item)
         except queue.Full:
-            self._rec_dropped += 1
+            self._rec_dropped_full += 1
             if not self._rec_first_warn:
                 log.warning(
                     "DRTC recorder queue full at step %d — dropping tick "
-                    "(further drops suppressed; server is falling behind)",
+                    "(distributed thinning; running total in the DRTC stats "
+                    "line as rec_dropped)",
                     step,
                 )
                 self._rec_first_warn = True
@@ -380,14 +474,20 @@ class DRTCClient:
             if state:
                 req.observation_state.extend(float(x) for x in state)
             jpegs = item.get("jpegs") or {}
+            tick_bytes = 0
             for cam, data in jpegs.items():
                 if data:
                     req.jpegs[cam] = data
+                    tick_bytes += len(data)
             cs = item.get("control_source")
             if cs:
                 req.control_source = str(cs)
             self._stub.RecordTick(req, metadata=self._auth_metadata, timeout=10)
             self._rec_sent += 1
+            # Window telemetry — count only successfully-shipped ticks/bytes,
+            # so rec_hz / rec_bytes_s measure the drain capacity (post-drop).
+            self._stat_rec_sent += 1
+            self._stat_rec_bytes += tick_bytes
         except Exception:
             # Recording failures must never break inference. Log once at
             # debug; the control loop keeps going.
@@ -498,10 +598,23 @@ class DRTCClient:
                            portion. High net_ms -> the link is the problem;
                            high compute_ms -> the GPU/policy is.
           - action_delta — mean |Δaction| between consecutive steps
+          - rec_hz       — RecordTick *drain* rate (ticks the server accepted
+                           this window). Sits below control_hz when recording
+                           is losing ticks. The number to watch.
+          - rec_bytes_s  — JPEG bytes/s successfully shipped this window; the
+                           recorder's drain bandwidth.
+          - rec_qdepth   — current RecordTick backlog depth.
+          - rec_dropped  — cumulative recording drops (queue-full + tail).
 
         DRTC healthy + still jittery  -> starvation ~0, queue_min well
         above 0: the jitter is the policy, not the transport.
         DRTC unhealthy                -> starvation >0 / queue_min ~0.
+
+        Classifying a recording bottleneck (feeds the throughput fix):
+          rec_hz ≈ 1000/net_ms and rec_bytes_s below the uplink -> per-RPC /
+            latency-bound (serial 1-RTT sender) -> batch or pipeline.
+          rec_bytes_s plateaued while rec_qdepth climbs -> bandwidth-bound ->
+            reduce payload (JPEG quality/resolution or record fps).
         """
         now = time.monotonic()
         dt = max(now - self._stat_t0, 1e-6)
@@ -523,6 +636,10 @@ class DRTCClient:
             "infer_sent": self._stat_infer,
             "chunks_recv": self._stat_chunk,
             "action_delta": round(jitter, 4),
+            "rec_hz": round(self._stat_rec_sent / dt, 1),
+            "rec_bytes_s": round(self._stat_rec_bytes / dt, 0),
+            "rec_qdepth": self._rec_q.qsize(),
+            "rec_dropped": self._rec_dropped_full + self._rec_dropped_close,
         }
         self._stat_t0 = now
         self._stat_steps = self._stat_none = 0
@@ -530,6 +647,8 @@ class DRTCClient:
         self._stat_qmin = 1 << 30
         self._stat_jitter_sum = 0.0
         self._stat_jitter_n = 0
+        self._stat_rec_sent = 0
+        self._stat_rec_bytes = 0
         return snap
 
     def _stats_loop(self) -> None:
@@ -540,9 +659,12 @@ class DRTCClient:
             log.info(
                 "DRTC | %.1f Hz (actions %.1f Hz, starvation %.1f%%) | "
                 "queue %d (min %d) | infer %.0fms = compute %.0fms + net %.0fms "
-                "(est %.0fms) | sent %d recv %d | action Δ %.4f",
+                "(est %.0fms) | sent %d recv %d | action Δ %.4f | "
+                "rec %.1f Hz (%.0f KB/s, q %d, dropped %d)",
                 s["control_hz"], s["action_hz"], s["starvation_pct"],
                 s["queue_depth"], s["queue_min"], s["infer_ms"],
                 s["compute_ms"], s["net_ms"], s["infer_est_ms"],
                 s["infer_sent"], s["chunks_recv"], s["action_delta"],
+                s["rec_hz"], s["rec_bytes_s"] / 1024.0, s["rec_qdepth"],
+                s["rec_dropped"],
             )

@@ -34,7 +34,7 @@ class YAMAdapterConfig:
     right_channel: str = _DEFAULT_RIGHT_CHANNEL
     cameras: dict[str, CameraSpec] = field(default_factory=dict)
     # Execution-safety per-step clamp on arm joints, radians (see send_action).
-    max_step_rad: float = 0.5
+    max_step_rad: float = 0.05
     # Move to the rest pose on connect(). Convenient, but moves hardware the instant
     # you connect — set false to skip.
     auto_home: bool = True
@@ -87,7 +87,7 @@ def build_adapter_config(
     arms = extra.pop("arms", "both").strip().lower()
     left_channel = str(extra.pop("left_channel", _DEFAULT_LEFT_CHANNEL))
     right_channel = str(extra.pop("right_channel", _DEFAULT_RIGHT_CHANNEL))
-    max_step_rad = float(extra.pop("max_step_rad", "0.5"))
+    max_step_rad = float(extra.pop("max_step_rad", "0.05"))
     auto_home = _as_bool(extra.pop("auto_home", "true"))
     gripper_mode = extra.pop("gripper_mode", "continuous").strip().lower()
     gripper_threshold = float(extra.pop("gripper_threshold", "0.5"))

@@ -18,7 +18,7 @@ by YAM (it speaks CAN, not serial).
 | `arms` | `both` | `both` \| `left` \| `right` | Which follower arms are active. Sets the action space (14-DOF both / 7-DOF single) and the matching profile (`yam` / `yam_left` / `yam_right`). |
 | `left_channel` | `can_follower_l` | SocketCAN iface name | CAN bus for the left follower. |
 | `right_channel` | `can_follower_r` | SocketCAN iface name | CAN bus for the right follower. |
-| `max_step_rad` | `0.5` | float (rad), or `inf` | Execution-safety per-step delta clamp on arm joints — the arm advances at most this far per tick toward a commanded target (guards against a model glitch / bad chunk). The gripper is not clamped. |
+| `max_step_rad` | `0.05` | float (rad), or `inf` | Execution-safety per-step delta clamp on arm joints — the arm advances at most this far per tick toward a commanded target (guards against a model glitch / bad chunk). The gripper is not clamped. |
 | `auto_home` | `true`¹ | bool | On `connect()`, smooth-move every active arm to the rest pose (`FOLLOWER_HOME_POS` = 6 zeros + gripper open). **Moves hardware the instant you connect.** |
 | `gripper_mode` | `continuous` | `continuous` \| `bangbang` | `continuous` passes the gripper value through; `bangbang` snaps to open/closed at `gripper_threshold`. |
 | `gripper_threshold` | `0.5` | float `[0,1]` | Snap point for `bangbang` gripper mode. |
@@ -134,7 +134,8 @@ interlatent-act --robot yam --robot-arg arms=left --show
 interlatent-act --robot yam --robot-arg arms=left \
   left_joint_0=0.2 left_gripper=0.0 --hold-missing
 
-# Run a bimanual policy session with two cameras and a tighter step clamp
+# Run a bimanual policy session with two cameras and a looser step clamp
+# (the default is 0.05 rad/tick; raise it if the policy needs faster moves)
 interlatent-node run --robot yam \
   --robot-arg arms=both --robot-arg max_step_rad=0.3 \
   --camera overhead=zed:41234567 --camera wrist=realsense:1122
