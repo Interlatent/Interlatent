@@ -65,6 +65,31 @@ def control_loop(
         action_keys, session_id,
     )
 
+    # --- Action smoothing (policy path) ---------------------------------
+    # Low-pass the per-tick policy action stream to attenuate chunk-boundary /
+    # model jitter before it reaches the motors, mirroring the built-in loop.
+    # 2nd-order Butterworth designed at the control rate; default 3 Hz cutoff,
+    # tunable via ``--robot.action_filter_hz`` (0/none disables). Smoothing runs
+    # BEFORE send_action, so the robot's per-step delta clamp remains the final
+    # execution-safety guard. No teleop path here, so the filter never needs a
+    # mid-stream reset() — the warm start on the first action is enough.
+    from interlatent.node.smoothing import ButterworthLowPass
+
+    _filter_hz = _ctrl._parse_action_filter_hz(robot_extra or {})
+    action_filter = (
+        ButterworthLowPass(cutoff_hz=_filter_hz, sample_hz=float(fps if fps > 0 else 30))
+        if _filter_hz is not None
+        else None
+    )
+    if action_filter is not None:
+        _logger.info(
+            "Action smoothing ENABLED: 2nd-order Butterworth low-pass, cutoff=%.2f Hz "
+            "@ %d Hz control rate (policy path). Set --robot.action_filter_hz=none to "
+            "disable.", action_filter.cutoff_hz, int(fps if fps > 0 else 30),
+        )
+    else:
+        _logger.info("Action smoothing DISABLED (--robot.action_filter_hz=none).")
+
     features_reported = False
     features_report_attempts = 0
     step_counter = 0
@@ -83,6 +108,12 @@ def control_loop(
             state_keys = None
             if action is not None:
                 action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                # Low-pass the policy stream before send_action; the robot's
+                # per-step delta clamp (inside send_action) stays the final
+                # execution-safety guard. Warm-started, so no startup ramp. The
+                # recorded action is the smoothed command actually sent.
+                if action_filter is not None:
+                    action_arr = action_filter.filter(action_arr)
                 action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                 robot.send_action(action_dict)
                 state_keys = _ctrl._capture_tick(
