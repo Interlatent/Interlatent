@@ -32,6 +32,7 @@ from typing import Any
 
 import numpy as np
 
+from ..._clamp_log import warn_clamp
 from ..base import JointSpec, ManualActionInterface
 from .config import AxolAdapterConfig
 
@@ -329,7 +330,8 @@ class AxolNativeRobot(ManualActionInterface):
         if np.any(np.abs(delta) > self._max_step_rad):
             self._drop_count += 1
             j = int(np.argmax(np.abs(delta)))
-            _logger.warning(
+            warn_clamp(
+                f"axol:{side}",
                 "Axol %s action exceeds max_step_rad=%.3f at %s (Δ=%.3f rad); "
                 "clamped to the per-step limit (adapter clamp #%d).",
                 side, self._max_step_rad, arm_keys[j], float(delta[j]), self._drop_count,

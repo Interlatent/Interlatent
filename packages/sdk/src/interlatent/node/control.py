@@ -28,6 +28,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from .._clamp_log import warn_clamp
+
 _LOG = logging.getLogger("interlatent.node.control")
 
 # One-shot guard for the "camera arrays present but no frames encoded" warning
@@ -979,7 +981,8 @@ def _clamp_action_delta(
         out = arr.copy()
         out[:n] = a + np.clip(delta, -max_step, max_step)
         j = int(np.argmax(np.abs(delta)))
-        _LOG.warning(
+        warn_clamp(
+            f"control:{source}",
             "Delta clamp (%s) #%d: %d joint(s) exceeded max_step=%.3f; worst %s "
             "Δ=%.3f capped — sent clamped command.",
             source, step, int(exceeded.sum()), max_step, action_keys[j], float(delta[j]),

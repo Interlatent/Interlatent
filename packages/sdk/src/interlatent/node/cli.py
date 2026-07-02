@@ -28,6 +28,8 @@ from typing import Any
 
 import requests
 
+from .._clamp_log import LOGGER_NAME as _CLAMP_LOGGER_NAME
+
 DEFAULT_API_BASE = os.environ.get(
     "INTERLATENT_API_BASE", "https://interlatent.com"
 ).rstrip("/")
@@ -182,10 +184,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # --verbose is a shortcut for the most verbose level; otherwise honor an
+    # explicit --log-level, defaulting to INFO.
+    if args.verbose:
+        level = logging.DEBUG
+    else:
+        level = getattr(logging, (args.log_level or "info").upper())
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # --quiet-clamp silences only the per-tick delta-clamp warnings (their own
+    # logger), leaving the INFO latency reports and every other warning intact.
+    if args.quiet_clamp:
+        logging.getLogger(_CLAMP_LOGGER_NAME).setLevel(logging.ERROR)
 
     # DRTC inference auth needs the ilat_ user key, not the node token.
     # Resolve from CLI > env > config saved at pair time.
@@ -366,7 +378,26 @@ def build_parser() -> argparse.ArgumentParser:
         "(its image processor resizes to ~224 anyway). Also "
         "settable via INTERLATENT_IMAGE_RESIZE.",
     )
-    p_run.add_argument("-v", "--verbose", action="store_true")
+    p_run.add_argument(
+        "--log-level",
+        default=None,
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="Daemon log verbosity (default: info; --verbose forces debug). "
+        "Note: raising this to 'warning'+ still shows the per-tick delta-clamp "
+        "warnings, and 'error'+ also hides the periodic latency reports — to "
+        "quiet just the clamp warnings use --quiet-clamp.",
+    )
+    p_run.add_argument(
+        "--quiet-clamp",
+        action="store_true",
+        help="Suppress the per-tick delta-clamp warnings (execution-safety "
+        "clamp) without hiding anything else. Use when a policy overshoots "
+        "max_step every tick and the warnings drown out the latency reports.",
+    )
+    p_run.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Shortcut for --log-level debug.",
+    )
     p_run.set_defaults(func=cmd_run)
 
     return p
