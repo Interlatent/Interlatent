@@ -258,6 +258,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             loop_override=args.loop,
             num_inference_steps=num_inference_steps,
             image_resize=image_resize,
+            synchronous=(
+                bool(getattr(args, "synchronous", False))
+                or os.environ.get("INTERLATENT_SYNCHRONOUS", "").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
         )
     )
     daemon.run_forever()
@@ -377,6 +382,17 @@ def build_parser() -> argparse.ArgumentParser:
         "resolution; 256 is the right default for MolmoAct2 "
         "(its image processor resizes to ~224 anyway). Also "
         "settable via INTERLATENT_IMAGE_RESIZE.",
+    )
+    p_run.add_argument(
+        "--synchronous",
+        action="store_true",
+        help="Sequential (request-response) chunking: send one observation only "
+        "when the action queue is fully drained, wait for the whole chunk, "
+        "execute it, then re-observe. The robot holds (~one inference round-trip) "
+        "at each chunk seam, but no fresh chunk ever overwrites an unexecuted tail "
+        "— eliminates mid-chunk overwrite thrash for high-latency policies "
+        "(MolmoAct2). Default off (async overlapping chunking). Also settable via "
+        "INTERLATENT_SYNCHRONOUS.",
     )
     p_run.add_argument(
         "--log-level",

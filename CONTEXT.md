@@ -74,6 +74,24 @@ There is no inverse kinematics or Cartesian/end-effector frame in the robot-side
 `action(x, y, z, …)` means joint angles, not a workspace point. To support `action()`,
 an adapter declares per-joint metadata (range, control mode, settle tolerance).
 
+**Chunk scheduling — overlapping (default) vs sequential (`--synchronous`)**:
+How the client paces inference against execution. The **default is overlapping
+(replace-mode) chunking**: the client streams observations continuously and *never
+blocks on inference* (see ARCHITECTURE.md), so a fresh **action chunk** arrives
+while the previous one is still executing and overwrites its unexecuted tail in the
+`ActionSchedule` (last-writer-wins). This is DRTC's whole point — it hides inference
+latency and keeps motion smooth *when consecutive plans agree*. **Sequential
+(request-response) chunking**, opt-in via `--synchronous`, drops the overlap: the
+client sends one observation only when the schedule is fully drained, holds the
+robot while it waits for the whole chunk, executes every step, then re-observes. It
+deliberately reverts the "never blocks on inference" property, trading a brief
+per-chunk hold (~one inference round-trip) for the elimination of mid-chunk
+overwrite — the fix when a high-latency policy's successive plans *disagree* and
+fight (observed as robot thrashing; MolmoAct2 on the yam). _Avoid_: conflating this
+"synchronous" **mode** (an inference cadence) with the "synchronous facade"
+(`DRTCClient`), which is just the blocking `step()` **API surface**; they are
+independent.
+
 **Teleop receiver stub**:
 The node-side half of hosted DAgger takeover (`interlatent.node.teleop`). A
 `TeleopChannel` opens a WebSocket to the hosted relay and decodes `TeleopFrame`s;
@@ -115,3 +133,12 @@ policy-driven steps, `"teleop"` for human DAgger interventions. Carried on the
   a cloud-side latency optimization) and *correct compilation*. On the robot side
   neither is a concern — the client simply waits for the first action chunk; pod
   warm-pooling is handled by the dashboard.
+
+- **Sequential (`--synchronous`) chunking is currently a Node-level flag, but the
+  concept is per-Session.** Whether sequential vs overlapping chunking is right is
+  a *per-policy* fact (MolmoAct2 needs it, SmolVLA doesn't), and a **Session** pins
+  one policy — so the natural home is the dashboard session payload (like
+  `chunk_size` / `num_inference_steps`, read in `daemon.py`). For now it's only the
+  `--synchronous` CLI flag on the Node (applies to every session that node runs),
+  because it shipped as a diagnostic. Promoting it to a per-session payload field is
+  the intended evolution.
