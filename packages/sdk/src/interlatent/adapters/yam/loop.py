@@ -6,8 +6,11 @@ native :class:`~interlatent.adapters.yam.robot.YAMNativeRobot` and reuses the
 LeRobot-free DRTC wire helpers from :mod:`interlatent.node.control` so the
 observation payload and recording are byte-identical to the built-in loop.
 
-Scope: inference + per-tick recording (``control_source="policy"``). Teleop/DAgger
-is intentionally not wired; the ``teleop_channel`` kwarg is accepted and ignored.
+Scope: inference + per-tick recording (``control_source="policy"``), plus the
+hosted DAgger teleop receiver: ``mode="targets"`` frames from the platform
+route through the node-side SafetyGate exactly as in the built-in LeRobot
+loop (``node/control.py``), and intervened ticks record
+``control_source="teleop"``.
 """
 from __future__ import annotations
 
@@ -31,9 +34,12 @@ def control_loop(
     robot_cameras: Optional[dict[str, str]] = None,
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
-    teleop_channel: Any = None,  # accepted, ignored (no teleop for YAM yet)
+    teleop_channel: Any = None,
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
+    # False for teleop-recording assignments (no policy loaded): never
+    # client.step(); disengaged ticks hold pose but still record.
+    policy_enabled: bool = True,
     **_: Any,
 ) -> None:
     """Observe → DRTC step → i2rt command_joint_pos, with per-tick recording.
@@ -65,14 +71,35 @@ def control_loop(
         action_keys, session_id,
     )
 
+    # --- Teleop receiver setup (hosted DAgger path) ----------------------
+    # Mirrors node/control.py: the SafetyGate is the single safety authority
+    # for human-driven motion. The platform streams absolute joint targets
+    # (``mode="targets"``); they route through the gate's workspace +
+    # velocity clamp here. Without a registered profile for this robot kind
+    # we refuse the gated teleop path and stay on policy.
+    from interlatent.node.teleop.robot_profile import get_profile
+    from interlatent.node.teleop.safety import SafetyGate, TargetSample
+
+    teleop_profile = get_profile(robot_kind or "yam")
+    teleop_gate = (
+        SafetyGate(profile=teleop_profile, control_dt=period)
+        if teleop_profile is not None
+        else None
+    )
+    _teleop_schema = (
+        teleop_profile.to_schema_dict() if teleop_profile is not None else None
+    )
+    teleop_warned = False
+    _max_step = _ctrl._parse_max_step(robot_extra or {})
+
     # --- Action smoothing (policy path) ---------------------------------
     # Low-pass the per-tick policy action stream to attenuate chunk-boundary /
     # model jitter before it reaches the motors, mirroring the built-in loop.
     # 2nd-order Butterworth designed at the control rate; default 3 Hz cutoff,
     # tunable via ``--robot.action_filter_hz`` (0/none disables). Smoothing runs
     # BEFORE send_action, so the robot's per-step delta clamp remains the final
-    # execution-safety guard. No teleop path here, so the filter never needs a
-    # mid-stream reset() — the warm start on the first action is enough.
+    # execution-safety guard. Reset on every teleop engage (discontinuity in
+    # the policy stream), matching the built-in loop.
     from interlatent.node.smoothing import ButterworthLowPass
 
     _filter_hz = _ctrl._parse_action_filter_hz(robot_extra or {})
@@ -98,28 +125,106 @@ def control_loop(
             loop_start = time.perf_counter()
             obs = robot.get_observation()
 
-            action = client.step(
-                lambda o=obs: _ctrl._encode_npz(
-                    _ctrl._to_policy_schema(o), image_resize=image_resize
-                ),
-                codec="npz",
-            )
+            # Sample the latest teleop frame. None when no producer is
+            # connected or the last frame is stale (channel drops > 250 ms).
+            frame = teleop_channel.latest_frame() if teleop_channel is not None else None
+            engaged = bool(frame and frame.engaged and frame.deadman)
 
             state_keys = None
-            if action is not None:
-                action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-                # Low-pass the policy stream before send_action; the robot's
-                # per-step delta clamp (inside send_action) stays the final
-                # execution-safety guard. Warm-started, so no startup ramp. The
-                # recorded action is the smoothed command actually sent.
-                if action_filter is not None:
-                    action_arr = action_filter.filter(action_arr)
+            teleop_ok = (
+                engaged
+                and teleop_gate is not None
+                and action_keys
+                and len(action_keys) == len(teleop_profile.joint_names)
+            )
+            if teleop_ok:
+                # --- TELEOP PATH (mode="targets" only; see control.py) ---
+                actual_joints = _ctrl._extract_joint_state(obs, action_keys)
+                if (
+                    frame.mode == "targets"
+                    and frame.joint_targets is not None
+                    and len(frame.joint_targets) == len(action_keys)
+                ):
+                    target = np.asarray(frame.joint_targets, dtype=np.float32)
+                else:
+                    if frame.mode == "pose" and not teleop_warned:
+                        _logger.warning(
+                            "Teleop frame mode='pose' reached the node — the "
+                            "pod-side retarget stage should have converted it "
+                            "to 'targets'; holding pose. See ADR 0009, second "
+                            "amendment.",
+                        )
+                        teleop_warned = True
+                    target = actual_joints.copy()
+
+                teleop_gate.submit(TargetSample(
+                    joints=target.reshape(-1),
+                    deadman_active=frame.deadman,
+                    confidence=frame.confidence,
+                    received_at=loop_start,
+                    producer_timestamp_ns=time.monotonic_ns(),
+                ))
+                commanded, _gate_status = teleop_gate.step(actual_joints, now=loop_start)
+                action_arr = np.asarray(commanded, dtype=np.float32).reshape(-1)
+                action_arr = _ctrl._clamp_action_delta(
+                    action_arr, actual_joints, _max_step, action_keys,
+                    step_counter, source="teleop",
+                )
                 action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                 robot.send_action(action_dict)
+
+                # Drop policy chunks queued or landing during teleop so they
+                # don't apply when the human releases.
+                try:
+                    client.flush_buffer()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Discontinuity: drop the smoother's state so the first
+                # post-release policy action warm-starts from the live pose.
+                if action_filter is not None:
+                    action_filter.reset()
+
                 state_keys = _ctrl._capture_tick(
-                    client, obs, action_arr, step_counter, control_source="policy"
+                    client, obs, action_arr, step_counter, control_source="teleop"
                 )
                 step_counter += 1
+            elif not policy_enabled:
+                # --- HOLD PATH (teleop recording, disengaged) ---
+                # No policy to fall back to: send nothing (motors hold),
+                # but record every tick so the episode stays continuous.
+                if teleop_gate is not None:
+                    teleop_gate.reset()
+                actual_joints = _ctrl._extract_joint_state(obs, action_keys)
+                state_keys = _ctrl._capture_tick(
+                    client, obs, actual_joints, step_counter, control_source="hold"
+                )
+                step_counter += 1
+            else:
+                # Reset the gate so the next engage starts from the live pose.
+                if teleop_gate is not None:
+                    teleop_gate.reset()
+
+                action = client.step(
+                    lambda o=obs: _ctrl._encode_npz(
+                        _ctrl._to_policy_schema(o), image_resize=image_resize
+                    ),
+                    codec="npz",
+                )
+
+                if action is not None:
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                    # Low-pass the policy stream before send_action; the robot's
+                    # per-step delta clamp (inside send_action) stays the final
+                    # execution-safety guard. Warm-started, so no startup ramp. The
+                    # recorded action is the smoothed command actually sent.
+                    if action_filter is not None:
+                        action_arr = action_filter.filter(action_arr)
+                    action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
+                    robot.send_action(action_dict)
+                    state_keys = _ctrl._capture_tick(
+                        client, obs, action_arr, step_counter, control_source="policy"
+                    )
+                    step_counter += 1
 
             if (
                 state_keys is not None
@@ -128,7 +233,8 @@ def control_loop(
             ):
                 features_report_attempts += 1
                 if _ctrl._report_robot_features(
-                    api_base, node_id, api_key, state_keys, action_keys
+                    api_base, node_id, api_key, state_keys, action_keys,
+                    teleop_profile=_teleop_schema,
                 ):
                     features_reported = True
 

@@ -6,19 +6,23 @@ parser; each producer re-implements the encoder against this contract (the
 contract is duplicated across the WS boundary by design — see ADR 0009 — so the
 node never depends on a producer package).
 
-Three modes converge on one node-side gated path (`control.py`):
+Three modes exist on the wire; the node executes two of them
+(`control.py`):
 
 - ``mode="keys"``    — ``held_keys`` is a set of currently-held key strings; the
                        node integrates them into an absolute joint target
                        (``keyboard.next_target``). The dashboard keyboard overlay.
-- ``mode="pose"``    — ``ee_pos`` (+ optional ``ee_quat``) is a raw 6-DoF
-                       end-effector pose and ``pinch`` a gripper close amount;
-                       the node retargets to joint targets via ``retarget`` /
-                       node-side IK. The WebXR browser producer (see ADR 0009).
-- ``mode="targets"`` — ``joint_targets`` is an absolute joint-target vector the
-                       producer already computed. Used directly. (Retained for
-                       producers that do their own IK; the WebXR path uses
-                       ``pose`` so IK stays node-side.)
+- ``mode="pose"``    — ``ee_pos``/``ee_quat`` is an absolute 6-DoF end-effector
+                       TARGET in the arm-base frame (browser clutch mapper
+                       output) and ``pinch`` a gripper close amount. Consumed by
+                       the POD-side retarget stage in the relay, which solves IK
+                       and forwards ``mode="targets"`` — a pose frame should
+                       never reach the node (ADR 0009, second amendment); if one
+                       does, the node holds pose.
+- ``mode="targets"`` — ``joint_targets`` is an absolute joint-target vector
+                       (``action_features`` order, robot-native units) the
+                       producer or the pod retarget stage already computed.
+                       Routed through the SafetyGate and executed.
 
 Back-compat: a frame with no ``mode`` is treated as ``"keys"``, so the existing
 overlay (which sends no ``mode``) keeps working untouched.

@@ -79,13 +79,18 @@ def lerobot_control_loop(
     # teleop-capable). The node consumes ``mode="targets"`` frames — absolute
     # joint vectors the hosted teleop engine already computed — and routes them
     # through the SafetyGate. None disables teleop (pure policy). See
-    # docs/adr/0012-teleop-receiver-stub-open-core-boundary.md.
+    # docs/adr/0009 (hosted relay + its amendments).
     teleop_channel: Optional[Any] = None,
     # Pre-encode square-resize target for camera frames (pixels per side).
     # None keeps native camera resolution. Set by the daemon when the
     # GPU-side policy is known to downsample anyway (e.g. MolmoAct2 →
     # 256), saving uplink bandwidth without losing information.
     image_resize: Optional[int] = None,
+    # False for teleop-recording assignments (no policy loaded): the loop
+    # never calls client.step() — all motion comes from the teleop channel,
+    # and disengaged ticks hold pose while still recording (so the episode
+    # is continuous). See the TeleopRecording resource.
+    policy_enabled: bool = True,
     **_: Any,
 ) -> None:
     """Generic LeRobot observe/act loop.
@@ -166,8 +171,9 @@ def lerobot_control_loop(
     # route through the gate's workspace + velocity clamp here on the node. It
     # needs a static per-robot profile (limits + velocity cap + rest pose) that
     # lerobot cannot supply; without one for this robot kind we refuse the gated
-    # teleop path and stay on policy. The keyboard/pose modality compute lives
-    # on the platform (see ADR 0012), so the node handles only ``mode="targets"``.
+    # teleop path and stay on policy. The pose-modality compute (clutch mapping
+    # + IK) lives on the compute pod (ADR 0009, second amendment), so the node
+    # handles only ``mode="keys"`` / ``mode="targets"``.
     from .teleop.robot_profile import get_profile
     from .teleop.safety import SafetyGate, TargetSample
 
@@ -272,11 +278,13 @@ def lerobot_control_loop(
                 else:
                     # Malformed/length-mismatched, or a keys/pose frame the node
                     # can't compute locally: hold pose (gate idles toward it).
-                    if frame.mode in ("keys", "pose") and not teleop_warned:
+                    if frame.mode == "pose" and not teleop_warned:
                         _LOG.warning(
-                            "Teleop frame mode=%r received but the node only "
-                            "handles 'targets' (the modality engine runs on the "
-                            "platform); holding pose. See ADR 0012.", frame.mode,
+                            "Teleop frame mode='pose' reached the node — the "
+                            "pod-side retarget stage should have converted it "
+                            "to 'targets' (is the relay running without a "
+                            "teleop_view hook?); holding pose. See ADR 0009, "
+                            "second amendment.",
                         )
                         teleop_warned = True
                     target = actual_joints.copy()
@@ -315,6 +323,19 @@ def lerobot_control_loop(
                 state_keys = _capture_tick(
                     client, obs, action_arr, step_counter,
                     control_source="teleop",
+                )
+                step_counter += 1
+            elif not policy_enabled:
+                # --- HOLD PATH (teleop recording, disengaged) ---
+                # No policy to fall back to: send nothing (servos hold),
+                # but keep recording every tick so the episode is
+                # continuous across engage/disengage gaps.
+                if teleop_gate is not None:
+                    teleop_gate.reset()
+                actual_joints = _extract_joint_state(obs, action_keys)
+                state_keys = _capture_tick(
+                    client, obs, actual_joints, step_counter,
+                    control_source="hold",
                 )
                 step_counter += 1
             else:

@@ -64,10 +64,17 @@ class TeleopChannel:
         session_id: str,
         api_base: str,
         api_key: str,
+        token_path: Optional[str] = None,
     ) -> None:
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
+        # Token-mint route. Defaults to the inference-session route; teleop
+        # recordings pass their own (/api/v1/teleop-recordings/{id}/teleop-token).
+        self._token_path = (
+            token_path
+            or f"/api/v1/inference/sessions/{session_id}/teleop-token"
+        )
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
@@ -156,7 +163,7 @@ class TeleopChannel:
         """
         import httpx
 
-        url = f"{self._api_base}/api/v1/inference/sessions/{self._session_id}/teleop-token"
+        url = f"{self._api_base}{self._token_path}"
         with httpx.Client(timeout=10.0) as client:
             r = client.post(
                 url,
