@@ -82,6 +82,11 @@ class NodeDaemonConfig:
     # start a session if this is unset everywhere (env var, this field,
     # session payload) — there is no hosted default.
     drtc_url: Optional[str] = None
+    # Protection-bypass secret for a protected preview/test domain (e.g. a
+    # Vercel branch deployment). Sent as x-vercel-protection-bypass on every
+    # heartbeat/poll so the daemon reaches the same domain the node paired
+    # against. None on production.
+    bypass_key: Optional[str] = None
     robot_kind: Optional[str] = None
     robot_port: Optional[str] = None
     robot_extra: dict[str, str] = field(default_factory=dict)
@@ -120,9 +125,14 @@ class NodeDaemonConfig:
 class NodeDaemon:
     def __init__(self, cfg: NodeDaemonConfig) -> None:
         self.cfg = cfg
+        _headers = {"x-api-key": cfg.token}
+        if (cfg.bypass_key or "").strip():
+            # Protected test domains (Vercel preview deployments) challenge
+            # un-bypassed requests; carry the automation bypass secret.
+            _headers["x-vercel-protection-bypass"] = cfg.bypass_key.strip()
         self._http = httpx.AsyncClient(
             base_url=cfg.api_base,
-            headers={"x-api-key": cfg.token},
+            headers=_headers,
             timeout=httpx.Timeout(cfg.poll_wait_s + 10),
         )
         self._known_session_id: str = ""  # what we've executed against

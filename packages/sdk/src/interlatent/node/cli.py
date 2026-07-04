@@ -40,6 +40,20 @@ DEFAULT_CONFIG_PATH = Path(
 _LOG = logging.getLogger("interlatent.node")
 
 
+def _bypass_headers(bypass_key: str) -> dict[str, str]:
+    """Header(s) that let a request through a protected preview/test domain.
+
+    Vercel preview deployments sit behind Deployment Protection: an
+    un-bypassed request gets an auth challenge page instead of the API.
+    The `x-vercel-protection-bypass` header carries the automation bypass
+    secret configured for that project. Empty key -> no headers (prod).
+    """
+    key = (bypass_key or "").strip()
+    if not key:
+        return {}
+    return {"x-vercel-protection-bypass": key}
+
+
 # ---------------------------------------------------------------------------
 # Config file
 # ---------------------------------------------------------------------------
@@ -117,11 +131,22 @@ def cmd_pair(args: argparse.Namespace) -> int:
         or os.environ.get("INTERLATENT_DRTC_URL", "").strip()
     )
 
+    # Bypass secret for pairing against a protected preview/test domain
+    # (e.g. a Vercel branch deployment). Empty on prod.
+    bypass_key = (
+        (args.bypass_key or "").strip()
+        or os.environ.get("INTERLATENT_BYPASS_KEY", "").strip()
+    )
+
     url = f"{args.api_base.rstrip('/')}/api/v1/nodes"
     try:
         resp = requests.post(
             url,
-            headers={"x-api-key": api_key, "content-type": "application/json"},
+            headers={
+                "x-api-key": api_key,
+                "content-type": "application/json",
+                **_bypass_headers(bypass_key),
+            },
             data=json.dumps({"name": args.name}),
             timeout=30,
         )
@@ -149,6 +174,10 @@ def cmd_pair(args: argparse.Namespace) -> int:
     cfg_data["api_key"] = api_key
     if drtc_url:
         cfg_data["drtc_url"] = drtc_url
+    # Persist the bypass secret so the daemon's heartbeat/poll to the same
+    # protected test domain also gets through without re-passing --bypass-key.
+    if bypass_key:
+        cfg_data["bypass_key"] = bypass_key
     _write_config(cfg_path, cfg_data)
 
     print(f"✓ Paired '{payload['name']}' as node_id={payload['id']}")
@@ -244,6 +273,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         "INTERLATENT_IMAGE_RESIZE",
     )
 
+    # Bypass secret for a protected test domain: CLI > env > pair-time config.
+    bypass_key = (
+        (args.bypass_key or "").strip()
+        or os.environ.get("INTERLATENT_BYPASS_KEY", "").strip()
+        or cfg.get("bypass_key", "").strip()
+    )
+
     daemon = NodeDaemon(
         NodeDaemonConfig(
             node_id=cfg["node_id"],
@@ -251,6 +287,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             drtc_api_key=drtc_api_key,
             drtc_url=drtc_url,
             api_base=cfg["api_base"],
+            bypass_key=bypass_key or None,
             robot_kind=args.robot,
             robot_port=args.port,
             robot_extra=dict(args.robot_arg or []),
@@ -315,6 +352,15 @@ def build_parser() -> argparse.ArgumentParser:
         "203.0.113.7:50051 for a Runpod box's public IP:port, "
         "or https://<workspace>--interlatent-drtc-inference-web.modal.run "
         "for a Modal deployment). If omitted on a TTY, you'll be prompted.",
+    )
+    p_pair.add_argument(
+        "--bypass-key",
+        default=None,
+        help="Protection-bypass secret for pairing against a protected "
+        "preview/test domain (e.g. a Vercel branch deployment). Sent as the "
+        "x-vercel-protection-bypass header and saved to the node config so "
+        "the daemon reuses it. Falls back to INTERLATENT_BYPASS_KEY. Leave "
+        "unset for production.",
     )
     p_pair.set_defaults(func=cmd_pair)
 
@@ -413,6 +459,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "-v", "--verbose", action="store_true",
         help="Shortcut for --log-level debug.",
+    )
+    p_run.add_argument(
+        "--bypass-key",
+        default=None,
+        help="Protection-bypass secret for heartbeat/poll against a protected "
+        "test domain. Overrides INTERLATENT_BYPASS_KEY and the value saved at "
+        "pair time.",
     )
     p_run.set_defaults(func=cmd_run)
 
