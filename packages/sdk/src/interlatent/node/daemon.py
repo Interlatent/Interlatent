@@ -565,6 +565,7 @@ class NodeDaemon:
                     f"/api/v1/teleop-recordings/{session['id']}/teleop-token"
                     if is_recording else None
                 ),
+                bypass_key=self.cfg.bypass_key,
             )
             teleop_channel.start()
 

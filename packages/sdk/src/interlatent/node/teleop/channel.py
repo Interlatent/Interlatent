@@ -65,10 +65,12 @@ class TeleopChannel:
         api_base: str,
         api_key: str,
         token_path: Optional[str] = None,
+        bypass_key: Optional[str] = None,
     ) -> None:
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
+        self._bypass_key = bypass_key
         # Token-mint route. Defaults to the inference-session route; teleop
         # recordings pass their own (/api/v1/teleop-recordings/{id}/teleop-token).
         self._token_path = (
@@ -164,11 +166,18 @@ class TeleopChannel:
         import httpx
 
         url = f"{self._api_base}{self._token_path}"
+        headers = {"x-api-key": self._api_key}
+        if (self._bypass_key or "").strip():
+            # Protected test domains (Vercel preview deployments) challenge
+            # un-bypassed requests with a 302 to Vercel's SSO gate rather
+            # than reaching the app at all; carry the automation bypass
+            # secret same as the daemon's shared heartbeat/poll client.
+            headers["x-vercel-protection-bypass"] = self._bypass_key.strip()
         with httpx.Client(timeout=10.0) as client:
             r = client.post(
                 url,
                 params={"role": "node"},
-                headers={"x-api-key": self._api_key},
+                headers=headers,
             )
             r.raise_for_status()
             data = r.json()
