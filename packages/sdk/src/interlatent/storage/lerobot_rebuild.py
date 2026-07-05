@@ -222,6 +222,7 @@ class LeRobotRebuilder:
         repo_id: Optional[str] = None,
         force_control_source: bool = False,
         measured_fps: Optional[float] = None,
+        vcodec: Optional[str] = None,
     ) -> None:
         # ``root`` must NOT yet exist. ``LeRobotDataset.create()`` calls
         # ``root.mkdir(exist_ok=False)`` internally and will raise
@@ -242,6 +243,14 @@ class LeRobotRebuilder:
         # reference when the dataset ``fps`` is pinned to the declared rate
         # (so merges stay consistent). None = not recorded.
         self.measured_fps = measured_fps
+        # None keeps lerobot's own default ("libsvtav1"). Callers running in
+        # a syscall-restricted sandbox (e.g. Modal's gVisor container) should
+        # pass "h264": SVT-AV1 tries to set worker-thread scheduling priority
+        # (pthread_setschedparam), which gVisor rejects as EINVAL — logged as
+        # "Failed to set thread priority: Invalid argument" — and the encoder
+        # then stalls badly (observed as an upload that never finishes)
+        # instead of just running unprioritized. libx264 has no such step.
+        self.vcodec = vcodec
 
     # ------------------------------------------------------------------
     # Public API
@@ -350,6 +359,7 @@ class LeRobotRebuilder:
             root=str(self.root),
             robot_type=self.env_slug or "custom",
             use_videos=bool(cameras and image_shape is not None),
+            **({"vcodec": self.vcodec} if self.vcodec else {}),
         )
 
         # 4. Pre-index frames per (episode, step) so the inner loop is
