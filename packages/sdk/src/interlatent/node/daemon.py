@@ -582,6 +582,7 @@ class NodeDaemon:
             "api_base": self.cfg.api_base,
             "teleop_channel": teleop_channel,
             "node_id": self.cfg.node_id,
+            "bypass_key": self.cfg.bypass_key,
             "image_resize": image_resize,
             # False for teleop recordings: the loop must never client.step()
             # (no policy is loaded; the echo backend returns sinusoids).

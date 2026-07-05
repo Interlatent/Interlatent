@@ -36,6 +36,7 @@ def control_loop(
     teleop_channel: Any = None,  # accepted, ignored (no teleop for Axol yet)
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
+    bypass_key: Optional[str] = None,
     **_: Any,
 ) -> None:
     """Observe → DRTC step → native motion_control, with per-tick recording.
@@ -110,7 +111,8 @@ def control_loop(
             ):
                 features_report_attempts += 1
                 if _ctrl._report_robot_features(
-                    api_base, node_id, api_key, state_keys, action_keys
+                    api_base, node_id, api_key, state_keys, action_keys,
+                    bypass_key=bypass_key,
                 ):
                     features_reported = True
 
