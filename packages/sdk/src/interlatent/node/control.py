@@ -249,6 +249,16 @@ def lerobot_control_loop(
 
             obs = robot.get_observation()
 
+            # Feed the pod-side retarget stage's staleness gate directly
+            # over the teleop WS (~15 Hz, rate-limited inside send_state).
+            # RecordTick state rides the batched JPEG uplink and can lag
+            # seconds behind on a slow link, which made the stage flap
+            # between ready and stale_observation mid-engage.
+            if teleop_channel is not None and action_keys:
+                teleop_channel.send_state(
+                    _extract_joint_state(obs, action_keys).tolist()
+                )
+
             # Sample the latest teleop frame. None when no producer is
             # connected or the last frame is stale (channel drops > 250 ms).
             frame = teleop_channel.latest_frame() if teleop_channel is not None else None

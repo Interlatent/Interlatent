@@ -49,6 +49,14 @@ _FRAME_STALE_MS = 250
 _RECONNECT_INITIAL_S = 1.0
 _RECONNECT_MAX_S = 15.0
 
+# Node→pod state heartbeat rate. The pod-side retarget stage refuses to
+# solve against a robot state older than 0.5s (STALE_OBS_S); RecordTick
+# state rides the recorder's batched JPEG uplink and can arrive seconds
+# apart on a slow link, so the control loop pushes its joint vector over
+# this WS instead — tiny frames, RTT-bound. 15 Hz keeps the gate
+# comfortably fed at ~1/7th its threshold.
+_STATE_SEND_PERIOD_S = 1.0 / 15.0
+
 
 class TeleopChannel:
     """Background WS client that surfaces the latest browser teleop frame.
@@ -83,6 +91,10 @@ class TeleopChannel:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._connected = False
+        # Live WS handle for send_state() (websockets' sync connection is
+        # thread-safe: the control loop sends while the receive loop recvs).
+        self._ws = None
+        self._last_state_sent_at = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -126,6 +138,39 @@ class TeleopChannel:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    # ------------------------------------------------------------------
+    # Write API (called from the control loop)
+    # ------------------------------------------------------------------
+
+    def send_state(self, qpos) -> None:
+        """Best-effort push of the robot's current joint vector (action
+        order, robot-native units — same convention as RecordTick's
+        ``observation_state``) to the pod's teleop relay.
+
+        Rate-limited to ~15 Hz internally, so callers can just invoke it
+        every control tick. Never raises and never blocks meaningfully —
+        connection failures are owned by the reconnect loop; a send racing
+        a disconnect is simply dropped.
+        """
+        ws = self._ws
+        if ws is None or qpos is None:
+            return
+        now = time.monotonic()
+        if now - self._last_state_sent_at < _STATE_SEND_PERIOD_S:
+            return
+        self._last_state_sent_at = now
+        try:
+            import json
+
+            ws.send(json.dumps({
+                "type": "state",
+                "qpos": [float(x) for x in qpos],
+            }))
+        except Exception:
+            # Socket mid-close / reconnecting — the receive loop notices
+            # and re-establishes; state resumes on the next connection.
+            pass
 
     # ------------------------------------------------------------------
     # Background thread
@@ -194,6 +239,7 @@ class TeleopChannel:
         _LOG.info("teleop channel connecting: %s", _redact_token(full_url))
         with connect(full_url, open_timeout=10, close_timeout=5) as ws:
             self._connected = True
+            self._ws = ws
             _LOG.info("teleop channel connected session=%s", self._session_id)
             try:
                 while not self._stop.is_set():
@@ -215,6 +261,7 @@ class TeleopChannel:
                         self._latest = frame
             finally:
                 self._connected = False
+                self._ws = None
                 # Drop the last known frame on disconnect so a stale
                 # "engaged" doesn't keep driving the arm. The control
                 # loop sees latest_frame() == None and falls back to
