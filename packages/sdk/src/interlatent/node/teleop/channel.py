@@ -57,6 +57,10 @@ _RECONNECT_MAX_S = 15.0
 # comfortably fed at ~1/7th its threshold.
 _STATE_SEND_PERIOD_S = 1.0 / 15.0
 
+# Period of the rolling frame-arrival latency summary (INFO). Matches the
+# relay's 5s browser-frame summaries so pod and node logs line up.
+_STATS_LOG_PERIOD_S = 5.0
+
 
 class TeleopChannel:
     """Background WS client that surfaces the latest browser teleop frame.
@@ -95,6 +99,59 @@ class TeleopChannel:
         # thread-safe: the control loop sends while the receive loop recvs).
         self._ws = None
         self._last_state_sent_at = 0.0
+        # Frame-arrival latency window (receive-loop thread only): counts
+        # + inter-arrival gap stats since the last 5s summary. The gap is
+        # the node-observable half of teleop latency — it captures
+        # pod→node network jitter and retarget-stage stalls, which is
+        # what actually makes the arm feel laggy.
+        self._arr_count = 0
+        self._arr_last_ns = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_seq_first = 0
+        self._arr_seq_last = 0
+        self._arr_window_started = time.monotonic()
+
+    def _note_arrival(self, frame: TeleopFrame) -> None:
+        """Track inter-arrival gaps of producer frames; log a 5s summary.
+
+        Runs on the receive-loop thread only (no locking needed). Logged
+        rate below the producer's send rate, or a large max gap, means
+        frames are stalling somewhere between the pod and this node.
+        """
+        now_ns = frame.received_at_ns
+        if self._arr_count == 0:
+            self._arr_seq_first = frame.seq
+        else:
+            gap_ms = (now_ns - self._arr_last_ns) / 1e6
+            self._arr_gap_sum_ms += gap_ms
+            if gap_ms > self._arr_gap_max_ms:
+                self._arr_gap_max_ms = gap_ms
+        self._arr_last_ns = now_ns
+        self._arr_seq_last = frame.seq
+        self._arr_count += 1
+
+        now = time.monotonic()
+        elapsed = now - self._arr_window_started
+        if elapsed < _STATS_LOG_PERIOD_S:
+            return
+        n = self._arr_count
+        gaps = n - 1
+        # seq span vs frames received ≈ producer frames the relay/retarget
+        # collapsed or dropped en route (latest-wins everywhere, so >0 is
+        # normal under load — it's the trend that matters).
+        seq_span = self._arr_seq_last - self._arr_seq_first
+        _LOG.info(
+            "teleop WS frames (%.0fs): n=%d rate=%.1fHz gap mean/max=%.0f/%.0fms "
+            "seq_span=%d session=%s",
+            elapsed, n, n / elapsed if elapsed > 0 else 0.0,
+            (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
+            self._arr_gap_max_ms, seq_span, self._session_id,
+        )
+        self._arr_count = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_window_started = now
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -257,6 +314,7 @@ class TeleopChannel:
                     frame = TeleopFrame.from_json(raw)
                     if frame is None:
                         continue
+                    self._note_arrival(frame)
                     with self._lock:
                         self._latest = frame
             finally:

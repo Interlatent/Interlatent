@@ -244,6 +244,15 @@ def lerobot_control_loop(
         # to bare indices for this env.
         features_reported = False
         features_report_attempts = 0
+        # Teleop execution-latency window: age of each executed teleop frame
+        # (WS receive → send_action on this tick). This is the node-local
+        # half of teleop latency — pair it with the channel's WS
+        # inter-arrival summary to tell "network/pod is slow" apart from
+        # "control loop is slow". 5s rolling summary, teleop ticks only.
+        _tl_n = 0
+        _tl_age_sum_ms = 0.0
+        _tl_age_max_ms = 0.0
+        _tl_window_started = time.monotonic()
         while not should_stop():
             loop_start = time.perf_counter()
 
@@ -253,11 +262,19 @@ def lerobot_control_loop(
             # over the teleop WS (~15 Hz, rate-limited inside send_state).
             # RecordTick state rides the batched JPEG uplink and can lag
             # seconds behind on a slow link, which made the stage flap
-            # between ready and stale_observation mid-engage.
+            # between ready and stale_observation mid-engage. getattr +
+            # try/except so a version-skewed or custom channel object can
+            # never take down the control loop — worst case we just fall
+            # back to RecordTick-fed state (the pre-heartbeat behavior).
             if teleop_channel is not None and action_keys:
-                teleop_channel.send_state(
-                    _extract_joint_state(obs, action_keys).tolist()
-                )
+                _send_state = getattr(teleop_channel, "send_state", None)
+                if _send_state is not None:
+                    try:
+                        _send_state(
+                            _extract_joint_state(obs, action_keys).tolist()
+                        )
+                    except Exception:
+                        pass
 
             # Sample the latest teleop frame. None when no producer is
             # connected or the last frame is stale (channel drops > 250 ms).
@@ -321,6 +338,13 @@ def lerobot_control_loop(
                     step_counter, source="teleop",
                 )
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+
+                # Latency accounting: how old was the frame we just executed?
+                _tl_age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1e6
+                _tl_n += 1
+                _tl_age_sum_ms += _tl_age_ms
+                if _tl_age_ms > _tl_age_max_ms:
+                    _tl_age_max_ms = _tl_age_ms
 
                 # Drop policy chunks queued or landing during teleop so they
                 # don't apply when the human releases.
@@ -422,6 +446,22 @@ def lerobot_control_loop(
                     bypass_key=bypass_key,
                 ):
                     features_reported = True
+
+            # Teleop execution-latency summary (5s window; only when teleop
+            # ticks actually ran, so pure-policy operation logs nothing).
+            _tl_now = time.monotonic()
+            if _tl_now - _tl_window_started >= 5.0:
+                if _tl_n > 0:
+                    _LOG.info(
+                        "teleop exec latency (%.0fs): n=%d age mean/max=%.0f/%.0fms "
+                        "(WS receive -> send_action)",
+                        _tl_now - _tl_window_started, _tl_n,
+                        _tl_age_sum_ms / _tl_n, _tl_age_max_ms,
+                    )
+                _tl_n = 0
+                _tl_age_sum_ms = 0.0
+                _tl_age_max_ms = 0.0
+                _tl_window_started = _tl_now
 
             elapsed = time.perf_counter() - loop_start
             if elapsed < period:
