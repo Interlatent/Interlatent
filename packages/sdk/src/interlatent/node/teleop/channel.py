@@ -65,9 +65,22 @@ _STATS_LOG_PERIOD_S = 5.0
 # Live-preview push rate (node→pod, small downscaled JPEGs over this WS).
 # The in-headset video quad is fed from these instead of the batched
 # full-resolution recording uplink, which over a real link runs seconds
-# behind. 10 Hz × ~10-20 KB × cams is well under 2 Mbit/s — cheap enough
-# to leave on whenever a viewer is present.
-_PREVIEW_SEND_PERIOD_S = 1.0 / 10.0
+# behind. The cadence is the dominant term in perceived video latency
+# (mean staleness ≈ half the period), so it's tunable per node via
+# INTERLATENT_PREVIEW_HZ; the cost is uplink bandwidth (~10-20 KB × cams
+# × Hz — 10 Hz on a 2-cam rig is ~2 Mbit/s, 20 Hz ~4 Mbit/s). Clamped to
+# [1, 30]; the control loop can't produce more than its tick rate anyway.
+def _preview_period_s() -> float:
+    import os
+
+    try:
+        hz = float(os.environ.get("INTERLATENT_PREVIEW_HZ", "") or 10.0)
+    except (TypeError, ValueError):
+        hz = 10.0
+    return 1.0 / max(1.0, min(30.0, hz))
+
+
+_PREVIEW_SEND_PERIOD_S = _preview_period_s()
 
 # A viewer is "present" while browser frames keep arriving on this WS
 # (the overlay sends keepalives even when disengaged). No frames for this
@@ -367,6 +380,18 @@ class TeleopChannel:
             try:
                 self._run_session(ws_url, token)
                 backoff = _RECONNECT_INITIAL_S  # clean disconnect — reset
+            except (OSError, TimeoutError) as exc:
+                # Expected transport churn: connection refused (relay/pod
+                # stopped or not up yet), reset, host unreachable, open
+                # timeout. The reconnect loop IS the handler — one quiet
+                # line, no traceback.
+                _LOG.warning(
+                    "teleop WS unreachable (%s: %s); reconnecting in %.0fs",
+                    type(exc).__name__, exc, backoff,
+                )
+                if self._stop.wait(backoff):
+                    return
+                backoff = min(backoff * 2, _RECONNECT_MAX_S)
             except Exception:
                 _LOG.warning("teleop WS errored; reconnecting", exc_info=True)
                 if self._stop.wait(backoff):
