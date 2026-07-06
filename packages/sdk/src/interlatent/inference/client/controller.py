@@ -66,6 +66,26 @@ _RECORDER_QUEUE_MAXSIZE = 256
 # sentinel (None)" in record_tick's drop-oldest eviction path.
 _QUEUE_WAS_EMPTY = object()
 
+
+def _rec_pace_bytes_per_s() -> float:
+    """Recording-uplink budget from INTERLATENT_REC_MAX_KBPS (KiB/s).
+
+    0 (default) = unpaced. When set, the drain thread sleeps after each
+    batch so recording never offers more than this to the uplink —
+    protecting the teleop path (state heartbeat, pose targets, live
+    previews) that shares the same physical link from bufferbloat behind
+    recording bursts. If the budget is below the capture bitrate the
+    queue thins via drop-oldest — an explicitly lossy recording in
+    exchange for a responsive robot, instead of both degrading.
+    """
+    import os
+
+    try:
+        kbps = float(os.environ.get("INTERLATENT_REC_MAX_KBPS", "") or 0.0)
+    except (TypeError, ValueError):
+        kbps = 0.0
+    return max(0.0, kbps) * 1024.0
+
 # Cap the wire size of one batched RecordTicks RPC. Two constraints:
 # the server's default gRPC receive limit is 4 MiB (hard ceiling), and —
 # the binding one — each batch is a single head-of-line burst on the
@@ -203,6 +223,9 @@ class DRTCClient:
         # Set once if the server 404s RecordTicks (an older node that only
         # speaks unary RecordTick); after that the drain ships tick-by-tick.
         self._rec_batch_unsupported = False
+        # Optional recording-uplink budget (bytes/s; 0 = unpaced). See
+        # _rec_pace_bytes_per_s. Read once — it's a deployment knob.
+        self._rec_pace_bps = _rec_pace_bytes_per_s()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -633,6 +656,7 @@ class DRTCClient:
         import grpc
 
         batch_bytes = sum(self._item_bytes(item) for item in batch)
+        _pace_t0 = time.monotonic()
         try:
             req = pb.RecordTicksRequest(
                 ticks=[self._build_tick_req(item) for item in batch],
@@ -660,6 +684,18 @@ class DRTCClient:
                 log.debug("RecordTicks failed", exc_info=True)
         except Exception:
             log.debug("RecordTicks failed", exc_info=True)
+        finally:
+            # Uplink pacing: hold the drain until this batch's bytes fit
+            # the configured budget. The RPC's own upload time counts
+            # toward the quota, so a slow link is never double-penalized.
+            # Skipped during close (self._stop set) — the final drain
+            # should finish as fast as the link allows, not as slow as
+            # the pacer.
+            if self._rec_pace_bps > 0 and not self._stop.is_set():
+                quota_s = batch_bytes / self._rec_pace_bps
+                spent_s = time.monotonic() - _pace_t0
+                if quota_s > spent_s:
+                    time.sleep(min(quota_s - spent_s, 5.0))
 
     def _send_record_tick(self, item: dict) -> None:
         if self._stub is None or self.session_id is None:
