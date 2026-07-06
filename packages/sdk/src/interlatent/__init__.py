@@ -7,16 +7,31 @@ __all__ = [
     "APIError",
     "AuthenticationError",
     "NotFoundError",
+    # Named, offline behaviors (interlatent.behaviors / interlatent.robot).
+    "Robot",
+    "behavior",
+    "BehaviorValidationError",
+    "BehaviorExecutionError",
+    "RobotBusyError",
 ]
 
 
 def __getattr__(name):
-    """Lazy-load collection types on first access."""
+    """Lazy-load collection + behavior types on first access.
+
+    Behaviors live behind this lazy seam so ``import interlatent`` stays cheap and
+    never pulls in a robot adapter until you actually construct a :class:`Robot`.
+    """
     _lazy = {
         "ActivationEvent": "._schema",
         "RunInfo": "._schema",
         "auto_metrics": "._metrics",
         "Watcher": "._watcher",
+        "Robot": ".robot",
+        "behavior": ".behaviors",
+        "BehaviorValidationError": ".behaviors",
+        "BehaviorExecutionError": ".behaviors",
+        "RobotBusyError": ".behaviors",
     }
     if name in _lazy:
         import importlib

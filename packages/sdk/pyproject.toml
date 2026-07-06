@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interlatent"
 version = "1.0.0"
-description = "Interlatent SDK — run VLA policies on real robots and collect LeRobot datasets."
+description = "Interlatent SDK — one open interface to control robots: drive them, run VLA policies, and collect LeRobot datasets."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -116,6 +116,10 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["interlatent*"]
+
+[tool.setuptools.package-data]
+# Built-in behavior definitions shipped per robot (interlatent.behaviors.data).
+"interlatent.behaviors" = ["data/*.toml"]
 
 # ---------------------------------------------------------------------------
 # CPU-only torch wheels.

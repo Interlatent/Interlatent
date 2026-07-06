@@ -140,26 +140,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     extra = dict(args.robot_arg or [])
     kind = (args.robot or "").lower().strip()
 
-    # Imported here so --help / arg errors don't pay the adapter import cost.
-    if kind == "yam":
-        # Native CAN kind: build the YAM adapter directly. Default auto_home off for a
-        # one-shot CLI move (the action() itself drives the arm; --show must not move
-        # it) — pass --robot-arg auto_home=true to re-enable.
-        extra.setdefault("auto_home", "false")
-        from ..adapters.yam.config import build_adapter_config
-        from ..adapters.yam.robot import YAMNativeRobot
+    # Native CAN kinds (yam*) drive over their own bus and need no --port; every other
+    # kind is a LeRobot serial arm that does. resolve_adapter imports the adapter (and
+    # its heavy deps) lazily, so --help / arg errors above never pay that cost.
+    from ..adapters import _YAM_KINDS, resolve_adapter
 
-        adapter = YAMNativeRobot(build_adapter_config(extra, None))
-    else:
-        if not args.port:
-            print(
-                f"error: --port is required for robot kind {args.robot!r}.",
-                file=sys.stderr,
-            )
-            return 2
-        from ..adapters.lerobot.robot import LeRobotAdapter
-
-        adapter = LeRobotAdapter(args.robot, port=args.port, extra=extra)
+    if kind not in _YAM_KINDS and not args.port:
+        print(
+            f"error: --port is required for robot kind {args.robot!r}.",
+            file=sys.stderr,
+        )
+        return 2
+    adapter = resolve_adapter(args.robot, port=args.port, extra=extra)
 
     try:
         adapter.connect()
