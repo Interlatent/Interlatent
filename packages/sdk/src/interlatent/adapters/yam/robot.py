@@ -205,6 +205,10 @@ class YAMNativeRobot(ManualActionInterface):
         for side, arm in self._arms.items():
             try:
                 arm.close()
+            except ValueError:
+                # i2rt raises ValueError when the motors no longer answer on
+                # the CAN bus — i.e. the yams are already powered off.
+                _logger.info("YAM %s arm already powered off; nothing to close.", side)
             except Exception:  # noqa: BLE001
                 _logger.warning("YAM %s arm close failed", side, exc_info=True)
         self._arms = {}
