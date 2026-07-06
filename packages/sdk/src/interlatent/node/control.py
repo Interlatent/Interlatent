@@ -253,6 +253,10 @@ def lerobot_control_loop(
         _tl_age_sum_ms = 0.0
         _tl_age_max_ms = 0.0
         _tl_window_started = time.monotonic()
+        # One-shot: a preview encode that yields {} means cv2/PIL are
+        # missing (or obs has no camera arrays) — the headset video then
+        # silently rides the seconds-stale recording uplink. Say so once.
+        _pv_empty_warned = False
         while not should_stop():
             loop_start = time.perf_counter()
 
@@ -445,6 +449,15 @@ def lerobot_control_loop(
                             _pv = _encode_preview_jpegs(obs)
                             if _pv:
                                 _pv_send(_pv, time.monotonic_ns())
+                            elif not _pv_empty_warned:
+                                _pv_empty_warned = True
+                                _LOG.warning(
+                                    "preview encode produced no frames "
+                                    "(cv2/PIL missing, or no uint8 camera "
+                                    "arrays in obs keys=%s) — headset video "
+                                    "will ride the recording uplink",
+                                    sorted(obs.keys()),
+                                )
                     except Exception:
                         # Previews are best-effort; never break the loop.
                         pass

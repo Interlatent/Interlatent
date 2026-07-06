@@ -135,6 +135,11 @@ class TeleopChannel:
         self._preview_event = threading.Event()
         self._preview_thread: Optional[threading.Thread] = None
         self._last_preview_staged_at = 0.0
+        # One-shot diagnostic flags: the preview path fails silently by
+        # design (best-effort), so log the FIRST success and FIRST
+        # failure to make a dead preview stream observable in the field.
+        self._pv_sent_logged = False
+        self._pv_err_logged = False
         # monotonic time of the last message received from the relay —
         # browser keepalives included — used as the viewer-presence gate.
         self._last_rx_at = 0.0
@@ -354,10 +359,24 @@ class TeleopChannel:
                         "ts_ns": ts_ns,
                     }).encode("utf-8")
                     ws.send(struct.pack(">H", len(hdr)) + hdr + bytes(data))
-            except Exception:
+                if not self._pv_sent_logged:
+                    self._pv_sent_logged = True
+                    _LOG.info(
+                        "teleop preview tee active: sent %s",
+                        ", ".join(
+                            f"{c}={len(d)}B" for c, d in jpegs.items() if d
+                        ),
+                    )
+            except Exception as exc:
                 # Socket mid-close / reconnecting — drop this slot; the
                 # next preview_due() cycle stages a fresh one.
-                pass
+                if not self._pv_err_logged:
+                    self._pv_err_logged = True
+                    _LOG.warning(
+                        "teleop preview send failed (%s: %s); "
+                        "further preview errors suppressed",
+                        type(exc).__name__, exc,
+                    )
 
     def _run(self) -> None:
         """Token-mint + connect + receive, with reconnect-on-drop."""
