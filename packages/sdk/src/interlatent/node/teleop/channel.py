@@ -29,6 +29,7 @@ falls back to policy mode.
 from __future__ import annotations
 
 import logging
+import struct
 import threading
 import time
 from typing import Optional
@@ -60,6 +61,18 @@ _STATE_SEND_PERIOD_S = 1.0 / 15.0
 # Period of the rolling frame-arrival latency summary (INFO). Matches the
 # relay's 5s browser-frame summaries so pod and node logs line up.
 _STATS_LOG_PERIOD_S = 5.0
+
+# Live-preview push rate (node→pod, small downscaled JPEGs over this WS).
+# The in-headset video quad is fed from these instead of the batched
+# full-resolution recording uplink, which over a real link runs seconds
+# behind. 10 Hz × ~10-20 KB × cams is well under 2 Mbit/s — cheap enough
+# to leave on whenever a viewer is present.
+_PREVIEW_SEND_PERIOD_S = 1.0 / 10.0
+
+# A viewer is "present" while browser frames keep arriving on this WS
+# (the overlay sends keepalives even when disengaged). No frames for this
+# long ⇒ nobody is watching ⇒ stop burning uplink on previews.
+_VIEWER_PRESENCE_S = 5.0
 
 
 class TeleopChannel:
@@ -96,9 +109,22 @@ class TeleopChannel:
         self._thread: Optional[threading.Thread] = None
         self._connected = False
         # Live WS handle for send_state() (websockets' sync connection is
-        # thread-safe: the control loop sends while the receive loop recvs).
+        # thread-safe: the control loop sends while the receive loop recvs;
+        # concurrent senders are serialized by the connection's own lock).
         self._ws = None
         self._last_state_sent_at = 0.0
+        # Live-preview pipeline: the control loop stages the latest
+        # downscaled JPEGs into a 1-slot buffer; a dedicated sender thread
+        # ships them so a saturated uplink can never block the control
+        # loop on a socket write. Latest-wins by construction.
+        self._preview_lock = threading.Lock()
+        self._preview_slot: Optional[tuple[dict[str, bytes], int]] = None
+        self._preview_event = threading.Event()
+        self._preview_thread: Optional[threading.Thread] = None
+        self._last_preview_staged_at = 0.0
+        # monotonic time of the last message received from the relay —
+        # browser keepalives included — used as the viewer-presence gate.
+        self._last_rx_at = 0.0
         # Frame-arrival latency window (receive-loop thread only): counts
         # + inter-arrival gap stats since the last 5s summary. The gap is
         # the node-observable half of teleop latency — it captures
@@ -165,12 +191,22 @@ class TeleopChannel:
             daemon=True,
         )
         self._thread.start()
+        self._preview_thread = threading.Thread(
+            target=self._preview_run,
+            name=f"teleop-preview[{self._session_id[:8]}]",
+            daemon=True,
+        )
+        self._preview_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._preview_event.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        if self._preview_thread is not None:
+            self._preview_thread.join(timeout=3.0)
+            self._preview_thread = None
 
     # ------------------------------------------------------------------
     # Read API (called from the control loop)
@@ -229,9 +265,86 @@ class TeleopChannel:
             # and re-establishes; state resumes on the next connection.
             pass
 
+    def preview_due(self) -> bool:
+        """Should the control loop encode + stage a preview this tick?
+
+        True only when the WS is up, a viewer has sent a frame recently
+        (the overlay keeps sending even while disengaged), the ~10 Hz
+        rate window has elapsed, and the sender has consumed the prior
+        slot. Callers check this BEFORE encoding so idle sessions pay
+        zero encode cost.
+        """
+        if self._ws is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_rx_at > _VIEWER_PRESENCE_S:
+            return False
+        if now - self._last_preview_staged_at < _PREVIEW_SEND_PERIOD_S:
+            return False
+        with self._preview_lock:
+            return self._preview_slot is None
+
+    def send_preview(self, jpegs: dict[str, bytes], ts_ns: int) -> None:
+        """Stage one set of downscaled camera JPEGs for the sender thread.
+
+        Non-blocking and latest-wins: overwrites any unsent slot. ``ts_ns``
+        is the node's monotonic capture time — the same clock RecordTick's
+        control_timestamp uses, which is how the pod keeps whichever frame
+        (preview vs recording) was captured later.
+        """
+        if not jpegs:
+            return
+        self._last_preview_staged_at = time.monotonic()
+        with self._preview_lock:
+            self._preview_slot = (jpegs, int(ts_ns))
+        self._preview_event.set()
+
     # ------------------------------------------------------------------
     # Background thread
     # ------------------------------------------------------------------
+
+    def _preview_run(self) -> None:
+        """Drain the 1-slot preview buffer onto the WS.
+
+        Binary frame layout (mirrors the relay's pod→browser video frame)::
+
+            [0..2)   uint16 big-endian: header length H
+            [2..2+H) UTF-8 JSON: {"type":"preview","cam":...,"ts_ns":...}
+            [2+H..)  raw JPEG bytes
+
+        One frame per camera per slot. Send errors are dropped — the
+        receive loop owns reconnection, and the next slot rides the new
+        connection. An old relay simply ignores binary node frames.
+        """
+        while not self._stop.is_set():
+            if not self._preview_event.wait(timeout=0.5):
+                continue
+            self._preview_event.clear()
+            with self._preview_lock:
+                slot = self._preview_slot
+                self._preview_slot = None
+            if slot is None:
+                continue
+            ws = self._ws
+            if ws is None:
+                continue
+            jpegs, ts_ns = slot
+            try:
+                import json
+
+                for cam, data in jpegs.items():
+                    if not data:
+                        continue
+                    hdr = json.dumps({
+                        "type": "preview",
+                        "cam": cam,
+                        "ts_ns": ts_ns,
+                    }).encode("utf-8")
+                    ws.send(struct.pack(">H", len(hdr)) + hdr + bytes(data))
+            except Exception:
+                # Socket mid-close / reconnecting — drop this slot; the
+                # next preview_due() cycle stages a fresh one.
+                pass
 
     def _run(self) -> None:
         """Token-mint + connect + receive, with reconnect-on-drop."""
@@ -306,6 +419,10 @@ class TeleopChannel:
                         continue
                     if raw is None:
                         break
+                    # Any relay→node message counts as viewer presence —
+                    # the preview pipeline only spends uplink while a
+                    # browser is actually attached and sending.
+                    self._last_rx_at = time.monotonic()
                     if isinstance(raw, bytes):
                         try:
                             raw = raw.decode("utf-8")

@@ -429,6 +429,26 @@ def lerobot_control_loop(
                     )
                     step_counter += 1
 
+            # Live-preview tee (headset video): small downscaled JPEGs
+            # pushed over the teleop WS, decoupled from the batched
+            # full-resolution recording uplink (which over a real link
+            # runs seconds behind — the operator must never steer off
+            # that). preview_due() is checked FIRST so idle sessions
+            # (no viewer) pay zero encode cost, and this block runs
+            # AFTER send_action so it never delays pose→motion.
+            if teleop_channel is not None:
+                _pv_due = getattr(teleop_channel, "preview_due", None)
+                _pv_send = getattr(teleop_channel, "send_preview", None)
+                if _pv_due is not None and _pv_send is not None:
+                    try:
+                        if _pv_due():
+                            _pv = _encode_preview_jpegs(obs)
+                            if _pv:
+                                _pv_send(_pv, time.monotonic_ns())
+                    except Exception:
+                        # Previews are best-effort; never break the loop.
+                        pass
+
             # One-time robot-features + teleop-profile report (retry a few
             # ticks on failure). Runs on BOTH paths so the teleop_profile
             # reaches the backend during normal policy operation — the hosted
@@ -610,6 +630,77 @@ def _capture_tick(
         # Capture must never break inference.
         _LOG.exception("record_tick failed at step %d", step)
         return None
+
+
+# Preview tee tunables: 320px longest side at q70 is ~8-15 KB per frame —
+# visually identical on the headset's 0.8 m quad, and 3-5× cheaper on the
+# uplink than the 640×480 q85 recording frames.
+_PREVIEW_MAX_DIM = 320
+_PREVIEW_JPEG_QUALITY = 70
+
+
+def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
+    """Downscale + JPEG-encode the observation's camera frames for the
+    live headset preview.
+
+    Camera detection matches ``_capture_tick`` exactly (uint8, ndim>=2)
+    and keys match RecordTick's raw camera names, so the pod merges both
+    feeds per camera. cv2 fast path (releases the GIL), PIL fallback;
+    a frame that fails to encode is simply skipped. ~1-2 ms per camera
+    at 10 Hz — negligible against a 33 ms tick budget.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        cv2 = None  # type: ignore
+
+    out: dict[str, bytes] = {}
+    for k, v in obs.items():
+        try:
+            arr = v if isinstance(v, np.ndarray) else np.asarray(v)
+        except Exception:
+            continue
+        if arr is None or arr.dtype != np.uint8 or arr.ndim < 2:
+            continue
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if max(h, w) > _PREVIEW_MAX_DIM:
+            scale = _PREVIEW_MAX_DIM / float(max(h, w))
+            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        else:
+            new_w, new_h = w, h
+        data: Optional[bytes] = None
+        if cv2 is not None:
+            try:
+                img = arr
+                if img.ndim == 3 and img.shape[2] == 3:
+                    img = np.ascontiguousarray(img[..., ::-1])  # RGB->BGR
+                if (new_w, new_h) != (w, h):
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(
+                    ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, _PREVIEW_JPEG_QUALITY],
+                )
+                if ok:
+                    data = bytes(buf)
+            except Exception:
+                data = None
+        if data is None:
+            try:
+                from PIL import Image
+
+                img = arr
+                if img.ndim == 3 and img.shape[-1] == 1:
+                    img = img[:, :, 0]
+                pil = Image.fromarray(img)
+                if (new_w, new_h) != (w, h):
+                    pil = pil.resize((new_w, new_h), Image.BILINEAR)
+                buf2 = io.BytesIO()
+                pil.save(buf2, format="JPEG", quality=_PREVIEW_JPEG_QUALITY)
+                data = buf2.getvalue()
+            except Exception:
+                continue
+        if data:
+            out[k] = data
+    return out
 
 
 def _report_robot_features(

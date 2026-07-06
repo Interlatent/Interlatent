@@ -62,12 +62,21 @@ log = logging.getLogger(__name__)
 # or a server pause without blocking the control loop.
 _RECORDER_QUEUE_MAXSIZE = 256
 
-# Cap the wire size of one batched RecordTicks RPC. The server's default
-# gRPC receive limit is 4 MiB; we coalesce ticks only up to half that so
-# a full batch (plus protobuf framing) can never trip it. A batch is
-# flushed early once the accumulated JPEG bytes would cross this line,
-# regardless of the tick-count cap.
-_REC_BATCH_MAX_BYTES = 2 * 1024 * 1024
+# Sentinel distinguishing "queue drained under us" from "pulled the close
+# sentinel (None)" in record_tick's drop-oldest eviction path.
+_QUEUE_WAS_EMPTY = object()
+
+# Cap the wire size of one batched RecordTicks RPC. Two constraints:
+# the server's default gRPC receive limit is 4 MiB (hard ceiling), and —
+# the binding one — each batch is a single head-of-line burst on the
+# node's uplink. During teleop the same physical link carries the ~15 Hz
+# state heartbeat, pose targets, and live video previews; a 2 MiB write
+# monopolizes a 10-20 Mbit/s uplink for 1-2 s and bufferbloats all of
+# them (the ready/stale flip-flop). 256 KiB keeps any single burst under
+# ~200 ms while still amortizing the RTT well. A batch is flushed early
+# once the accumulated JPEG bytes would cross this line, regardless of
+# the tick-count cap.
+_REC_BATCH_MAX_BYTES = 256 * 1024
 
 # Per-RPC RecordTicks timeout. The server enqueue is non-blocking, so the
 # call time is dominated by uploading the batch's JPEG bytes over the
@@ -448,10 +457,13 @@ class DRTCClient:
         """Non-blocking enqueue of one captured tick.
 
         Called from the control loop after each successful step(). The hot
-        path pays only a ``queue.put_nowait`` (microseconds); JPEG bytes
-        are passed by reference. The background ``_rec_loop`` thread does
-        the actual gRPC call. On queue overflow the row is dropped and a
-        single WARN is emitted.
+        path pays only a queue put (microseconds); JPEG bytes are passed
+        by reference. The background ``_rec_loop`` thread does the actual
+        gRPC call. On queue overflow the OLDEST queued tick is evicted so
+        the backlog is always the freshest ~8.5 s — under a sustained
+        uplink deficit the old drop-newest policy kept a permanently
+        stale head, so everything downstream (including the server's
+        latest-state view for old-node deployments) ran ~8.5 s behind.
 
         ``control_source`` is recorded as
         ``annotation.interlatent.control_source``. ``None`` means
@@ -472,16 +484,41 @@ class DRTCClient:
         }
         try:
             self._rec_q.put_nowait(item)
+            return
         except queue.Full:
-            self._rec_dropped_full += 1
-            if not self._rec_first_warn:
-                log.warning(
-                    "DRTC recorder queue full at step %d — dropping tick "
-                    "(distributed thinning; running total in the DRTC stats "
-                    "line as rec_dropped)",
-                    step,
-                )
-                self._rec_first_warn = True
+            pass
+        # Full: evict the oldest tick, then retry once. Single producer
+        # (control loop) + single consumer (rec thread), so the only race
+        # is the drain sentinel close() may have queued — put it back and
+        # drop the NEW tick instead (we're closing anyway).
+        try:
+            evicted = self._rec_q.get_nowait()
+        except queue.Empty:
+            evicted = _QUEUE_WAS_EMPTY
+        if evicted is None:
+            try:
+                self._rec_q.put_nowait(None)
+            except queue.Full:
+                pass
+            self._count_rec_drop(step)
+            return
+        if evicted is not _QUEUE_WAS_EMPTY:
+            self._count_rec_drop(step)
+        try:
+            self._rec_q.put_nowait(item)
+        except queue.Full:
+            self._count_rec_drop(step)
+
+    def _count_rec_drop(self, step: int) -> None:
+        self._rec_dropped_full += 1
+        if not self._rec_first_warn:
+            log.warning(
+                "DRTC recorder queue full at step %d — evicting oldest tick "
+                "(distributed thinning; running total in the DRTC stats "
+                "line as rec_dropped)",
+                step,
+            )
+            self._rec_first_warn = True
 
     def _rec_loop(self) -> None:
         """Drain the recorder queue, shipping ticks in coalesced batches.
