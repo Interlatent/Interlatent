@@ -121,10 +121,30 @@ def control_loop(
     features_reported = False
     features_report_attempts = 0
     step_counter = 0
+    # One-shot: a preview encode that yields {} means cv2/PIL are missing
+    # (or obs has no camera arrays) — the headset video then silently rides
+    # the seconds-stale recording uplink. Say so once. (Mirrors control.py.)
+    _pv_empty_warned = False
     try:
         while not should_stop():
             loop_start = time.perf_counter()
             obs = robot.get_observation()
+
+            # Feed the pod-side retarget stage's staleness gate directly over
+            # the teleop WS (~15 Hz, rate-limited inside send_state). RecordTick
+            # state rides the batched JPEG uplink and can lag seconds behind on
+            # a slow link. Mirrors node/control.py — this native loop replaces
+            # that one wholesale, so every teleop-channel tee must exist here
+            # too or YAM silently loses it.
+            if teleop_channel is not None and action_keys:
+                _send_state = getattr(teleop_channel, "send_state", None)
+                if _send_state is not None:
+                    try:
+                        _send_state(
+                            _ctrl._extract_joint_state(obs, action_keys).tolist()
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
             # Sample the latest teleop frame. None when no producer is
             # connected or the last frame is stale (channel drops > 250 ms).
@@ -226,6 +246,35 @@ def control_loop(
                         client, obs, action_arr, step_counter, control_source="policy"
                     )
                     step_counter += 1
+
+            # Live-preview tee (headset video): small downscaled JPEGs pushed
+            # over the teleop WS, decoupled from the batched full-resolution
+            # recording uplink (which over a real link runs seconds behind —
+            # the operator must never steer off that). preview_due() is
+            # checked FIRST so idle sessions (no viewer) pay zero encode
+            # cost, and this block runs AFTER send_action so it never delays
+            # pose→motion. (Mirrors node/control.py.)
+            if teleop_channel is not None:
+                _pv_due = getattr(teleop_channel, "preview_due", None)
+                _pv_send = getattr(teleop_channel, "send_preview", None)
+                if _pv_due is not None and _pv_send is not None:
+                    try:
+                        if _pv_due():
+                            _pv = _ctrl._encode_preview_jpegs(obs)
+                            if _pv:
+                                _pv_send(_pv, time.monotonic_ns())
+                            elif not _pv_empty_warned:
+                                _pv_empty_warned = True
+                                _logger.warning(
+                                    "preview encode produced no frames "
+                                    "(cv2/PIL missing, or no uint8 camera "
+                                    "arrays in obs keys=%s) — headset video "
+                                    "will ride the recording uplink",
+                                    sorted(obs.keys()),
+                                )
+                    except Exception:  # noqa: BLE001
+                        # Previews are best-effort; never break the loop.
+                        pass
 
             if (
                 state_keys is not None
