@@ -110,6 +110,20 @@ class StepSource(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# control_source staging ids
+# ---------------------------------------------------------------------------
+
+# Write-time staging ids for ``annotation.interlatent.control_source``.
+# lerobot 0.5.x's add_frame validation rejects pa.string(), so the column
+# is staged as int64 and converted to string in a post-edit. Keep in sync
+# with CONTEXT.md's three-value contract {"policy","teleop","hold"} —
+# "hold" marks the disengaged, no-motion ticks of a policy-less
+# TeleopRecording and must NOT collapse into "policy".
+CONTROL_SOURCE_TO_ID = {"policy": 0, "teleop": 1, "hold": 2}
+CONTROL_SOURCE_ID_TO_NAME = {v: k for k, v in CONTROL_SOURCE_TO_ID.items()}
+
+
+# ---------------------------------------------------------------------------
 # Feature discovery
 # ---------------------------------------------------------------------------
 
@@ -169,7 +183,7 @@ def _discover_features(
     if has_control_source:
         # Same int64-staging-then-string-postedit dance as failure_type:
         # lerobot 0.5.x's add_frame validation rejects pa.string() at
-        # write time, so we stage as int64 (0=policy, 1=teleop) and
+        # write time, so we stage as int64 (CONTROL_SOURCE_TO_ID) and
         # convert the column to pa.string() once the parquet is closed.
         features["annotation.interlatent.control_source"] = {
             "dtype": "int64",
@@ -433,7 +447,7 @@ class LeRobotRebuilder:
             self._convert_int_column_to_string(
                 self.root,
                 col_name="annotation.interlatent.control_source",
-                id_to_name={0: "policy", 1: "teleop"},
+                id_to_name=CONTROL_SOURCE_ID_TO_NAME,
                 nullable=False,
             )
 
@@ -524,8 +538,8 @@ class LeRobotRebuilder:
             frame["annotation.interlatent.failure_type"] = np.array([ft_id], dtype=np.int64)
 
         if "annotation.interlatent.control_source" in features:
-            # 0 = policy (default for legacy rows), 1 = teleop.
-            cs_id = 1 if row.control_source == "teleop" else 0
+            # None (legacy rows) defaults to "policy"; unknown values too.
+            cs_id = CONTROL_SOURCE_TO_ID.get(row.control_source or "policy", 0)
             frame["annotation.interlatent.control_source"] = np.array([cs_id], dtype=np.int64)
 
         metrics = row.metrics or {}
