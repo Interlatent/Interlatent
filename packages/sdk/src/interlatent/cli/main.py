@@ -214,6 +214,91 @@ def cmd_env(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------
+# behavior (offline — no API key, no cloud)
+# ----------------------------------------------------------------------
+
+
+def _robot_arg_dict(pairs: "list[str] | None") -> dict[str, str]:
+    """Parse repeated ``--robot-arg key=value`` flags into a dict."""
+    out: dict[str, str] = {}
+    for item in pairs or []:
+        if "=" not in item:
+            raise SystemExit(f"error: --robot-arg expects key=value, got: {item!r}")
+        k, _, v = item.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
+def cmd_behavior(args: argparse.Namespace) -> int:
+    """List, validate, or run named behaviors — fully offline (no API key)."""
+    # Imported lazily so `interlatent gpus ls` etc. never pay the behaviors import.
+    from ..behaviors.registry import BehaviorRegistry
+    from ..behaviors.schema import BehaviorError
+
+    if args.behavior_cmd == "ls":
+        try:
+            reg = BehaviorRegistry.for_robot(args.robot)
+        except BehaviorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        rows = [{"name": n, "type": t, "duration": d} for n, t, d in reg.summaries()]
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_table(
+            rows,
+            [("NAME", "name"), ("TYPE", "type"), ("DURATION", "duration")],
+            empty="(no behaviors)",
+        )
+        return 0
+
+    if args.behavior_cmd == "validate":
+        try:
+            # Building the registry validates the built-ins; the explicit path (if any)
+            # is validated as it loads and overrides by name.
+            reg = BehaviorRegistry.for_robot(args.robot, explicit=args.path)
+        except BehaviorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        where = f" + {args.path}" if args.path else ""
+        print(f"✓ behaviors valid for {args.robot!r}{where}: {', '.join(reg.names())}")
+        return 0
+
+    # run
+    from ..robot import Robot
+
+    try:
+        robot = Robot(
+            args.robot,
+            port=args.port,
+            behaviors=args.behaviors,
+            robot_arg=_robot_arg_dict(args.robot_arg),
+            control_hz=args.control_hz,
+            force=args.force,
+        )
+    except BehaviorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — clean message, not a traceback
+        print(f"error: could not open {args.robot!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = robot.act(args.name, speed=args.speed)
+        worst = max(result.joint_error.items(), key=lambda kv: abs(kv[1]), default=(None, 0.0))
+        status = "reached" if result.reached else f"aborted ({result.reason})"
+        print(
+            f"{args.name}: {status} in {result.elapsed:.2f}s"
+            + (f"; worst joint error {worst[0]}={worst[1]:+.3f}" if worst[0] else "")
+        )
+        return 0 if result.reached else 1
+    except BehaviorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        robot.close()
+
+
+# ----------------------------------------------------------------------
 # argparse wiring
 # ----------------------------------------------------------------------
 
@@ -269,6 +354,39 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth_flags(s_stop)
 
     p_sess.set_defaults(func=cmd_session)
+
+    # behavior — offline named moves/trajectories (no API key).
+    p_beh = sub.add_parser(
+        "behavior", help="List/validate/run named behaviors offline (no cloud, no API key)."
+    )
+    beh_sub = p_beh.add_subparsers(dest="behavior_cmd", required=True)
+
+    b_ls = beh_sub.add_parser("ls", help="List available behaviors for a robot.")
+    b_ls.add_argument("--robot", default="so101", help="Robot kind (default: so101).")
+    b_ls.add_argument("--json", action="store_true", help="Emit raw JSON instead of a table.")
+
+    b_val = beh_sub.add_parser(
+        "validate", help="Validate a behaviors TOML against a robot profile (no hardware)."
+    )
+    b_val.add_argument("path", nargs="?", default=None, help="Behaviors TOML to validate.")
+    b_val.add_argument("--robot", default="so101", help="Robot kind (default: so101).")
+
+    b_run = beh_sub.add_parser("run", help="Run a named behavior on a connected robot.")
+    b_run.add_argument("name", help="Behavior name (e.g. home, hello).")
+    b_run.add_argument("--robot", default="so101", help="Robot kind (default: so101).")
+    b_run.add_argument("--port", default=None, help="Serial port (e.g. /dev/ttyACM0).")
+    b_run.add_argument("--speed", type=float, default=1.0, help="Time-scale factor (default: 1.0).")
+    b_run.add_argument("--behaviors", default=None, help="Extra behaviors TOML to load.")
+    b_run.add_argument(
+        "--robot-arg", action="append", metavar="key=value",
+        help="Extra key=value passed to the robot config (repeatable).",
+    )
+    b_run.add_argument("--control-hz", type=float, default=30.0, help="Control rate (default: 30).")
+    b_run.add_argument(
+        "--force", action="store_true",
+        help="Override bus arbitration (dangerous — can corrupt a live node session).",
+    )
+    p_beh.set_defaults(func=cmd_behavior)
 
     p_env = sub.add_parser("env", help="Manage environments (data collections).")
     env_sub = p_env.add_subparsers(dest="env_cmd", required=True)
