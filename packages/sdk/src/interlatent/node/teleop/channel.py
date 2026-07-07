@@ -140,6 +140,14 @@ class TeleopChannel:
         # failure to make a dead preview stream observable in the field.
         self._pv_sent_logged = False
         self._pv_err_logged = False
+        # Cumulative preview counters, surfaced in the 5s WS summary. The
+        # one-shot logs above catch a preview that fails; these catch a
+        # preview that is never ATTEMPTED (preview_due() never opening,
+        # control loop never staging) — the case where nothing else logs.
+        # Written from the control-loop/sender threads, read from the
+        # receive loop; plain ints under the GIL are fine for telemetry.
+        self._pv_staged_total = 0
+        self._pv_sent_total = 0
         # monotonic time of the last message received from the relay —
         # browser keepalives included — used as the viewer-presence gate.
         self._last_rx_at = 0.0
@@ -187,10 +195,11 @@ class TeleopChannel:
         seq_span = self._arr_seq_last - self._arr_seq_first
         _LOG.info(
             "teleop WS frames (%.0fs): n=%d rate=%.1fHz gap mean/max=%.0f/%.0fms "
-            "seq_span=%d session=%s",
+            "seq_span=%d pv_staged=%d pv_sent=%d session=%s",
             elapsed, n, n / elapsed if elapsed > 0 else 0.0,
             (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
-            self._arr_gap_max_ms, seq_span, self._session_id,
+            self._arr_gap_max_ms, seq_span,
+            self._pv_staged_total, self._pv_sent_total, self._session_id,
         )
         self._arr_count = 0
         self._arr_gap_sum_ms = 0.0
@@ -313,6 +322,7 @@ class TeleopChannel:
         if not jpegs:
             return
         self._last_preview_staged_at = time.monotonic()
+        self._pv_staged_total += 1
         with self._preview_lock:
             self._preview_slot = (jpegs, int(ts_ns))
         self._preview_event.set()
@@ -359,6 +369,7 @@ class TeleopChannel:
                         "ts_ns": ts_ns,
                     }).encode("utf-8")
                     ws.send(struct.pack(">H", len(hdr)) + hdr + bytes(data))
+                self._pv_sent_total += 1
                 if not self._pv_sent_logged:
                     self._pv_sent_logged = True
                     _LOG.info(

@@ -57,14 +57,15 @@ from .sender import ObservationSender, PendingObservation
 log = logging.getLogger(__name__)
 
 
-# Bound the per-tick recorder queue. At 30 Hz this is ~8.5s of capture
-# buffer before drops kick in — enough to ride out a brief network blip
-# or a server pause without blocking the control loop.
-_RECORDER_QUEUE_MAXSIZE = 256
-
-# Sentinel distinguishing "queue drained under us" from "pulled the close
-# sentinel (None)" in record_tick's drop-oldest eviction path.
-_QUEUE_WAS_EMPTY = object()
+# The per-tick recorder queue is unbounded: recording is training data
+# and must be complete, so under an uplink deficit the backlog grows in
+# RAM (~123 KB/tick on a 3-cam rig — ~7 MB per minute of deficit-second)
+# and ships during the close drain. Live-video freshness is NOT this
+# queue's job — the preview tee over the teleop WS owns that — so a deep
+# backlog costs memory, never teleop feel. The old bounded drop-oldest
+# queue (256 ticks) traded completeness for a freshness this feed no
+# longer provides.
+_RECORDER_QUEUE_MAXSIZE = 0
 
 
 def _rec_pace_bytes_per_s() -> float:
@@ -76,8 +77,8 @@ def _rec_pace_bytes_per_s() -> float:
     protecting the teleop path (state heartbeat, pose targets, live
     previews) that shares the same physical link from bufferbloat behind
     recording bursts. If the budget is below the capture bitrate the
-    queue thins via drop-oldest — an explicitly lossy recording in
-    exchange for a responsive robot, instead of both degrading.
+    backlog accumulates in the (unbounded) recorder queue and ships
+    during the close drain — recording stays complete; RAM is the cost.
     """
     import os
 
@@ -109,9 +110,12 @@ _REC_BATCH_TIMEOUT_S = 30.0
 # rather than dropping the tail. We only give up if the sender stops
 # shipping for _REC_DRAIN_STALL_S (a dead link — set above the 10s per-RPC
 # RecordTick timeout so a merely-slow link is not mistaken for a dead one),
-# or a hard ceiling elapses as an ultimate backstop.
+# or a hard ceiling elapses as an ultimate backstop. The ceiling is sized
+# for the unbounded queue: a paced session on a deficit uplink can bank
+# minutes of backlog, and the close drain (which runs unpaced, at line
+# rate) is the one chance to ship it — 10 min covers ~2 GB at 3.5 MB/s.
 _REC_DRAIN_STALL_S = 12.0
-_REC_DRAIN_CEILING_S = 120.0
+_REC_DRAIN_CEILING_S = 600.0
 
 
 @dataclass
@@ -203,15 +207,16 @@ class DRTCClient:
         # The hot path (step()) only does a non-blocking put_nowait into
         # ``_rec_q``. A dedicated background thread drains the queue and
         # makes gRPC RecordTick calls so inference latency is unaffected.
-        # On queue overflow the row is dropped (see _RECORDER_QUEUE_MAXSIZE).
+        # Unbounded (see _RECORDER_QUEUE_MAXSIZE): no in-session drops.
         self._rec_q: "queue.Queue[Optional[dict]]" = queue.Queue(
             maxsize=_RECORDER_QUEUE_MAXSIZE,
         )
         self._rec_thread: Optional[threading.Thread] = None
-        # Drop accounting is split by failure mode so telemetry can tell
-        # distributed thinning apart from tail loss:
-        #   _rec_dropped_full  — queue-full drops during the run (thinning)
-        #   _rec_dropped_close — backlog abandoned at close (the tail)
+        # Loss accounting:
+        #   _rec_dropped_full  — always 0 now (kept so the summary/stats
+        #                        lines keep their shape across versions)
+        #   _rec_dropped_close — backlog abandoned at close (dead link or
+        #                        drain ceiling — the only remaining loss)
         #   _rec_captured      — every record_tick() call (intended count)
         #   _rec_sent          — RecordTicks the server actually accepted
         # Invariant when the session ends cleanly:
@@ -219,7 +224,6 @@ class DRTCClient:
         self._rec_captured = 0
         self._rec_dropped_full = 0
         self._rec_dropped_close = 0
-        self._rec_first_warn = False
         self._rec_sent = 0
         # Set once if the server 404s RecordTicks (an older node that only
         # speaks unary RecordTick); after that the drain ships tick-by-tick.
@@ -406,14 +410,10 @@ class DRTCClient:
         if thread is None:
             self._rec_dropped_close = self._rec_q.qsize()
             return
-        # Ordered sentinel. Blocking put guarantees it lands *after* the
-        # current backlog (unlike the old put_nowait, which the poison-pill
-        # silently lost whenever the queue was full — exactly the loaded
-        # case). Bounded so a wedged sender can't hang close() forever.
-        try:
-            self._rec_q.put(None, timeout=_REC_DRAIN_CEILING_S)
-        except queue.Full:
-            pass
+        # Ordered sentinel: lands after the current backlog, so the sender
+        # ships everything queued before exiting. (Unbounded queue — the
+        # put can never block or fail.)
+        self._rec_q.put(None)
         deadline = time.monotonic() + _REC_DRAIN_CEILING_S
         last_sent = self._rec_sent
         last_progress = time.monotonic()
@@ -483,11 +483,9 @@ class DRTCClient:
         Called from the control loop after each successful step(). The hot
         path pays only a queue put (microseconds); JPEG bytes are passed
         by reference. The background ``_rec_loop`` thread does the actual
-        gRPC call. On queue overflow the OLDEST queued tick is evicted so
-        the backlog is always the freshest ~8.5 s — under a sustained
-        uplink deficit the old drop-newest policy kept a permanently
-        stale head, so everything downstream (including the server's
-        latest-state view for old-node deployments) ran ~8.5 s behind.
+        gRPC call. The queue is unbounded, so every captured tick is
+        eventually shipped (or counted as tail loss at close) — never
+        silently thinned mid-session.
 
         ``control_source`` is recorded as
         ``annotation.interlatent.control_source``. ``None`` means
@@ -495,62 +493,23 @@ class DRTCClient:
         """
         if self.session_id is None or self._stub is None:
             return
-        # Count every captured tick (the node-side "intended" count) before
-        # the queue can reject it, so captured == sent + dropped_* holds.
         self._rec_captured += 1
-        item = {
+        self._rec_q.put_nowait({
             "step": int(step),
             "observation_state": observation_state,
             "action": action,
             "jpegs": jpegs,
             "control_timestamp_ns": int(control_timestamp_ns),
             "control_source": control_source,
-        }
-        try:
-            self._rec_q.put_nowait(item)
-            return
-        except queue.Full:
-            pass
-        # Full: evict the oldest tick, then retry once. Single producer
-        # (control loop) + single consumer (rec thread), so the only race
-        # is the drain sentinel close() may have queued — put it back and
-        # drop the NEW tick instead (we're closing anyway).
-        try:
-            evicted = self._rec_q.get_nowait()
-        except queue.Empty:
-            evicted = _QUEUE_WAS_EMPTY
-        if evicted is None:
-            try:
-                self._rec_q.put_nowait(None)
-            except queue.Full:
-                pass
-            self._count_rec_drop(step)
-            return
-        if evicted is not _QUEUE_WAS_EMPTY:
-            self._count_rec_drop(step)
-        try:
-            self._rec_q.put_nowait(item)
-        except queue.Full:
-            self._count_rec_drop(step)
-
-    def _count_rec_drop(self, step: int) -> None:
-        self._rec_dropped_full += 1
-        if not self._rec_first_warn:
-            log.warning(
-                "DRTC recorder queue full at step %d — evicting oldest tick "
-                "(distributed thinning; running total in the DRTC stats "
-                "line as rec_dropped)",
-                step,
-            )
-            self._rec_first_warn = True
+        })
 
     def _rec_loop(self) -> None:
         """Drain the recorder queue, shipping ticks in coalesced batches.
 
         A remote RecordTick link is round-trip-bound: one unary RPC per
         tick tops out well below the 30 Hz capture rate, so under load the
-        queue fills and drops most ticks (see the DRTC recording summary).
-        Here we pop the first item blocking, then greedily pull whatever
+        (unbounded) queue backs up. Here we pop the first item blocking,
+        then greedily pull whatever
         else is already queued into one batch and ship it via RecordTicks.
         Batching amortizes the RTT across the whole batch, so the drain
         keeps up and the queue stays shallow.
