@@ -5,7 +5,7 @@
 ### One open interface to control every robot.
 
 The open-source SDK and protocol for controlling robots. Read joint state and command
-motion the **same way on every supported arm** — whether you're driving it by hand,
+motion the **same way on every supported arm** - whether you're driving it by hand,
 playing a named behavior, running a cloud VLA policy, or recording a dataset. Add a
 robot once (an adapter + a profile) and every capability above it comes for free.
 
@@ -22,21 +22,21 @@ robot once (an adapter + a profile) and every capability above it comes for free
 ---
 
 Robotics tooling is fragmented: every arm ships its own SDK, its own joint conventions, its
-own scripts. Interlatent is **one interface across robots** — a single way to read state and
+own scripts. Interlatent is **one interface across robots** - a single way to read state and
 command joints, with a shared safety model (per-tick delta clamp + workspace/velocity limits)
 underneath. Write against it once and you can teleoperate, run models, and collect data on
 any supported arm. Adding a robot is a small adapter + a joint profile; everything above it is
 reused.
 
-- 🎛️ **One interface, every robot** — the same read-state / command-joints API and safety model across SO-101, I2RT YAM, any LeRobot robot, or your own via `--loop`. One protocol, not one integration per arm
-- 🕹️ **Drive robots directly** — named, deterministic [behaviors](docs/behaviors.md) (`home`, `hello`, or your own TOML) and one-shot joint moves, fully offline — no GPU, no account, no policy
-- 🧠 **Run any VLA policy** — stream observations to managed cloud GPUs and drive the arm with real-time action chunking (DRTC); if LeRobot's factory can load it (SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, your fine-tune) or it's a native backend (MolmoAct2), a pod can serve it — smooth 30 Hz control on top of multi-second models
-- 🎥 **Collect LeRobot datasets** — local-first `watch()`/`tick()`/`collect()` staging to SQLite + video; upload is a separate, optional step
-- 🛰️ **Robot node daemon + 🖥️ CLI** — pair a Pi (or any always-on machine) and converge to dashboard-assigned sessions; manage pods, nodes, and sessions from the terminal
+- 🎛️ **One interface, every robot** - the same read-state / command-joints API and safety model across SO-101, I2RT YAM, any LeRobot robot, or your own via `--loop`. One protocol, not one integration per arm
+- 🕹️ **Drive robots directly** - named, deterministic [behaviors](docs/behaviors.md) (`home`, `hello`, or your own TOML) and one-shot joint moves, fully offline - no GPU, no account, no policy
+- 🧠 **Run any VLA policy** - stream observations to managed cloud GPUs and drive the arm with real-time action chunking (DRTC); if LeRobot's factory can load it (SmolVLA, Pi0/Pi0.5, ACT, Diffusion Policy, VQ-BeT, your fine-tune) or it's a native backend (MolmoAct2), a pod can serve it - smooth 30 Hz control on top of multi-second models
+- 🎥 **Collect LeRobot datasets** - local-first `watch()`/`tick()`/`collect()` staging to SQLite + video; upload is a separate, optional step
+- 🛰️ **Robot node daemon + 🖥️ CLI** - pair a Pi (or any always-on machine) and converge to dashboard-assigned sessions; manage pods, nodes, and sessions from the terminal
 
 ## 🕹️ Drive robots directly (no cloud)
 
-The fastest thing you can do with Interlatent needs no account, no GPU, and no policy —
+The fastest thing you can do with Interlatent needs no account, no GPU, and no policy -
 just an arm. Named [behaviors](docs/behaviors.md) are canned moves and trajectories that
 run entirely on the robot side, through the same safety-clamped action path everything
 else uses.
@@ -52,7 +52,7 @@ with il.Robot("so101", port="/dev/ttyACM0") as robot:
     robot.move(wrist_roll=30, duration=0.5) # ad-hoc single-joint move
 ```
 
-Behaviors are **data** — a TOML of poses and keyframe trajectories, validated against the
+Behaviors are **data** - a TOML of poses and keyframe trajectories, validated against the
 robot's joint limits and velocity caps before anything moves. Ship your own in
 `~/.interlatent/behaviors.toml`, or register one in Python with `@il.behavior`. The same
 three commands work from the terminal:
@@ -83,7 +83,7 @@ export INTERLATENT_API_KEY=ilat_...
 ```
 
 > **Per-robot extras.** The base package is robot-agnostic. Driving real hardware needs the
-> extra for your robot — install **one** of:
+> extra for your robot - install **one** of:
 > ```bash
 > pip install 'interlatent[lerobot]'   # SO-101
 > pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
@@ -104,7 +104,7 @@ interlatent-node run  --robot so101 --port /dev/ttyACM0     # converge to assign
 
 ### 3. Run a policy
 
-Spin up a GPU pod and start an inference session against your node — from the
+Spin up a GPU pod and start an inference session against your node - from the
 [dashboard](#-using-the-dashboard) or the CLI:
 
 ```bash
@@ -124,7 +124,7 @@ interlatent-preflight --environment my-arm --policy lerobot/smolvla_base
 
 This opens a real session against a managed GPU pod, streams synthetic observations, and
 prints a **PASS / WARN / FAIL** verdict with the measured network-vs-compute latency. It
-exercises the cloud inference path only — not your cameras, joints, or motor bus.
+exercises the cloud inference path only - not your cameras, joints, or motor bus.
 
 ### 4. Drive a policy from your own code
 
@@ -168,25 +168,25 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 
 ## 🖥️ Using the dashboard
 
-The [Interlatent dashboard](https://interlatent.com) is where the cloud side lives — it owns
+The [Interlatent dashboard](https://interlatent.com) is where the cloud side lives - it owns
 the GPU pods and decides which policy each of your robots is running. The SDK is the
 robot-side counterpart to it: everything you do with `interlatent …` on the CLI you can also
 do in the dashboard UI.
 
 The core objects:
 
-- **Environments** — a robot setup and its task, the unit everything else hangs off. The `environment` slug you pass to `connect_drtc` / `--env-slug` matches one here.
-- **GPU boxes** — managed, warm cloud GPUs that serve the policy. You don't rent or boot the hardware; you start a box for an environment. (`interlatent gpus ls`)
-- **Nodes** — your paired robots. A node is created by `interlatent-node pair` and shows up here; the running daemon heartbeats and reports status. (`interlatent nodes ls`)
-- **Sessions** — a policy running on a GPU box, bound to a node. Start one and the node converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
+- **Environments** - a robot setup and its task, the unit everything else hangs off. The `environment` slug you pass to `connect_drtc` / `--env-slug` matches one here.
+- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the hardware; you start a box for an environment. (`interlatent gpus ls`)
+- **Nodes** - your paired robots. A node is created by `interlatent-node pair` and shows up here; the running daemon heartbeats and reports status. (`interlatent nodes ls`)
+- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
 
 The end-to-end workflow:
 
 1. **Create an environment** from the Environments page.
 2. **Configure the policy** for that environment.
 3. **Start a GPU box** for that environment.
-4. **Pair and run your node** with the SDK — `interlatent-node pair` then `interlatent-node run` (see [step 2](#2-sync-your-robot-to-the-dashboard)).
-5. **Start an inference session** — from the CLI (`interlatent session start …`) or on the dashboard through the environment.
+4. **Pair and run your node** with the SDK - `interlatent-node pair` then `interlatent-node run` (see [step 2](#2-sync-your-robot-to-the-dashboard)).
+5. **Start an inference session** - from the CLI (`interlatent session start …`) or on the dashboard through the environment.
 
 The node daemon picks up the assigned session and the arm starts moving under the policy.
 
@@ -225,23 +225,23 @@ declarations, joint names/units, and worked examples.
 | **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
-| Custom hardware | `--loop module:fn` | — | bring your own I/O loop |
+| Custom hardware | `--loop module:fn` | - | bring your own I/O loop |
 
 For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 [docs/robots-and-policies.md](docs/robots-and-policies.md).
 
-**Missing your arm?** Adding robots is the contribution we most want — see
+**Missing your arm?** Adding robots is the contribution we most want - see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 🛣️ Roadmap
 
-Directions we're excited about. Each is a direction, not a dated commitment — and
+Directions we're excited about. Each is a direction, not a dated commitment - and
 contributions are welcome on any of them.
 
-- **Record-by-demonstration** — teach a [behavior](docs/behaviors.md) by moving the arm, then replay it: a recorded joint stream reverses straight into trajectory keyframes (the executor already emits that stream).
-- **VR teleoperation** — drive and demonstrate on your arm from a VR headset, streaming teleop straight into the same DRTC path and dataset recording.
-- **More first-class robots** — finish and test Koch (wired but unverified), and broaden tested support beyond SO-101/YAM. This is where the project grows; bring yours.
-- **URDF-derived robot profiles** — read joint names/limits/rest-pose straight from a robot's URDF instead of hand-transcribed `RobotProfile` literals, so limits track the hardware. Design notes in [Future directions](#-future-directions) below.
+- **Record-by-demonstration** - teach a [behavior](docs/behaviors.md) by moving the arm, then replay it: a recorded joint stream reverses straight into trajectory keyframes (the executor already emits that stream).
+- **VR teleoperation** - drive and demonstrate on your arm from a VR headset, streaming teleop straight into the same DRTC path and dataset recording.
+- **More first-class robots** - finish and test Koch (wired but unverified), and broaden tested support beyond SO-101/YAM. This is where the project grows; bring yours.
+- **URDF-derived robot profiles** - read joint names/limits/rest-pose straight from a robot's URDF instead of hand-transcribed `RobotProfile` literals, so limits track the hardware. Design notes in [Future directions](#-future-directions) below.
 
 ## 🧠 How it works
 
@@ -256,23 +256,23 @@ assigning each node a session and a warm GPU pod. Read more in
 
 | Example | Hardware needed |
 |---|---|
-| [`03_run_on_so101.py`](examples/03_run_on_so101.py) — drive an SO-101 against a cloud pod | SO-101 (or none — synthesizes obs) |
-| [`04_manual_action.py`](examples/04_manual_action.py) — one-shot manual joint move | a supported arm |
-| [`06_connect_hosted.py`](examples/06_connect_hosted.py) — the minimal cloud connect | none |
-| [`07_named_behaviors.py`](examples/07_named_behaviors.py) — named behaviors (`home`, `hello`, `move`) offline | none (fake arm) or a supported arm |
+| [`03_run_on_so101.py`](examples/03_run_on_so101.py) - drive an SO-101 against a cloud pod | SO-101 (or none - synthesizes obs) |
+| [`04_manual_action.py`](examples/04_manual_action.py) - one-shot manual joint move | a supported arm |
+| [`06_connect_hosted.py`](examples/06_connect_hosted.py) - the minimal cloud connect | none |
+| [`07_named_behaviors.py`](examples/07_named_behaviors.py) - named behaviors (`home`, `hello`, `move`) offline | none (fake arm) or a supported arm |
 
 ## ☁️ Open source vs. Interlatent Cloud
 
 This SDK is open source and yours to run, but it's built to plug into the
 [dashboard](https://interlatent.com), which runs inference on managed GPUs and orchestrates
-your pods, nodes, and sessions — so you never operate GPUs, warm pools, or storage.
+your pods, nodes, and sessions - so you never operate GPUs, warm pools, or storage.
 
 | Capability | Open source | [Interlatent](https://interlatent.com) |
 |---|:---:|:---:|
 | One interface + safety model across robots | ✅ | ✅ |
 | Drive robots directly (behaviors, manual moves) | ✅ | ✅ |
 | Robot node daemon + DRTC client | ✅ | ✅ |
-| Run a VLA policy on your robot | — (needs a GPU pod) | ✅ managed warm GPUs, no cold starts |
+| Run a VLA policy on your robot | - (needs a GPU pod) | ✅ managed warm GPUs, no cold starts |
 | CLI for pods / nodes / sessions | ✅ | ✅ + full dashboard |
 | Hosted, versioned datasets | DIY | ✅ managed, shareable |
 | Auto policy analysis & reports | ❌ | ✅ |
@@ -281,16 +281,16 @@ your pods, nodes, and sessions — so you never operate GPUs, warm pools, or sto
 
 ## 📖 Documentation
 
-- [Getting started](docs/getting-started.md) — robot → first rollout
-- [Named behaviors](docs/behaviors.md) — drive robots directly (Python + CLI + TOML), no cloud
-- [Concepts](docs/concepts.md) — DRTC, sessions, chunks, the node
+- [Getting started](docs/getting-started.md) - robot → first rollout
+- [Named behaviors](docs/behaviors.md) - drive robots directly (Python + CLI + TOML), no cloud
+- [Concepts](docs/concepts.md) - DRTC, sessions, chunks, the node
 - [Supported robots & policies](docs/robots-and-policies.md)
 - [Going to cloud](docs/going-to-cloud.md)
-- [Architecture](ARCHITECTURE.md) — for contributors
+- [Architecture](ARCHITECTURE.md) - for contributors
 
 ## 🤝 Contributing
 
-We'd love your help — especially **adding robots**, which is how this project gets breadth.
+We'd love your help - especially **adding robots**, which is how this project gets breadth.
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [`good first issue`](https://github.com/interlatent/interlatent/labels/good%20first%20issue) label.
 
@@ -310,8 +310,8 @@ Forward-looking work that isn't scheduled yet. Each item is a direction, not a s
 
 ### Robots should consume URDFs directly
 
-Today a robot's kinematic facts — joint names, order, limits, velocity caps, rest
-pose — are hand-transcribed into static `RobotProfile` literals in
+Today a robot's kinematic facts - joint names, order, limits, velocity caps, rest
+pose - are hand-transcribed into static `RobotProfile` literals in
 [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py). That
 is a transcription step that drifts from the hardware: the YAM profile shipped with a
 conservative placeholder envelope, and the real limits only landed once we pulled the
@@ -338,5 +338,5 @@ from the robot's URDF, so limits/order/rest-pose come from one authoritative fil
   binds to order, not names)? The reversed YAM ordering shows this needs an explicit
   mapping, not a blind import.
 - Keep the static literal as a hand-verified fallback / safety-tightened override, or
-  treat the URDF as canonical? URDF limits are mechanical max — we currently inset
+  treat the URDF as canonical? URDF limits are mechanical max - we currently inset
   velocity below them on purpose, which a naive import would lose.
