@@ -70,7 +70,8 @@ _QUEUE_WAS_EMPTY = object()
 def _rec_pace_bytes_per_s() -> float:
     """Recording-uplink budget from INTERLATENT_REC_MAX_KBPS (KiB/s).
 
-    0 (default) = unpaced. When set, the drain thread sleeps after each
+    Defaults to 8000 KiB/s; set 0 to disable pacing. When set, the drain
+    thread sleeps after each
     batch so recording never offers more than this to the uplink —
     protecting the teleop path (state heartbeat, pose targets, live
     previews) that shares the same physical link from bufferbloat behind
@@ -81,9 +82,9 @@ def _rec_pace_bytes_per_s() -> float:
     import os
 
     try:
-        kbps = float(os.environ.get("INTERLATENT_REC_MAX_KBPS", "") or 0.0)
+        kbps = float(os.environ.get("INTERLATENT_REC_MAX_KBPS", "") or 8000.0)
     except (TypeError, ValueError):
-        kbps = 0.0
+        kbps = 8000.0
     return max(0.0, kbps) * 1024.0
 
 # Cap the wire size of one batched RecordTicks RPC. Two constraints:
