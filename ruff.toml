@@ -12,3 +12,10 @@ extend-exclude = [
 # Errors + pyflakes. Style rules (E1/E2/E5 whitespace, line length) are left
 # to the author; correctness rules are enforced.
 select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# sync_rollout is a drop-in `lerobot-record` replacement. It interleaves conditional
+# lerobot type-registration imports with try/except guards and a __import__ loop (E402),
+# and imports many symbols purely to register robot/camera/teleop config types for the
+# draccus CLI parser (F401). Both are intentional here, not accidental.
+"**/sync_inference/sync_rollout.py" = ["E402", "F401"]

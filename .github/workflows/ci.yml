@@ -36,9 +36,11 @@ jobs:
           python - <<'EOF'
           import glob, zipfile
           required = {
-              "interlatent-": ["interlatent/node/cli.py",
-                               "interlatent/cli/main.py",
-                               "interlatent/inference/integration/rollout.py"],
+              "interlatent-": ["interlatent/node/cli.py",                # interlatent-node
+                               "interlatent/node/act_cli.py",             # interlatent-act
+                               "interlatent/cli/main.py",                 # interlatent
+                               "interlatent/inference/integration/preflight.py",  # interlatent-preflight
+                               "interlatent/adapters/lerobot/sync_inference/sync_rollout.py"],  # interlatent-sync-rollout
           }
           for prefix, files in required.items():
               [wheel] = [w for w in glob.glob("/tmp/wheels/*.whl") if w.split("/")[-1].startswith(prefix)]
@@ -50,13 +52,21 @@ jobs:
 
   secret-scan:
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # gitleaks-action v2 requires a paid license for organization repos. Run it only
+      # when the GITLEAKS_LICENSE secret is configured; skip cleanly otherwise so the
+      # check doesn't hard-fail on forks or before the secret is set.
+      - name: Secret scan (gitleaks)
+        if: env.GITLEAKS_LICENSE != ''
+        uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE }}
 
   dco:
     runs-on: ubuntu-latest
@@ -68,7 +78,9 @@ jobs:
       - name: Check DCO sign-off
         run: |
           missing=0
-          for sha in $(git rev-list origin/${{ github.base_ref }}..HEAD); do
+          # --no-merges: on a pull_request build HEAD is the synthetic
+          # refs/pull/N/merge commit, which has no sign-off and isn't ours to sign.
+          for sha in $(git rev-list --no-merges origin/${{ github.base_ref }}..HEAD); do
             if ! git log -1 --format=%B "$sha" | grep -qi '^Signed-off-by:'; then
               echo "Missing Signed-off-by: $sha"; missing=1
             fi
