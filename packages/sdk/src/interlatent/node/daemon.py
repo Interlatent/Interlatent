@@ -548,12 +548,15 @@ class NodeDaemon:
         # endpoint is owned by the user, not the node — the node token is
         # rejected by the relay's auth. Skipped (teleop disabled) when no user
         # key or session id is available.
-        from .teleop.channel import TeleopChannel
+        # The factory picks WS vs QUIC/WebTransport from the backend's
+        # ``transport`` flag (returned in the teleop-token response). Both
+        # channels expose the same surface, so the control loop is unchanged.
+        from .teleop.factory import make_teleop_channel
 
-        teleop_channel: Optional[TeleopChannel] = None
+        teleop_channel = None
         teleop_api_key = self.cfg.drtc_api_key or ""
         if teleop_api_key and session.get("id"):
-            teleop_channel = TeleopChannel(
+            teleop_channel = make_teleop_channel(
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
                 api_key=teleop_api_key,

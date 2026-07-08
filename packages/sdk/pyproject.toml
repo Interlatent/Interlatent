@@ -46,6 +46,15 @@ lerobot = [
   "Pillow>=9",
 ]
 
+# pip install 'interlatent[teleop-quic]'
+# Low-latency in-browser teleop path: the node dials the QUIC/WebTransport relay
+# and consumes joint-target datagrams (node/teleop/quic_channel.py). aioquic is
+# optional — only needed on nodes running the QUIC transport; the default WS
+# teleop path (node/teleop/channel.py) needs only `websockets` (a core dep).
+teleop-quic = [
+  "aioquic>=1.0.0",
+]
+
 # pip install 'interlatent[axol]'
 # Drives the Almond Axol dual-arm robot via its native async SDK, through a
 # native control loop (robot kind "axol"; see interlatent.adapters.axol). The

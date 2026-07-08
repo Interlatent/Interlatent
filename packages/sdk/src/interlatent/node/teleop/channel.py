@@ -34,6 +34,7 @@ import threading
 import time
 from typing import Optional
 
+from ._mint import mint_teleop_token
 from .frame import TeleopFrame
 
 _LOG = logging.getLogger(__name__)
@@ -433,24 +434,13 @@ class TeleopChannel:
 
         Returns ``(ws_url, token)``. Raises on any non-2xx response.
         """
-        import httpx
-
-        url = f"{self._api_base}{self._token_path}"
-        headers = {"x-api-key": self._api_key}
-        if (self._bypass_key or "").strip():
-            # Protected test domains (Vercel preview deployments) challenge
-            # un-bypassed requests with a 302 to Vercel's SSO gate rather
-            # than reaching the app at all; carry the automation bypass
-            # secret same as the daemon's shared heartbeat/poll client.
-            headers["x-vercel-protection-bypass"] = self._bypass_key.strip()
-        with httpx.Client(timeout=10.0) as client:
-            r = client.post(
-                url,
-                params={"role": "node"},
-                headers=headers,
-            )
-            r.raise_for_status()
-            data = r.json()
+        data = mint_teleop_token(
+            api_base=self._api_base,
+            token_path=self._token_path,
+            api_key=self._api_key,
+            bypass_key=self._bypass_key,
+            role="node",
+        )
         return str(data["ws_url"]), str(data["token"])
 
     def _run_session(self, ws_url: str, token: str) -> None:
