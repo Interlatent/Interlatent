@@ -47,6 +47,8 @@ _STATE_DUP = 2
 # A seq that jumps this far *backward* is a browser reconnect/reset, not a
 # reordered duplicate — accept it and re-anchor.
 _SEQ_RESET_GAP = 1000
+# Telemetry: log an arrival-gap summary every this many seconds.
+_STATS_LOG_PERIOD_S = 5.0
 
 
 class LatestSeqBuffer:
@@ -67,12 +69,17 @@ class LatestSeqBuffer:
         self._last_seq = -1
 
 
-def encode_state_datagram(qpos, seq: int) -> bytes:
+def encode_state_datagram(qpos, seq: int, applied_seq: int = -1) -> bytes:
     """Node→browser joint-state datagram (JSON). ``qpos`` is action-order,
-    robot-native units — same convention as RecordTick's observation_state."""
+    robot-native units — same convention as RecordTick's observation_state.
+
+    ``applied_seq`` echoes the target seq the control loop most recently
+    executed, so the browser can compute command round-trip latency against
+    its own clock (no cross-machine clock sync needed)."""
     return json.dumps({
         "type": "state",
         "seq": int(seq),
+        "applied_seq": int(applied_seq),
         "qpos": [float(x) for x in qpos],
     }).encode("utf-8")
 
@@ -117,6 +124,20 @@ class QuicTeleopChannel:
         self._send_dg = None  # set to the WT session's send_datagram when up
         self._out_seq = 0
         self._last_state_sent_at = 0.0
+        # Seq of the target the control loop most recently executed — echoed
+        # to the browser for its RTT measurement. -1 = nothing applied yet.
+        self._last_applied_seq = -1
+
+        # Arrival telemetry (receive-loop thread only): inter-arrival gap of
+        # target datagrams — the node-observable half of teleop latency
+        # (relay→node jitter). 5s rolling summary.
+        self._arr_count = 0
+        self._arr_last_ns = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_seq_first = 0
+        self._arr_seq_last = 0
+        self._arr_window_started = time.monotonic()
 
     # -- lifecycle --
     def start(self) -> None:
@@ -170,16 +191,59 @@ class QuicTeleopChannel:
         if send is None or loop is None:
             return
         self._out_seq += 1
-        data = encode_state_datagram(qpos, self._out_seq)
+        data = encode_state_datagram(qpos, self._out_seq, self._last_applied_seq)
         for _ in range(_STATE_DUP):
             try:
                 loop.call_soon_threadsafe(send, data)
             except Exception:
                 pass
 
+    def note_applied(self, seq: int) -> None:
+        """Record the target seq the control loop just executed (for the
+        browser's RTT echo). Called from the control-loop thread; a plain int
+        write is fine under the GIL."""
+        self._last_applied_seq = int(seq)
+
     def preview_due(self) -> bool:
         # No video over the QUIC datagram control channel (see module docs).
         return False
+
+    def _note_arrival(self, frame: TeleopFrame) -> None:
+        """Track inter-arrival gaps of target datagrams; log a 5s summary.
+        Receive-loop thread only. A low rate or a large max gap means targets
+        are stalling between the browser and this node (relay/network jitter)."""
+        now_ns = frame.received_at_ns
+        if self._arr_count == 0:
+            self._arr_seq_first = frame.seq
+        else:
+            gap_ms = (now_ns - self._arr_last_ns) / 1e6
+            self._arr_gap_sum_ms += gap_ms
+            if gap_ms > self._arr_gap_max_ms:
+                self._arr_gap_max_ms = gap_ms
+        self._arr_last_ns = now_ns
+        self._arr_seq_last = frame.seq
+        self._arr_count += 1
+
+        now = time.monotonic()
+        elapsed = now - self._arr_window_started
+        if elapsed < _STATS_LOG_PERIOD_S:
+            return
+        n = self._arr_count
+        gaps = n - 1
+        # seq_span vs frames received ≈ duplicates the dedupe dropped + any
+        # datagrams lost en route (dup×3, so span > n is normal).
+        seq_span = self._arr_seq_last - self._arr_seq_first
+        _LOG.info(
+            "teleop(quic) target datagrams (%.0fs): n=%d rate=%.1fHz "
+            "gap mean/max=%.0f/%.0fms seq_span=%d session=%s",
+            elapsed, n, n / elapsed if elapsed > 0 else 0.0,
+            (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
+            self._arr_gap_max_ms, seq_span, self._session_id,
+        )
+        self._arr_count = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_window_started = now
 
     # -- background asyncio --
     async def _run(self) -> None:
@@ -245,6 +309,7 @@ class QuicTeleopChannel:
                     frame = decode_target_datagram(data)
                     if frame is None or not self._dedup.accept(frame.seq):
                         continue
+                    self._note_arrival(frame)
                     with self._lock:
                         self._latest = frame
             finally:

@@ -343,6 +343,16 @@ def lerobot_control_loop(
                 )
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
 
+                # Echo the executed target's seq back to the producer so it can
+                # compute command round-trip latency against its own clock.
+                # Getattr-guarded — only the QUIC channel defines note_applied.
+                _note_applied = getattr(teleop_channel, "note_applied", None)
+                if _note_applied is not None:
+                    try:
+                        _note_applied(int(frame.seq))
+                    except Exception:
+                        pass
+
                 # Latency accounting: how old was the frame we just executed?
                 _tl_age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1e6
                 _tl_n += 1
