@@ -25,7 +25,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3Connection
 from aioquic.h3.events import DatagramReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import ProtocolNegotiated, QuicEvent
+from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated, QuicEvent
 
 _LOG = logging.getLogger(__name__)
 
@@ -74,6 +74,17 @@ class _WTClientProtocol(QuicConnectionProtocol):
             pass
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        # TEMP diagnostic: log every event so we can see whether the handshake
+        # progresses (ProtocolNegotiated/HandshakeCompleted) or dies early
+        # (ConnectionTerminated) — e.g. GIL starvation by the robot control loop.
+        _LOG.info("teleop(quic) event: %s", type(event).__name__)
+        if isinstance(event, ConnectionTerminated):
+            _LOG.warning(
+                "teleop(quic) terminated: error_code=%s frame_type=%s reason=%r",
+                getattr(event, "error_code", None),
+                getattr(event, "frame_type", None),
+                getattr(event, "reason_phrase", None),
+            )
         if isinstance(event, ProtocolNegotiated):
             _LOG.info("teleop(quic) ALPN negotiated: %r", event.alpn_protocol)
             self._http = H3Connection(self._quic, enable_webtransport=True)
