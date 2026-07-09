@@ -35,7 +35,15 @@ class _WTClientProtocol(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self._http: Optional[H3Connection] = None
         self._session_stream_id: Optional[int] = None
-        self._connected: "asyncio.Future[bool]" = asyncio.get_event_loop().create_future()
+        # NOT `_connected`: the aioquic base class uses `self._connected` as an
+        # internal handshake boolean, and shadowing it with a (truthy) Future
+        # makes wait_connected() return instantly — the client then aborts the
+        # handshake ~1 ms in with a bare ConnectionTerminated. That collision
+        # was the real cause of the "handshake never completes on the node"
+        # failure originally blamed on GIL starvation.
+        self._wt_connected: "asyncio.Future[bool]" = (
+            asyncio.get_event_loop().create_future()
+        )
         self._datagrams: "asyncio.Queue[bytes]" = asyncio.Queue()
 
     def open_session(self, authority: str, path: str) -> None:
@@ -95,12 +103,12 @@ class _WTClientProtocol(QuicConnectionProtocol):
                 h3_event.stream_id == self._session_stream_id
             ):
                 status = dict(h3_event.headers).get(b":status")
-                if self._connected.done():
+                if self._wt_connected.done():
                     continue
                 if status == b"200":
-                    self._connected.set_result(True)
+                    self._wt_connected.set_result(True)
                 else:
-                    self._connected.set_exception(
+                    self._wt_connected.set_exception(
                         RuntimeError(f"WebTransport CONNECT rejected: {status!r}")
                     )
             elif isinstance(h3_event, DatagramReceived) and (
@@ -149,7 +157,7 @@ async def connect_webtransport(url: str, token: str):
         assert isinstance(proto, _WTClientProtocol)
         await proto.wait_connected()
         proto.open_session(host, path)
-        await asyncio.wait_for(proto._connected, timeout=10.0)
+        await asyncio.wait_for(proto._wt_connected, timeout=10.0)
         yield WebTransportSession(proto)
 
 

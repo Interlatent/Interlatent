@@ -17,22 +17,35 @@ Differences from the WS channel, by design:
     JPEGs. Live video on the QUIC path is a separate pipeline (see the ADR);
     ``preview_due`` returns False so the getattr-guarded preview tee no-ops.
 
-Split: the pure codec/dedup helpers below are unit-tested; the aioquic
-client wire glue (``_quic_client``) is the one part validated live (Phase-0
-gate: aioquic on the arm64 Pi + a reachable relay).
+The aioquic connection itself runs in a dumb-pipe **child process**
+(``_quic_proc``, spawned ``python -m ...``): QUIC's handshake/loss-recovery
+timers live in userspace Python, and robot-driver threads (e.g. i2rt's ~270 Hz
+gravity comp) share the GIL — isolation makes timer starvation structurally
+impossible, while WS can stay in-process because TCP retransmission is
+kernel-side. The child owns only connect/handshake/reconnect and pumps raw
+datagrams verbatim over a loopback UDP socket (framing in ``_quic_ipc``); ALL
+protocol logic — codec, dedupe, staleness, pacing, applied-seq echo, arrival
+telemetry — stays here in the parent. Child exits on stdin EOF (no orphans);
+this class respawns a crashed child with 1→15 s backoff. See the ADR 0017
+amendment (which also records the ``_connected`` attribute-shadowing bug in
+``_quic_client`` that was the actual cause of the v1 handshake failure).
 
-``aioquic`` is imported lazily so a node on the WS path never needs it.
+This process never imports aioquic; only the child does.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import os
+import secrets
+import socket
+import subprocess
+import sys
 import threading
 import time
 from typing import Optional
 
-from ._mint import mint_teleop_token
+from . import _quic_ipc
 from .frame import TeleopFrame
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +62,8 @@ _STATE_DUP = 2
 _SEQ_RESET_GAP = 1000
 # Telemetry: log an arrival-gap summary every this many seconds.
 _STATS_LOG_PERIOD_S = 5.0
+# Supervisor read cadence: recvfrom timeout doubles as the supervision tick.
+_SUPERVISE_TICK_S = 0.5
 
 
 class LatestSeqBuffer:
@@ -120,15 +135,24 @@ class QuicTeleopChannel:
         self._thread: Optional[threading.Thread] = None
         self._connected = False
 
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._send_dg = None  # set to the WT session's send_datagram when up
+        # Child-process plumbing (the aioquic connection lives in the child).
+        self._sock: Optional[socket.socket] = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._child_addr = None  # pinned from the first cookie-valid hello
+        self._cookie = ""
+        self._spawn_backoff = _RECONNECT_INITIAL_S
+        self._next_spawn_at = 0.0
+        self._child_exits = 0
+        self._hello_ever = False  # a valid hello proves the child runs
+        self._spawn_warned = False  # one-shot install/interpreter hint
+
         self._out_seq = 0
         self._last_state_sent_at = 0.0
         # Seq of the target the control loop most recently executed — echoed
         # to the browser for its RTT measurement. -1 = nothing applied yet.
         self._last_applied_seq = -1
 
-        # Arrival telemetry (receive-loop thread only): inter-arrival gap of
+        # Arrival telemetry (supervisor thread only): inter-arrival gap of
         # target datagrams — the node-observable half of teleop latency
         # (relay→node jitter). 5s rolling summary.
         self._arr_count = 0
@@ -143,8 +167,24 @@ class QuicTeleopChannel:
     def start(self) -> None:
         if self._thread is not None:
             return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(_SUPERVISE_TICK_S)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _quic_ipc.SOCK_BUF_BYTES)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _quic_ipc.SOCK_BUF_BYTES)
+        except OSError:
+            pass
+        self._sock = sock
+        self._cookie = secrets.token_hex(16)
+        try:
+            self._spawn_child()
+        except OSError as exc:
+            # Supervisor retries with backoff; don't fail session start.
+            _LOG.warning("teleop(quic) child spawn failed: %s", exc)
+            self._next_spawn_at = time.monotonic() + self._spawn_backoff
         self._thread = threading.Thread(
-            target=lambda: asyncio.run(self._run()),
+            target=self._supervise,
             name=f"teleop-quic[{self._session_id[:8]}]",
             daemon=True,
         )
@@ -152,15 +192,167 @@ class QuicTeleopChannel:
 
     def stop(self) -> None:
         self._stop.set()
-        loop = self._loop
-        if loop is not None:
-            try:
-                loop.call_soon_threadsafe(lambda: None)  # wake the loop
-            except Exception:
-                pass
+        self._shutdown_child(self._proc)
+        self._proc = None
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        # The supervisor can spawn between our shutdown above and _stop being
+        # observed — after the join, sweep any straggler.
+        self._shutdown_child(self._proc)
+        self._proc = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+        self._connected = False
+
+    @staticmethod
+    def _child_argv() -> list:
+        # Seam for tests (monkeypatch to a fake child).
+        return [sys.executable, "-m", "interlatent.node.teleop._quic_proc"]
+
+    def _spawn_child(self) -> None:
+        if self._stop.is_set() or self._sock is None:
+            return
+        env = {
+            **os.environ,
+            _quic_ipc.ENV_PARENT_PORT: str(self._sock.getsockname()[1]),
+            _quic_ipc.ENV_COOKIE: self._cookie,
+            _quic_ipc.ENV_API_BASE: self._api_base,
+            _quic_ipc.ENV_API_KEY: self._api_key,
+            _quic_ipc.ENV_SESSION_ID: self._session_id,
+            _quic_ipc.ENV_TOKEN_PATH: self._token_path,
+        }
+        if self._bypass_key:
+            env[_quic_ipc.ENV_BYPASS_KEY] = self._bypass_key
+        # stdin PIPE is the lifetime tether (child exits on EOF); stderr is
+        # inherited so child logs land in the node's logs.
+        self._proc = subprocess.Popen(
+            self._child_argv(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=None,
+            env=env,
+        )
+        _LOG.info(
+            "teleop(quic) child spawned pid=%s session=%s",
+            self._proc.pid, self._session_id,
+        )
+
+    @staticmethod
+    def _shutdown_child(proc: Optional[subprocess.Popen]) -> None:
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()  # EOF → child exits
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            pass
+
+    # -- supervisor (reader thread) --
+    def _supervise(self) -> None:
+        while not self._stop.is_set():
+            now = time.monotonic()
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                _LOG.warning(
+                    "teleop(quic) child exited rc=%s; respawn in %.0fs session=%s",
+                    proc.returncode, self._spawn_backoff, self._session_id,
+                )
+                self._child_exits += 1
+                if (
+                    not self._hello_ever
+                    and self._child_exits >= 3
+                    and not self._spawn_warned
+                ):
+                    self._spawn_warned = True
+                    _LOG.warning(
+                        "teleop(quic) child has never come up — check that %s "
+                        "can import interlatent and that aioquic is installed "
+                        "(pip install 'interlatent[teleop-quic]')",
+                        sys.executable,
+                    )
+                self._proc = None
+                self._child_addr = None
+                self._connected = False
+                with self._lock:
+                    self._latest = None
+                self._next_spawn_at = now + self._spawn_backoff
+                self._spawn_backoff = min(self._spawn_backoff * 2, _RECONNECT_MAX_S)
+            if self._proc is None and now >= self._next_spawn_at:
+                try:
+                    self._spawn_child()
+                except OSError as exc:
+                    _LOG.warning(
+                        "teleop(quic) child spawn failed: %s (retry %.0fs)",
+                        exc, self._spawn_backoff,
+                    )
+                    self._next_spawn_at = time.monotonic() + self._spawn_backoff
+                    self._spawn_backoff = min(
+                        self._spawn_backoff * 2, _RECONNECT_MAX_S
+                    )
+            sock = self._sock
+            if sock is None:
+                return
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                return  # socket closed under us during stop()
+            self._handle_datagram(data, addr)
+
+    def _handle_datagram(self, data: bytes, addr) -> None:
+        parsed = _quic_ipc.parse(data)
+        if parsed is None:
+            return
+        kind, payload = parsed
+        if kind == _quic_ipc.TYPE_CTRL:
+            msg = _quic_ipc.parse_ctrl(payload)
+            if msg is None:
+                return
+            t = msg.get("t")
+            if t == "hello":
+                if msg.get("cookie") != self._cookie:
+                    return  # stray local sender — ignore
+                self._child_addr = addr
+                self._hello_ever = True
+                self._spawn_backoff = _RECONNECT_INITIAL_S
+                return
+            if addr != self._child_addr:
+                return
+            if t == "connected":
+                self._dedup.reset()
+                self._connected = True
+                _LOG.info("teleop(quic) connected session=%s", self._session_id)
+            elif t == "disconnected":
+                # Drop the latest frame so a stale engaged target can't keep
+                # driving the arm across a reconnect.
+                self._connected = False
+                with self._lock:
+                    self._latest = None
+            return
+        if kind != _quic_ipc.TYPE_DATA or addr != self._child_addr:
+            return
+        frame = decode_target_datagram(payload)
+        if frame is None or not self._dedup.accept(frame.seq):
+            return
+        self._note_arrival(frame)
+        with self._lock:
+            self._latest = frame
 
     # -- read API (control loop) --
     def latest_frame(self) -> Optional[TeleopFrame]:
@@ -186,16 +378,20 @@ class QuicTeleopChannel:
         if now - self._last_state_sent_at < _STATE_SEND_PERIOD_S:
             return
         self._last_state_sent_at = now
-        send = self._send_dg
-        loop = self._loop
-        if send is None or loop is None:
+        sock = self._sock
+        addr = self._child_addr
+        if sock is None or addr is None or not self._connected:
             return
         self._out_seq += 1
-        data = encode_state_datagram(qpos, self._out_seq, self._last_applied_seq)
+        data = _quic_ipc.encode_data(
+            encode_state_datagram(qpos, self._out_seq, self._last_applied_seq)
+        )
+        # Loopback sendto is effectively non-blocking; concurrent recvfrom on
+        # the same socket from the supervisor thread is safe.
         for _ in range(_STATE_DUP):
             try:
-                loop.call_soon_threadsafe(send, data)
-            except Exception:
+                sock.sendto(data, addr)
+            except OSError:
                 pass
 
     def note_applied(self, seq: int) -> None:
@@ -210,7 +406,7 @@ class QuicTeleopChannel:
 
     def _note_arrival(self, frame: TeleopFrame) -> None:
         """Track inter-arrival gaps of target datagrams; log a 5s summary.
-        Receive-loop thread only. A low rate or a large max gap means targets
+        Supervisor thread only. A low rate or a large max gap means targets
         are stalling between the browser and this node (relay/network jitter)."""
         now_ns = frame.received_at_ns
         if self._arr_count == 0:
@@ -244,79 +440,6 @@ class QuicTeleopChannel:
         self._arr_gap_sum_ms = 0.0
         self._arr_gap_max_ms = 0.0
         self._arr_window_started = now
-
-    # -- background asyncio --
-    async def _run(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        backoff = _RECONNECT_INITIAL_S
-        while not self._stop.is_set():
-            try:
-                wt_url, token = await self._loop.run_in_executor(None, self._mint)
-            except Exception as exc:
-                _LOG.info("teleop(quic) token-mint failed: %s (retry %.0fs)", exc, backoff)
-                if await self._sleep_or_stop(backoff):
-                    return
-                backoff = min(backoff * 2, _RECONNECT_MAX_S)
-                continue
-            try:
-                await self._session(wt_url, token)
-                backoff = _RECONNECT_INITIAL_S
-            except Exception as exc:
-                _LOG.warning(
-                    "teleop(quic) session ended (%s: %s); reconnect in %.0fs",
-                    type(exc).__name__, exc, backoff,
-                )
-                if await self._sleep_or_stop(backoff):
-                    return
-                backoff = min(backoff * 2, _RECONNECT_MAX_S)
-
-    async def _sleep_or_stop(self, secs: float) -> bool:
-        try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, self._stop.wait, secs),
-                timeout=secs + 1.0,
-            )
-        except Exception:
-            pass
-        return self._stop.is_set()
-
-    def _mint(self) -> tuple[str, str]:
-        data = mint_teleop_token(
-            api_base=self._api_base,
-            token_path=self._token_path,
-            api_key=self._api_key,
-            bypass_key=self._bypass_key,
-            role="node",
-        )
-        wt = data.get("webtransport_url")
-        if not wt:
-            raise RuntimeError("token response has no webtransport_url (transport != quic?)")
-        return str(wt), str(data["token"])
-
-    async def _session(self, wt_url: str, token: str) -> None:
-        # aioquic WebTransport client — the live-gated wire glue.
-        from ._quic_client import connect_webtransport
-
-        self._dedup.reset()
-        async with connect_webtransport(wt_url, token) as wt:
-            self._connected = True
-            self._send_dg = wt.send_datagram
-            _LOG.info("teleop(quic) connected session=%s", self._session_id)
-            try:
-                async for data in wt.datagrams():
-                    if self._stop.is_set():
-                        break
-                    frame = decode_target_datagram(data)
-                    if frame is None or not self._dedup.accept(frame.seq):
-                        continue
-                    self._note_arrival(frame)
-                    with self._lock:
-                        self._latest = frame
-            finally:
-                self._connected = False
-                self._send_dg = None
-                with self._lock:
-                    self._latest = None
 
 
 __all__ = [

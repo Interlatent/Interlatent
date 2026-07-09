@@ -9,8 +9,9 @@ Selection: a one-shot node-role token mint reveals the deployment's
 anything else → the WS :class:`TeleopChannel`. The probe is best-effort — the
 token always carries a working ``ws_url`` even in quic mode, so a failed or
 absent quic signal degrades cleanly to the WS path (correct behaviour for the
-parallel rollout, where both relays run). ``aioquic`` is only imported when the
-quic path is actually chosen.
+parallel rollout, where both relays run). ``aioquic`` is never imported in
+this process — the quic channel's child process uses it — so availability is
+probed via ``find_spec`` before choosing the quic path.
 """
 from __future__ import annotations
 
@@ -58,9 +59,20 @@ def make_teleop_channel(
         bypass_key=bypass_key,
     )
     if transport == "quic" and webtransport_url:
+        # The parent process never imports aioquic (the connection lives in
+        # the QuicTeleopChannel child process, which uses the same
+        # interpreter/venv) — so probe availability explicitly here.
+        import importlib.util
+
+        if importlib.util.find_spec("aioquic") is None:
+            _LOG.warning(
+                "QUIC teleop unavailable (aioquic not installed — "
+                "pip install 'interlatent[teleop-quic]'); falling back to ws"
+            )
+            return TeleopChannel(**common)
         try:
             from .quic_channel import QuicTeleopChannel
-        except Exception as exc:  # aioquic missing on this node
+        except Exception as exc:
             _LOG.warning("QUIC teleop unavailable (%s); falling back to ws", exc)
         else:
             _LOG.info("teleop transport=quic session=%s", session_id)
