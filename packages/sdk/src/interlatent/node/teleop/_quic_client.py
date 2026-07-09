@@ -13,6 +13,7 @@ session to ``<url>?token=<token>`` and exposes its unreliable datagram flow.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import ssl
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ from aioquic.h3.events import DatagramReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ProtocolNegotiated, QuicEvent
 
+_LOG = logging.getLogger(__name__)
+
 
 class _WTClientProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs) -> None:
@@ -37,7 +40,17 @@ class _WTClientProtocol(QuicConnectionProtocol):
 
     def open_session(self, authority: str, path: str) -> None:
         """Send the extended CONNECT that opens the WebTransport session."""
-        assert self._http is not None
+        if self._http is None:
+            # No H3 layer means ProtocolNegotiated never fired with an 'h3'
+            # ALPN — i.e. the QUIC/TLS handshake did not complete ALPN before
+            # this point (TLS trust failure or the handshake flight was dropped,
+            # e.g. MTU/QUIC-hostile network). Fail loudly instead of a bare
+            # AssertionError so the node log says *why*.
+            raise RuntimeError(
+                "WebTransport handshake failed: no HTTP/3 ALPN negotiated "
+                "(QUIC/TLS handshake did not complete — check cert trust or a "
+                "QUIC-hostile network/MTU on this host)"
+            )
         self._session_stream_id = self._quic.get_next_available_stream_id()
         self._http.send_headers(
             self._session_stream_id,
@@ -62,6 +75,7 @@ class _WTClientProtocol(QuicConnectionProtocol):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated):
+            _LOG.info("teleop(quic) ALPN negotiated: %r", event.alpn_protocol)
             self._http = H3Connection(self._quic, enable_webtransport=True)
         if self._http is None:
             return
