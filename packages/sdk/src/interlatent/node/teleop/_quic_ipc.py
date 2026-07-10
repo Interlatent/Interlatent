@@ -17,6 +17,12 @@ Framing (both directions): ``type_byte + payload``.
       {"t": "hello", "cookie": <hex>, "pid": <int>}   bind + 1s heartbeat
       {"t": "connected"}                              WT CONNECT accepted
       {"t": "disconnected", "reason": <str>}          session ended (best-effort)
+  * ``TYPE_VIDEO`` — parent→child only: one framed video frame to ship to the
+    browser on its own WebTransport unidirectional stream. Payload is
+    ``uint8 cam-name length + cam name UTF-8 + wire bytes``; the cam prefix
+    lets the child enforce its per-camera in-flight cap without parsing the
+    wire bytes (which stay opaque, like DATA payloads). One loopback datagram
+    per camera per preview tick (~8-15 KB JPEG, well under the 64 KB limit).
 
 The parent pins the child's address from the first hello whose ``cookie``
 matches the one it passed via env, and drops datagrams from anyone else.
@@ -28,11 +34,13 @@ from typing import Optional, Tuple
 
 TYPE_DATA = 0x00
 TYPE_CTRL = 0x01
+TYPE_VIDEO = 0x02
 
 # Loopback socket buffers, both ends. The parent's reader thread is still
-# GIL-exposed; at ~60 Hz dup'd ~1.2 KB datagrams this absorbs >1 s of stall
-# kernel-side instead of dropping.
-SOCK_BUF_BYTES = 262144
+# GIL-exposed; sized so control datagrams (~60 Hz dup'd ~1.2 KB) plus the
+# video tee (10 Hz × cams × ~15 KB ≈ 300 KB/s on a 2-cam rig) absorb a
+# multi-second stall kernel-side instead of dropping.
+SOCK_BUF_BYTES = 1048576
 
 # Spawn contract: env vars the parent sets on the child (full os.environ is
 # inherited underneath, so e.g. INTERLATENT_TELEOP_INSECURE keeps working).
@@ -61,6 +69,31 @@ def parse(datagram: bytes) -> Optional[Tuple[int, bytes]]:
     return datagram[0], datagram[1:]
 
 
+def encode_video(cam: str, wire: bytes) -> bytes:
+    """Frame one video frame for the child: cam-name prefix + opaque wire
+    bytes (the browser-facing framed payload, sent verbatim on a uni stream)."""
+    name = cam.encode("utf-8")[:255]
+    return bytes((TYPE_VIDEO, len(name))) + name + wire
+
+
+def parse_video(payload: bytes) -> Optional[Tuple[str, bytes]]:
+    """Decode a TYPE_VIDEO payload into (cam, wire). None on garbage —
+    truncated, empty cam name, or undecodable UTF-8 (never raises)."""
+    if len(payload) < 2:
+        return None
+    name_len = payload[0]
+    if name_len == 0 or len(payload) < 1 + name_len:
+        return None
+    try:
+        cam = payload[1:1 + name_len].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    wire = payload[1 + name_len:]
+    if not wire:
+        return None
+    return cam, wire
+
+
 def parse_ctrl(payload: bytes) -> Optional[dict]:
     """Decode a TYPE_CTRL payload. None on garbage (never raises)."""
     try:
@@ -73,6 +106,7 @@ def parse_ctrl(payload: bytes) -> Optional[dict]:
 __all__ = [
     "TYPE_DATA",
     "TYPE_CTRL",
+    "TYPE_VIDEO",
     "SOCK_BUF_BYTES",
     "ENV_PARENT_PORT",
     "ENV_COOKIE",
@@ -83,6 +117,8 @@ __all__ = [
     "ENV_BYPASS_KEY",
     "encode_data",
     "encode_ctrl",
+    "encode_video",
     "parse",
     "parse_ctrl",
+    "parse_video",
 ]

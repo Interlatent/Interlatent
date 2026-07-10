@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from interlatent.node.teleop import _quic_ipc
+from interlatent.node.teleop import _quic_proc  # safe: its aioquic import is lazy
 from interlatent.node.teleop import quic_channel as qc
 from interlatent.node.teleop.quic_channel import QuicTeleopChannel
 
@@ -57,6 +58,21 @@ def test_parse_unknown_type_returned_for_caller_to_ignore():
 def test_parse_ctrl_garbage_is_none():
     assert _quic_ipc.parse_ctrl(b"\xff\xfe not json") is None
     assert _quic_ipc.parse_ctrl(b'"a bare string"') is None
+
+
+def test_video_roundtrip():
+    wire = b"\x00\x0f" + b'{"type":"video"}' + b"\xff\xd8jpegbytes"
+    kind, payload = _quic_ipc.parse(_quic_ipc.encode_video("wrist_cam", wire))
+    assert kind == _quic_ipc.TYPE_VIDEO
+    assert _quic_ipc.parse_video(payload) == ("wrist_cam", wire)
+
+
+def test_parse_video_garbage_is_none():
+    assert _quic_ipc.parse_video(b"") is None
+    assert _quic_ipc.parse_video(b"\x05ab") is None  # truncated cam name
+    assert _quic_ipc.parse_video(b"\x00rest") is None  # empty cam name
+    assert _quic_ipc.parse_video(b"\x03cam") is None  # no wire bytes
+    assert _quic_ipc.parse_video(b"\x02\xff\xfexx") is None  # bad utf-8 cam
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +311,165 @@ def test_stop_closes_stdin_and_joins(channel):
     assert chan._proc is None
     assert chan._sock is None
     chan.stop()  # idempotent (daemon calls it from two paths)
+
+
+# ---------------------------------------------------------------------------
+# Video tee: parent gating + framing (preview_due / send_preview)
+# ---------------------------------------------------------------------------
+
+def _make_viewer_present(chan, sim, seq: int = 1):
+    """Connect and deliver one target datagram so preview presence is live."""
+    sim.hello()
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="connected")
+    sim.targets(seq=seq)
+    _wait_for(lambda: chan._last_rx_at > 0.0, what="presence stamp")
+
+
+def test_preview_due_gating(channel):
+    chan, sim, _ = channel
+    assert not chan.preview_due()  # not connected yet
+    _make_viewer_present(chan, sim)
+    assert chan.preview_due()
+
+    # Sending consumes the period budget...
+    chan.send_preview({"cam": b"\xff\xd8jpeg"}, ts_ns=1_000_000_000)
+    assert not chan.preview_due()
+    # ...until the period elapses.
+    chan._last_preview_at = 0.0
+    assert chan.preview_due()
+
+    # No viewer (no recent target datagrams) → no encode cost.
+    chan._last_rx_at = time.monotonic() - 60.0
+    assert not chan.preview_due()
+
+
+def test_preview_kill_switch(monkeypatch):
+    monkeypatch.setenv("INTERLATENT_QUIC_VIDEO", "0")
+    spawned: list[FakePopen] = []
+    monkeypatch.setattr(
+        qc.subprocess, "Popen",
+        lambda argv, **kw: spawned.append(FakePopen(argv, **kw)) or spawned[-1],
+    )
+    chan = QuicTeleopChannel(
+        session_id="sess-kill", api_base="http://api.example", api_key="ilat_test",
+    )
+    chan.start()
+    sim = ChildSim(spawned[0].env)
+    try:
+        _make_viewer_present(chan, sim)
+        assert not chan.preview_due()  # switch wins over everything else
+    finally:
+        sim.close()
+        chan.stop()
+
+
+def test_send_preview_framing(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+
+    jpeg = b"\xff\xd8" + b"j" * 64
+    chan.send_preview({"wrist": jpeg}, ts_ns=1_234_567_890)
+
+    # The channel must emit exactly one TYPE_VIDEO datagram for the camera.
+    raw = sim.sock.recvfrom(65536)[0]
+    kind, payload = _quic_ipc.parse(raw)
+    assert kind == _quic_ipc.TYPE_VIDEO
+    cam, wire = _quic_ipc.parse_video(payload)
+    assert cam == "wrist"
+    # Wire layout: uint16-BE header length + JSON header + JPEG verbatim.
+    hlen = int.from_bytes(wire[:2], "big")
+    header = json.loads(wire[2:2 + hlen].decode("utf-8"))
+    assert header["type"] == "video"
+    assert header["cam"] == "wrist"
+    assert header["seq"] == chan._preview_seq
+    assert header["ts_ms"] == 1_234_567_890 // 1_000_000
+    assert wire[2 + hlen:] == jpeg
+
+
+# ---------------------------------------------------------------------------
+# Video tee: child governor + TYPE_VIDEO dispatch (aioquic-free)
+# ---------------------------------------------------------------------------
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 100.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _governor(finished: set, resets: list, clock: FakeClock):
+    return _quic_proc._VideoGovernor(
+        now=clock,
+        is_finished=lambda sid: sid in finished,
+        reset=resets.append,
+    )
+
+
+def test_governor_per_cam_and_global_caps():
+    finished: set = set()
+    resets: list = []
+    gov = _governor(finished, resets, FakeClock())
+
+    assert gov.admit("a")
+    gov.note_open(1, "a")
+    assert gov.admit("a")
+    gov.note_open(2, "a")
+    assert not gov.admit("a")  # per-cam cap (2) hit
+    assert gov.admit("b")  # other camera unaffected
+    gov.note_open(3, "b")
+
+    # Fill to the global cap (6) across cameras.
+    for sid, cam in ((4, "b"), (5, "c"), (6, "c")):
+        assert gov.admit(cam)
+        gov.note_open(sid, cam)
+    assert not gov.admit("d")  # global cap hit
+    assert gov.dropped_cap == 2
+
+    # Finished streams free their slots.
+    finished.update({1, 2})
+    assert gov.admit("a")
+    assert gov.finished == 2
+    assert not resets
+
+
+def test_governor_ttl_resets_stale_streams():
+    finished: set = set()
+    resets: list = []
+    clock = FakeClock()
+    gov = _governor(finished, resets, clock)
+
+    assert gov.admit("a")
+    gov.note_open(1, "a")
+    clock.t += _quic_proc._VIDEO_STREAM_TTL_S + 0.1
+    assert gov.admit("a")  # sweep resets the stale stream, freeing the slot
+    assert resets == [1]
+    assert gov.reset_ttl == 1
+
+
+def test_parent_link_video_dispatch():
+    link = _quic_proc._ParentLink()
+    got: list = []
+    link.set_video_sender(lambda cam, wire: got.append((cam, wire)))
+    link.datagram_received(
+        _quic_ipc.encode_video("cam0", b"WIREBYTES"), ("127.0.0.1", 1)
+    )
+    assert got == [("cam0", b"WIREBYTES")]
+    assert link.rx_video_from_parent == 1
+
+    # No sender (no session up) → dropped silently, not counted.
+    link.set_video_sender(None)
+    link.datagram_received(
+        _quic_ipc.encode_video("cam0", b"MORE"), ("127.0.0.1", 1)
+    )
+    assert got == [("cam0", b"WIREBYTES")]
+    assert link.rx_video_from_parent == 1
+
+    # Garbage payload with a sender set → ignored.
+    link.set_video_sender(lambda cam, wire: got.append((cam, wire)))
+    link.datagram_received(bytes((_quic_ipc.TYPE_VIDEO,)) + b"\x00", ("127.0.0.1", 1))
+    assert got == [("cam0", b"WIREBYTES")]
 
 
 # ---------------------------------------------------------------------------

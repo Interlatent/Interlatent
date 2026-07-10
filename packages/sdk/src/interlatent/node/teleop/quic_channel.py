@@ -13,9 +13,15 @@ Differences from the WS channel, by design:
   * ``send_state`` streams the robot's live joint vector back **to the browser**
     (not the pod) — the browser FK's it to close the clutch loop + reconcile.
     Duplicated for loss tolerance, same ~15 Hz cadence.
-  * no preview/video tee: WebTransport datagrams are ~1200 B, too small for
-    JPEGs. Live video on the QUIC path is a separate pipeline (see the ADR);
-    ``preview_due`` returns False so the getattr-guarded preview tee no-ops.
+  * the preview/video tee rides the SAME WebTransport session as control, but
+    on **unidirectional streams** (one short-lived stream per JPEG frame, FIN
+    after the last byte) — datagrams are ~1200 B, too small for JPEGs, while
+    per-frame streams are reliable within a frame yet independent across
+    frames (a lost packet delays only its own frame). The parent frames each
+    preview JPEG with the browser-facing ``video`` header and hands it to the
+    child (``TYPE_VIDEO``); the child owns stream opening plus the in-flight
+    cap/TTL load shedding (only it can see stream completion). Kill switch:
+    ``INTERLATENT_QUIC_VIDEO=0`` reverts to control-only.
 
 The aioquic connection itself runs in a dumb-pipe **child process**
 (``_quic_proc``, spawned ``python -m ...``): QUIC's handshake/loss-recovery
@@ -39,13 +45,15 @@ import logging
 import os
 import secrets
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from . import _quic_ipc
+from .channel import _VIEWER_PRESENCE_S, _preview_period_s
 from .frame import TeleopFrame
 
 _LOG = logging.getLogger(__name__)
@@ -145,6 +153,16 @@ class QuicTeleopChannel:
         self._child_exits = 0
         self._hello_ever = False  # a valid hello proves the child runs
         self._spawn_warned = False  # one-shot install/interpreter hint
+
+        # Video tee (see module docs). On by default in QUIC mode;
+        # INTERLATENT_QUIC_VIDEO=0 is the kill switch (control unaffected).
+        self._video_enabled = os.environ.get("INTERLATENT_QUIC_VIDEO", "1") != "0"
+        self._preview_period_s = _preview_period_s()
+        self._last_rx_at = 0.0  # viewer presence: any decoded target frame
+        self._last_preview_at = 0.0
+        self._preview_seq = 0
+        self._pv_window = 0  # frames handed to the child this stats window
+        self._pv_logged_once = False
 
         self._out_seq = 0
         self._last_state_sent_at = 0.0
@@ -348,7 +366,13 @@ class QuicTeleopChannel:
         if kind != _quic_ipc.TYPE_DATA or addr != self._child_addr:
             return
         frame = decode_target_datagram(payload)
-        if frame is None or not self._dedup.accept(frame.seq):
+        if frame is None:
+            return
+        # Presence is stamped before dedupe: the overlay's disengaged
+        # keepalives arrive duplicated, and dupes must still count as a
+        # viewer being connected (matches the WS channel's semantics).
+        self._last_rx_at = time.monotonic()
+        if not self._dedup.accept(frame.seq):
             return
         self._note_arrival(frame)
         with self._lock:
@@ -401,8 +425,64 @@ class QuicTeleopChannel:
         self._last_applied_seq = int(seq)
 
     def preview_due(self) -> bool:
-        # No video over the QUIC datagram control channel (see module docs).
-        return False
+        """True when the control loop should encode + hand over a preview set.
+
+        Gates (cheapest first): kill switch, link up, viewer present within
+        the last few seconds (so idle sessions pay zero encode cost), preview
+        period elapsed. Unlike the WS channel there is no send-slot check —
+        the hand-off to the child is a non-blocking loopback sendto and load
+        shedding (in-flight cap/TTL) lives in the child, which is the only
+        side that can see stream completion."""
+        if not self._video_enabled:
+            return False
+        if not self._connected or self._child_addr is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_rx_at > _VIEWER_PRESENCE_S:
+            return False
+        if now - self._last_preview_at < self._preview_period_s:
+            return False
+        return True
+
+    def send_preview(self, jpegs: Dict[str, bytes], ts_ns: int) -> None:
+        """Hand one preview set (cam → JPEG bytes) to the child, one
+        TYPE_VIDEO loopback datagram per camera. Each frame is already framed
+        here with the browser-facing header — ``uint16-BE header length +
+        JSON {"type","cam","seq","ts_ms"} + JPEG`` — byte-identical to the WS
+        pod relay's video framing, so the overlay's parser is shared. The
+        child ships each frame on its own unidirectional stream (no
+        duplication: streams are reliable). Non-blocking, best-effort."""
+        if not jpegs:
+            return
+        sock = self._sock
+        addr = self._child_addr
+        if sock is None or addr is None or not self._connected:
+            return
+        self._last_preview_at = time.monotonic()
+        self._preview_seq += 1
+        ts_ms = int(ts_ns) // 1_000_000
+        for cam, jpeg in jpegs.items():
+            if not jpeg:
+                continue
+            header = json.dumps({
+                "type": "video",
+                "cam": cam,
+                "seq": self._preview_seq,
+                "ts_ms": ts_ms,
+            }).encode("utf-8")
+            wire = struct.pack(">H", len(header)) + header + bytes(jpeg)
+            try:
+                sock.sendto(_quic_ipc.encode_video(cam, wire), addr)
+            except OSError:
+                continue
+            self._pv_window += 1
+        if not self._pv_logged_once and self._pv_window > 0:
+            self._pv_logged_once = True
+            _LOG.info(
+                "teleop(quic) preview tee active: %d cam(s), period=%.0fms "
+                "session=%s",
+                len(jpegs), self._preview_period_s * 1000.0, self._session_id,
+            )
 
     def _note_arrival(self, frame: TeleopFrame) -> None:
         """Track inter-arrival gaps of target datagrams; log a 5s summary.
@@ -431,14 +511,15 @@ class QuicTeleopChannel:
         seq_span = self._arr_seq_last - self._arr_seq_first
         _LOG.info(
             "teleop(quic) target datagrams (%.0fs): n=%d rate=%.1fHz "
-            "gap mean/max=%.0f/%.0fms seq_span=%d session=%s",
+            "gap mean/max=%.0f/%.0fms seq_span=%d pv=%d session=%s",
             elapsed, n, n / elapsed if elapsed > 0 else 0.0,
             (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
-            self._arr_gap_max_ms, seq_span, self._session_id,
+            self._arr_gap_max_ms, seq_span, self._pv_window, self._session_id,
         )
         self._arr_count = 0
         self._arr_gap_sum_ms = 0.0
         self._arr_gap_max_ms = 0.0
+        self._pv_window = 0
         self._arr_window_started = now
 
 

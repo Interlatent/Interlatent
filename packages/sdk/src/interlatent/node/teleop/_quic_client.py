@@ -81,6 +81,44 @@ class _WTClientProtocol(QuicConnectionProtocol):
         except Exception:
             pass
 
+    # -- unidirectional streams (video tee: one short-lived stream per frame) --
+    def open_uni_stream(self, payload: bytes) -> Optional[int]:
+        """Open a WebTransport uni stream, write ``payload``, FIN. Returns the
+        QUIC stream id (for completion/reset tracking) or None if the session
+        is down/mid-close. If the relay's uni-stream credit is momentarily
+        exhausted aioquic parks the stream until MAX_STREAMS arrives — the
+        caller's in-flight cap keeps that from ever piling up."""
+        if self._http is None or self._session_stream_id is None:
+            return None
+        try:
+            sid = self._http.create_webtransport_stream(
+                self._session_stream_id, is_unidirectional=True
+            )
+            self._quic.send_stream_data(sid, payload, end_stream=True)
+            self.transmit()
+            return sid
+        except Exception:
+            return None
+
+    def reset_uni_stream(self, sid: int) -> None:
+        """Abandon an in-flight uni stream (RESET_STREAM) — drops any unacked
+        retransmission so a stale frame stops competing with control."""
+        try:
+            self._quic.reset_stream(sid, 0)
+            self.transmit()
+        except Exception:
+            pass
+
+    def uni_stream_finished(self, sid: int) -> bool:
+        """True once the stream is fully acked+FIN (aioquic pops it from
+        ``_streams`` then — a private attr, hence the pinned aioquic range;
+        if the attr ever vanishes we degrade to 'always finished', leaving
+        the TTL as the only shedding signal)."""
+        try:
+            return sid not in self._quic._streams
+        except Exception:
+            return True
+
     def quic_event_received(self, event: QuicEvent) -> None:
         # TEMP diagnostic: log every event so we can see whether the handshake
         # progresses (ProtocolNegotiated/HandshakeCompleted) or dies early
@@ -127,6 +165,15 @@ class WebTransportSession:
     async def datagrams(self) -> AsyncIterator[bytes]:
         while True:
             yield await self._proto._datagrams.get()
+
+    def open_uni_stream(self, payload: bytes) -> Optional[int]:
+        return self._proto.open_uni_stream(payload)
+
+    def reset_uni_stream(self, sid: int) -> None:
+        self._proto.reset_uni_stream(sid)
+
+    def uni_stream_finished(self, sid: int) -> bool:
+        return self._proto.uni_stream_finished(sid)
 
 
 @asynccontextmanager
