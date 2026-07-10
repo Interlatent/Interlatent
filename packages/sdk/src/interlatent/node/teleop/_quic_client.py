@@ -110,12 +110,22 @@ class _WTClientProtocol(QuicConnectionProtocol):
             pass
 
     def uni_stream_finished(self, sid: int) -> bool:
-        """True once the stream is fully acked+FIN (aioquic pops it from
-        ``_streams`` then — a private attr, hence the pinned aioquic range;
-        if the attr ever vanishes we degrade to 'always finished', leaving
-        the TTL as the only shedding signal)."""
+        """True once the stream's send side is fully acked+FIN.
+
+        Checks ``sender.is_finished`` directly (private attrs, hence the
+        pinned aioquic range): a send-only uni stream is NEVER popped from
+        ``_quic._streams`` — aioquic's ``QuicStreamReceiver.__init__`` ignores
+        its ``readable`` flag, so ``QuicStream.is_finished`` (receiver AND
+        sender) stays False forever and the discard sweep never collects it.
+        The naive ``sid not in _streams`` check therefore reported every
+        frame as unfinished, and the governor TTL-reset streams that had long
+        been delivered. On any attr error we degrade to 'always finished',
+        leaving the TTL as the only shedding signal."""
         try:
-            return sid not in self._quic._streams
+            stream = self._quic._streams.get(sid)
+            if stream is None:
+                return True
+            return bool(stream.sender.is_finished)
         except Exception:
             return True
 
