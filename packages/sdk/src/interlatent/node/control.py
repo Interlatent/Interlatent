@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from .._clamp_log import warn_clamp
+from .movement import CommandBus, MovementSource
 
 _LOG = logging.getLogger("interlatent.node.control")
 
@@ -194,6 +195,17 @@ def lerobot_control_loop(
     _teleop_schema = teleop_profile.to_schema_dict() if teleop_profile is not None else None
     teleop_warned = False
 
+    # Single ingress + arbiter for all movement sources (teleop/intervention/
+    # policy). The loop consults the bus for *who drives this tick*; the
+    # per-source action production still lives in the branches below. See
+    # node/movement.py.
+    command_bus = CommandBus(
+        teleop_channel=teleop_channel,
+        teleop_gate=teleop_gate,
+        teleop_profile=teleop_profile,
+        policy_enabled=policy_enabled,
+    )
+
     # --- Delta clamp (execution safety, all action sources) -------------
     # Last-line guard against a single-tick joint slam (model glitch, bad
     # chunk, or teleop frame). The per-step limit is configured by the adapter
@@ -282,20 +294,18 @@ def lerobot_control_loop(
 
             # Sample the latest teleop frame. None when no producer is
             # connected or the last frame is stale (channel drops > 250 ms).
-            frame = teleop_channel.latest_frame() if teleop_channel is not None else None
-            engaged = bool(frame and frame.engaged and frame.deadman)
+            frame = command_bus.sample_teleop()
 
             # Set by whichever branch records a tick; drives the one-time
             # feature/teleop-profile report after the branch.
             state_keys = None
 
-            teleop_ok = (
-                engaged
-                and teleop_gate is not None
-                and action_keys
-                and len(action_keys) == len(teleop_profile.joint_names)
-            )
-            if teleop_ok:
+            # One point of access: the bus arbitrates who drives this tick.
+            # Identical semantics to the old teleop_ok / policy_enabled cascade
+            # (TELEOP iff engaged + gated + schema-matched, else HOLD iff no
+            # policy, else POLICY). See node/movement.py.
+            source = command_bus.arbitrate(frame, action_keys)
+            if source is MovementSource.TELEOP:
                 # --- TELEOP PATH (mode="targets" only) ---
                 # The hosted teleop engine already resolved an absolute joint
                 # target; we route it through the SafetyGate (workspace +
@@ -378,7 +388,7 @@ def lerobot_control_loop(
                     control_source="teleop",
                 )
                 step_counter += 1
-            elif not policy_enabled:
+            elif source is MovementSource.HOLD:
                 # --- HOLD PATH (teleop recording, disengaged) ---
                 # No policy to fall back to: send nothing (servos hold),
                 # but keep recording every tick so the episode is
@@ -391,7 +401,7 @@ def lerobot_control_loop(
                     control_source="hold",
                 )
                 step_counter += 1
-            else:
+            else:  # MovementSource.POLICY
                 # Reset the gate so the next engage starts from the live pose
                 # (the gate is only stepped while engaged).
                 if teleop_gate is not None:
