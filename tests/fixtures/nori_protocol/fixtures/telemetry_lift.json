@@ -1,0 +1,11 @@
+{
+  "type": "telemetry",
+  "ts_ns": 12345678905678,
+  "state": {
+    "right_arm_shoulder_pan.pos": 12.4,
+    "x.vel": 0.0,
+    "theta.vel": 0.0,
+    "left_lift.pos": 118.7,
+    "right_lift.pos": 42.5
+  }
+}

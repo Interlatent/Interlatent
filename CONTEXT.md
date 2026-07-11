@@ -115,6 +115,51 @@ the SafetyGate this is the **layered client-side safety model**: the delta clamp
 bounds single-tick slams from any source; the SafetyGate adds workspace/velocity/
 deadman limits on the teleop path. Both run next to the motors.
 
+**Nori adapter**:
+Vendor adapter `interlatent.adapters.nori` (`--robot nori`, `interlatent[nori]`)
+for the Nori robot: the **Node** runs on the robot's Pi and drives the on-board
+daemon (`NoriCoreAgent`) over the **Nori-Protocol** v1 wire contract —
+newline-delimited JSON on TCP `localhost:7777`, absolute `{"<joint>.pos": v}`
+targets carried in `control` frames, 12 arm joints (left-then-right) in the
+daemon-normalized `range_m100_100` units. v1 is arms-only (base/lifts:
+FUTURE.md #15). It depends on the Nori-Protocol schema repo only (vendored for
+conformance tests at `tests/fixtures/nori_protocol/`); `@nori/sdk` is a browser
+WebRTC client with no reusable logic and is not a dependency. Nori keeps all
+safety enforcement robot-side (range clamping, e-stop hard latch, watchdog
+safe-stop); the adapter discloses that state, never re-enforces it, and
+fail-closes at connect if the live ack descriptor disagrees with the static
+`nori` **robot profile** — accumulating every mismatch into one raise. A
+daemon-reported latch/safe-stop is a hard episode boundary: the native loop
+ends the session, freeing the daemon's single control-client slot for
+`interlatent-act --robot nori --reset-latch`. While the Node holds that slot,
+Nori's own browser/VR teleop cannot connect — interlatent teleop rides the
+interlatent QUIC/WS relay instead. _Avoid_: "Nori teleop" for interlatent
+DAgger takeover — Nori's own teleop stack is a separate system that is
+displaced, not reused, during a session. See ADR 0015/0016.
+
+**Keep-alive pump (Nori)**:
+Nori's daemon has no heartbeat message — the control-frame stream *is* the
+watchdog heartbeat, and silence beyond `t_stop_ms` safe-stops the robot. The
+Nori adapter therefore runs an internal ~50 Hz pump sending motion-free
+`control` frames, but only while the control loop proves liveness (a
+`get_observation` call within ~`t_warn_ms`). If the loop stalls, the pump stops
+and the daemon safe-stops as designed. Deliberately conditional — an
+unconditional pump would defeat the daemon's watchdog. Distinct from the
+**SafetyGate** staleness hold (200 ms), which guards *human-input* liveness;
+the daemon watchdog guards *client* liveness. Lives entirely inside the
+adapter's session client; the control loop and DRTC client never see it.
+
+**E-stop ingress (teleop)**:
+An additive `estop: true` field on the teleop wire frame — the operator's hard
+stop. On receipt the control loop latches the **SafetyGate** (all robots); the
+Nori loop additionally sends the daemon's `command{name:"estop"}`, which
+hard-latches robot-side. Clearing is never automatic and never the control
+loop's job: for Nori it is an explicit `--reset-latch` act on `--robot nori`,
+which sends the daemon's token-gated `reset_latch` (token from
+`/etc/nori/agent.token` on the Pi) and then clears the gate latch — daemon
+first, gate second. _Avoid_: conflating with deadman release, which is a soft
+hold, not a stop. Universal adapter-level e-stop is future work (FUTURE.md #14).
+
 **control_source**:
 Per-tick provenance recorded into the LeRobot dataset: `"policy"` for
 policy-driven steps, `"teleop"` for human DAgger interventions. Carried on the

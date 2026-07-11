@@ -1,0 +1,8 @@
+{
+  "type": "hello",
+  "protocol_version": 1,
+  "mode": "wan",
+  "input_mode": "keyboard",
+  "bus_choice": "3",
+  "token": "eyJhbGciOi.scoped.session.token"
+}

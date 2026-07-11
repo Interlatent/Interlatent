@@ -26,6 +26,15 @@ Three modes exist on the wire; the node executes two of them
 
 Back-compat: a frame with no ``mode`` is treated as ``"keys"``, so the existing
 overlay (which sends no ``mode``) keeps working untouched.
+
+``estop`` (additive, default False) is the operator's HARD stop — orthogonal to
+``deadman``, whose release is a soft hold. On receipt the control loop latches
+the SafetyGate (and a robot with a hardware latch, e.g. Nori, forwards it);
+clearing is an explicit human act, never the loop's. Because a single estop
+datagram must survive the 250 ms staleness window and channel reconnects, both
+channels also latch a sticky ``estop_seen`` flag at decode time — see
+``consume_estop()`` — so a panic press can never be lost to frame freshness
+rules (ADR 0016).
 """
 from __future__ import annotations
 
@@ -50,6 +59,7 @@ class TeleopFrame:
     seq: int
     received_at_ns: int            # monotonic_ns at decode time
     mode: str = "keys"
+    estop: bool = False            # operator hard stop (latches; human-cleared)
     held_keys: set[str] = field(default_factory=set)
     joint_targets: Optional[list[float]] = None
     ee_pos: Optional[list[float]] = None       # mode="pose": [x, y, z] (meters, WebXR frame)
@@ -103,6 +113,7 @@ class TeleopFrame:
             seq=int(obj.get("seq", 0) or 0),
             received_at_ns=time.monotonic_ns(),
             mode=mode,
+            estop=bool(obj.get("estop", False)),  # absent -> False (back-compat)
             held_keys=held_keys,
             joint_targets=joint_targets,
             ee_pos=ee_pos,

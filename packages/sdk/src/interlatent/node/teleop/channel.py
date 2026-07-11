@@ -119,6 +119,10 @@ class TeleopChannel:
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
+        # Sticky operator e-stop: latched at decode time, cleared only by
+        # consume_estop(). Deliberately survives frame staleness and channel
+        # reconnects — a panic press must never be droppable (ADR 0016).
+        self._estop_seen = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._connected = False
@@ -255,6 +259,20 @@ class TeleopChannel:
         if age_ms > _FRAME_STALE_MS:
             return None
         return frame
+
+    def consume_estop(self) -> bool:
+        """Return-and-clear the sticky operator e-stop flag.
+
+        Latched at decode time (not subject to the 250 ms staleness rule or
+        the disconnect frame-drop), so an ``estop:true`` frame that arrives
+        during a loop stall or right before a reconnect still reaches the
+        control loop's next tick exactly once. The caller owns what "handle"
+        means (latch the SafetyGate; forward a hardware latch where one
+        exists). See ADR 0016.
+        """
+        with self._lock:
+            seen, self._estop_seen = self._estop_seen, False
+        return seen
 
     @property
     def connected(self) -> bool:
@@ -479,6 +497,8 @@ class TeleopChannel:
                     self._note_arrival(frame)
                     with self._lock:
                         self._latest = frame
+                        if frame.estop:
+                            self._estop_seen = True
             finally:
                 self._connected = False
                 self._ws = None

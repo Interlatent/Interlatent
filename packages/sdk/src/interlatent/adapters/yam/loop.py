@@ -195,9 +195,12 @@ def control_loop(
                 robot.send_action(action_dict)
 
                 # Drop policy chunks queued or landing during teleop so they
-                # don't apply when the human releases.
+                # don't apply when the human releases. (schedule.flush() — a
+                # long-standing `client.flush_buffer()` call here named a
+                # method DRTCClient never had, so the drop silently never
+                # happened. Mirrors node/control.py.)
                 try:
-                    client.flush_buffer()
+                    client.schedule.flush()
                 except Exception:  # noqa: BLE001
                     pass
                 # Discontinuity: drop the smoother's state so the first

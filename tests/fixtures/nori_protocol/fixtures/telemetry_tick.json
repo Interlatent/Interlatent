@@ -1,0 +1,14 @@
+{
+  "type": "telemetry",
+  "ts_ns": 12345678901234,
+  "state": {
+    "right_arm_shoulder_pan.pos": 12.4,
+    "right_arm_gripper.pos": 39.7,
+    "x.vel": 0.3,
+    "theta.vel": 0.0
+  },
+  "currents": {
+    "right_arm_gripper": 87,
+    "right_arm_elbow_flex": -12
+  }
+}

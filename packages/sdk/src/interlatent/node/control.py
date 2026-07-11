@@ -285,6 +285,27 @@ def lerobot_control_loop(
             frame = teleop_channel.latest_frame() if teleop_channel is not None else None
             engaged = bool(frame and frame.engaged and frame.deadman)
 
+            # --- OPERATOR E-STOP (ADR 0016) ---
+            # Sticky channel latch first (it survives the 250 ms frame
+            # staleness rule and reconnects), then the live frame flag.
+            # Latching the SafetyGate is robot-agnostic; robots with a
+            # hardware latch (Nori) forward it in their native loops.
+            # Clearing is a human act, never this loop's (FUTURE.md #14).
+            _consume_estop = getattr(teleop_channel, "consume_estop", None)
+            estop_hit = bool(frame and frame.estop) or bool(
+                _consume_estop is not None and _consume_estop()
+            )
+            if (
+                estop_hit
+                and teleop_gate is not None
+                and not teleop_gate.config.estop_latched
+            ):
+                teleop_gate.latch_estop("teleop_frame")
+                _LOG.warning(
+                    "Operator e-stop received — SafetyGate latched; motion and "
+                    "capture suspended until an explicit reset."
+                )
+
             # Set by whichever branch records a tick; drives the one-time
             # feature/teleop-profile report after the branch.
             state_keys = None
@@ -295,7 +316,22 @@ def lerobot_control_loop(
                 and action_keys
                 and len(action_keys) == len(teleop_profile.joint_names)
             )
-            if teleop_ok:
+            estop_latched = (
+                teleop_gate is not None and teleop_gate.config.estop_latched
+            )
+            if estop_latched:
+                # --- E-STOP LATCHED PATH (ADR 0016) ---
+                # No motion, no capture. Queued policy chunks are dropped so
+                # nothing stale fires on reset; the smoother is reset so a
+                # post-reset resume warm-starts from the live pose. The gate
+                # stays latched until an explicit human reset outside this loop.
+                try:
+                    client.schedule.flush()
+                except Exception:
+                    pass
+                if action_filter is not None:
+                    action_filter.reset()
+            elif teleop_ok:
                 # --- TELEOP PATH (mode="targets" only) ---
                 # The hosted teleop engine already resolved an absolute joint
                 # target; we route it through the SafetyGate (workspace +
@@ -361,9 +397,12 @@ def lerobot_control_loop(
                     _tl_age_max_ms = _tl_age_ms
 
                 # Drop policy chunks queued or landing during teleop so they
-                # don't apply when the human releases.
+                # don't apply when the human releases. (schedule.flush() — a
+                # long-standing `client.flush_buffer()` call here named a
+                # method DRTCClient never had, so the drop silently never
+                # happened.)
                 try:
-                    client.flush_buffer()
+                    client.schedule.flush()
                 except Exception:
                     pass
 

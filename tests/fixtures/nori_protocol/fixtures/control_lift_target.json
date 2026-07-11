@@ -1,0 +1,8 @@
+{
+  "type": "control",
+  "seq": 1236,
+  "action": {
+    "left_lift.pos": 120.0,
+    "right_lift.pos": 42.5
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/command.json",
+  "title": "command",
+  "description": "Client -> daemon priority/latched command. estop hard-latches; reset_latch clears e_stop_latched and must be reachable even while in safe-stop.",
+  "type": "object",
+  "required": ["type", "name"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "command" },
+    "name": { "enum": ["estop", "reset_latch"] },
+    "token": { "type": "string", "description": "Auth for reset_latch (and WAN)." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "name": { "const": "reset_latch" } } },
+      "then": { "required": ["token"] }
+    }
+  ]
+}

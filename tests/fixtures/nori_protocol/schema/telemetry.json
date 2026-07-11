@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/telemetry.json",
+  "title": "telemetry",
+  "description": "Daemon -> client, every ~50 Hz tick. state/currents are lerobot dicts. The periodic block (loop_hz..status) appears every TELEMETRY_INTERVAL ticks.",
+  "type": "object",
+  "required": ["type", "ts_ns", "state"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "telemetry" },
+    "ts_ns": { "type": "integer", "description": "Pi monotonic_ns." },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": { "^[a-z0-9_]+\\.(pos|vel)$": { "type": "number" } }
+    },
+    "currents": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Signed raw Present_Current per motor (virtual-tactile / haptics).",
+      "patternProperties": { "^[a-z0-9_]+$": { "type": "integer" } }
+    },
+    "loop_hz": { "type": "number" },
+    "errors": { "type": "integer", "minimum": 0 },
+    "stalled": { "type": "array", "items": { "type": "string" } },
+    "pi_temp_c": { "type": "number" },
+    "throttle_flags": { "type": "integer", "description": "vcgencmd get_throttled bitmask." },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "safety": { "enum": ["ok", "safe_hold", "latched"] },
+        "latch_reason": { "enum": ["obstruction", "estop", null] },
+        "link": { "enum": ["lan", "wan"] },
+        "watchdog": { "enum": ["ok", "warn", "stop"] },
+        "rtt_ms": { "type": "number", "minimum": 0 }
+      },
+      "required": ["safety", "link", "watchdog"]
+    }
+  }
+}

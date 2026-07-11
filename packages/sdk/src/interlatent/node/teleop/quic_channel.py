@@ -138,6 +138,10 @@ class QuicTeleopChannel:
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
+        # Sticky operator e-stop — same semantics as the WS channel (latched
+        # at decode, cleared only by consume_estop; survives staleness,
+        # dedupe, and reconnects). See ADR 0016.
+        self._estop_seen = False
         self._dedup = LatestSeqBuffer()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -372,6 +376,11 @@ class QuicTeleopChannel:
         # keepalives arrive duplicated, and dupes must still count as a
         # viewer being connected (matches the WS channel's semantics).
         self._last_rx_at = time.monotonic()
+        # E-stop latches BEFORE dedupe: a duplicated/late estop datagram must
+        # still stop the robot even when its seq loses the latest-wins race.
+        if frame.estop:
+            with self._lock:
+                self._estop_seen = True
         if not self._dedup.accept(frame.seq):
             return
         self._note_arrival(frame)
@@ -387,6 +396,13 @@ class QuicTeleopChannel:
         if (time.monotonic_ns() - frame.received_at_ns) / 1e6 > _FRAME_STALE_MS:
             return None
         return frame
+
+    def consume_estop(self) -> bool:
+        """Return-and-clear the sticky operator e-stop flag. Mirrors
+        TeleopChannel.consume_estop (see channel.py + ADR 0016)."""
+        with self._lock:
+            seen, self._estop_seen = self._estop_seen, False
+        return seen
 
     @property
     def connected(self) -> bool:

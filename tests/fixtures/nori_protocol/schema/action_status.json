@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/action_status.json",
+  "title": "action_status",
+  "description": "PROPOSED (Phase E / G1). Daemon -> client lifecycle for a motion-bearing control frame that carried an `action_id`. Transitions: accepted -> active -> done | blocked | clamped | timeout. Additive (no protocol_version bump): older clients ignore an unknown type. See docs/phase_e_action_completion.md.",
+  "type": "object",
+  "required": ["type", "action_id", "state"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "action_status" },
+    "action_id": { "type": "string", "description": "Echoes the control frame's action_id." },
+    "state": {
+      "enum": ["accepted", "active", "done", "blocked", "clamped", "timeout"],
+      "description": "accepted=received & valid; active=moving; done=settled within tolerance; blocked=stall latch / estop / thermal / watchdog-stop; clamped=target saturated a range/soft limit; timeout=no terminal state within the daemon's per-action deadline."
+    },
+    "reason": { "type": "string", "description": "Detail for a non-done terminal state, e.g. \"stall:right_arm_elbow_flex\", \"estop:button\", \"clamp:right_arm_shoulder_pan\"." },
+    "ts_ns": { "type": "integer", "description": "Pi monotonic_ns (same clock as telemetry.ts_ns)." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "enum": ["blocked", "timeout"] } } },
+      "then": { "required": ["reason"] }
+    }
+  ]
+}

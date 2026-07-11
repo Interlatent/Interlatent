@@ -1,0 +1,9 @@
+{
+  "type": "perception",
+  "ts_ns": 12345678911234,
+  "source": "front",
+  "objects": [
+    { "label": "cup", "confidence": 0.92, "bbox": [0.41, 0.55, 0.12, 0.2], "xyz": [0.34, -0.05, 0.08], "id": 7 },
+    { "label": "hand", "confidence": 0.78, "bbox": [0.6, 0.3, 0.18, 0.25] }
+  ]
+}

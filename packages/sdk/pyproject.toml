@@ -98,6 +98,23 @@ yam = [
   "numpy",
 ]
 
+# pip install 'interlatent[nori]'
+# Drives the Nori robot through its on-Pi daemon (NoriCoreAgent) over the
+# Nori-Protocol v1 NDJSON contract on TCP localhost:7777 (robot kind "nori";
+# see interlatent.adapters.nori), through a native control loop. Deliberately
+# NOT a dependency on the TypeScript @nori/sdk — the wire contract is the
+# dependency (vendored for tests at tests/fixtures/nori_protocol/). LAN/on-Pi
+# only: the node is expected to run on the robot's Pi next to the daemon.
+# All motion safety is enforced daemon-side; the adapter's keep-alive pump is
+# liveness-tied so it can never defeat the daemon watchdog (ADR 0015).
+nori = [
+  # Camera frames arrive on the daemon's companion ZeroMQ MJPEG channel.
+  "pyzmq>=25",
+  # JPEG decode for those frames (PIL fallback exists but cv2 is the fast path).
+  "opencv-python-headless>=4.8",
+  "numpy",
+]
+
 [project.scripts]
 # Connectivity check: opens a real DRTC session against a managed GPU pod
 # with synthetic observations and reports a latency verdict — no robot needed.

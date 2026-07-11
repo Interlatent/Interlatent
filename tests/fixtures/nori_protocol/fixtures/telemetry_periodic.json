@@ -1,0 +1,23 @@
+{
+  "type": "telemetry",
+  "ts_ns": 12345678911234,
+  "state": {
+    "right_arm_shoulder_pan.pos": 12.4,
+    "right_arm_gripper.pos": 39.7,
+    "x.vel": 0.0,
+    "theta.vel": 0.0
+  },
+  "currents": { "right_arm_gripper": 90 },
+  "loop_hz": 50.1,
+  "errors": 0,
+  "stalled": [],
+  "pi_temp_c": 58.3,
+  "throttle_flags": 0,
+  "status": {
+    "safety": "ok",
+    "latch_reason": null,
+    "link": "wan",
+    "watchdog": "ok",
+    "rtt_ms": 42.0
+  }
+}
