@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from .._clamp_log import warn_clamp
+from .teleop_profiler import NodeTeleopProfiler
 
 _LOG = logging.getLogger("interlatent.node.control")
 
@@ -233,6 +234,18 @@ def lerobot_control_loop(
     else:
         _LOG.info("Action smoothing DISABLED (--robot.action_filter_hz=none).")
 
+    # Local (node-side) per-second CSV profiler — see teleop_profiler.py.
+    # Purely additive: read-only clock samples around work the loop is
+    # already doing, written to a local file on this machine. Never
+    # raises; disables itself silently on any internal failure. Distinct
+    # from the "teleop exec latency" 5s log block below (which it also
+    # captures into the CSV as frame_age_*): that block only logs, it
+    # doesn't persist a file you can open after the session ends.
+    node_profiler = NodeTeleopProfiler(
+        session_id=session_id, robot_kind=robot_kind, fps=fps,
+        teleop_configured=teleop_gate is not None,
+    )
+
     try:
         period = 1.0 / fps if fps > 0 else 1.0 / 30.0
         step_counter = 0
@@ -259,6 +272,13 @@ def lerobot_control_loop(
         _pv_empty_warned = False
         while not should_stop():
             loop_start = time.perf_counter()
+            # Set only if this tick actually reaches that stage (e.g. the
+            # e-stop-latched path skips both, and the policy path skips
+            # both when client.step() returns no action yet) — record_tick
+            # below treats a None as "no sample", not zero.
+            _cmd_at: Optional[float] = None
+            _capture_at: Optional[float] = None
+            _frame_age_ms: Optional[float] = None
 
             obs = robot.get_observation()
 
@@ -378,6 +398,7 @@ def lerobot_control_loop(
                     step_counter, source="teleop",
                 )
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+                _cmd_at = time.perf_counter()
 
                 # Echo the executed target's seq back to the producer so it can
                 # compute command round-trip latency against its own clock.
@@ -395,6 +416,7 @@ def lerobot_control_loop(
                 _tl_age_sum_ms += _tl_age_ms
                 if _tl_age_ms > _tl_age_max_ms:
                     _tl_age_max_ms = _tl_age_ms
+                _frame_age_ms = _tl_age_ms  # also feed the CSV profiler below
 
                 # Drop policy chunks queued or landing during teleop so they
                 # don't apply when the human releases. (schedule.flush() — a
@@ -416,6 +438,7 @@ def lerobot_control_loop(
                     client, obs, action_arr, step_counter,
                     control_source="teleop",
                 )
+                _capture_at = time.perf_counter()
                 step_counter += 1
             elif not policy_enabled:
                 # --- HOLD PATH (teleop recording, disengaged) ---
@@ -429,6 +452,7 @@ def lerobot_control_loop(
                     client, obs, actual_joints, step_counter,
                     control_source="hold",
                 )
+                _capture_at = time.perf_counter()
                 step_counter += 1
             else:
                 # Reset the gate so the next engage starts from the live pose
@@ -473,6 +497,7 @@ def lerobot_control_loop(
                         )
 
                     robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+                    _cmd_at = time.perf_counter()
 
                     # Per-tick capture — non-blocking; queues to a background
                     # thread in the DRTC client that ships via RecordTick.
@@ -480,6 +505,7 @@ def lerobot_control_loop(
                         client, obs, action_arr, step_counter,
                         control_source="policy",
                     )
+                    _capture_at = time.perf_counter()
                     step_counter += 1
 
             # Live-preview tee (headset video): small downscaled JPEGs
@@ -546,6 +572,19 @@ def lerobot_control_loop(
                 _tl_window_started = _tl_now
 
             elapsed = time.perf_counter() - loop_start
+            node_profiler.record_tick(
+                loop_dt_s=elapsed,
+                cmd_dt_s=(_cmd_at - loop_start) if _cmd_at is not None else None,
+                capture_dt_s=(
+                    (_capture_at - _cmd_at)
+                    if (_capture_at is not None and _cmd_at is not None) else None
+                ),
+                frame_age_ms=_frame_age_ms,
+                engaged=engaged,
+                teleop_ok=teleop_ok,
+                estop=estop_latched,
+                over_period=elapsed >= period,
+            )
             if elapsed < period:
                 time.sleep(period - elapsed)
     finally:
@@ -553,6 +592,7 @@ def lerobot_control_loop(
             robot.disconnect()
         except Exception:
             _LOG.warning("Robot disconnect failed", exc_info=True)
+        node_profiler.close()
         _LOG.info(
             "Control loop exiting for session %s; client.close() will "
             "flush recorder queue and trigger server-side upload.",
