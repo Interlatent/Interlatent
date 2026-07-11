@@ -130,10 +130,6 @@ class _WTClientProtocol(QuicConnectionProtocol):
             return True
 
     def quic_event_received(self, event: QuicEvent) -> None:
-        # TEMP diagnostic: log every event so we can see whether the handshake
-        # progresses (ProtocolNegotiated/HandshakeCompleted) or dies early
-        # (ConnectionTerminated) — e.g. GIL starvation by the robot control loop.
-        _LOG.info("teleop(quic) event: %s", type(event).__name__)
         if isinstance(event, ConnectionTerminated):
             _LOG.warning(
                 "teleop(quic) terminated: error_code=%s frame_type=%s reason=%r",
