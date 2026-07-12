@@ -1,28 +1,39 @@
 """Per-session control-loop profiler for the node (Raspberry Pi).
 
-Aggregates one CSV row per second of :func:`control.lerobot_control_loop`
-and writes it to local disk on the node itself — no network round trip,
-no server, no dependency on the relay/GPU pod being reachable. Answers
-"why did the arm get slow/erratic partway through the session" from the
-node's own point of view: total per-tick loop time, time-to-command
-(loop start -> ``robot.send_action`` returning), capture/recording
-overhead (JPEG encode + queueing in ``_capture_tick``), and — on teleop
-ticks — how old the executed frame was (WS receive -> send_action; the
-same window the loop already logs every 5s as "teleop exec latency", now
-also persisted to a file instead of only the log stream).
+Aggregates one row per second of :func:`control.lerobot_control_loop`:
+total per-tick loop time, time-to-command (loop start -> ``robot.
+send_action`` returning), capture/recording overhead (JPEG encode +
+queueing in ``_capture_tick``), and — on teleop ticks — how old the
+executed frame was (the same window the loop already logs every 5s as
+"teleop exec latency"). Answers "why did the arm get slow/erratic
+partway through the session" from the node's own point of view.
+
+Two output channels, in priority order:
+
+  1. **Log line** (``_LOG.info``, tag ``TELEOP-PROFILE``) — the primary,
+     load-bearing channel. Uses the exact same ``logging`` call the
+     control loop's pre-existing "teleop exec latency" line already
+     uses, so it reaches wherever that line reaches (journalctl,
+     console, whatever log aggregation is already configured) with no
+     new moving parts. This is emitted unconditionally once a second,
+     independent of whether the CSV file below is working.
+  2. **CSV file** (``~/.interlatent/teleop_profiles/``) — a convenience
+     copy for opening in a spreadsheet later. Best-effort only: if the
+     directory can't be created, the file can't be opened, or a write
+     fails partway through a session (disk full, permissions changing
+     mid-session, SD card hiccup), the CSV is silently dropped and
+     logging keeps going uninterrupted. A missing/empty CSV file is
+     therefore NOT evidence that profiling isn't running — check the
+     log line first.
 
 Reliability is the whole point of this module, not an afterthought:
-inference/teleop must NEVER be interrupted by profiling.
+inference/teleop must NEVER be interrupted by profiling, and the
+primary channel must not depend on a local file write succeeding.
 
-  * Every public method catches its own exceptions. On any internal
-    failure the profiler logs once and silently disables itself for
-    the rest of the session — it never raises into the control loop.
-  * The output file is flushed after every row (~once/second), so a
-    power loss or SIGKILL on the Pi loses at most the current second,
-    not the whole session.
+  * Every public method catches its own exceptions.
   * Off switch: ``INTERLATENT_NODE_PROFILE=0`` disables entirely (zero
-    overhead — the constructor returns immediately).
-  * Output directory: ``~/.interlatent/teleop_profiles/`` by default
+    overhead — the constructor returns immediately, no log line either).
+  * CSV output directory: ``~/.interlatent/teleop_profiles/`` by default
     (same base as ``~/.interlatent/node.toml`` — see node/cli.py),
     overridable via ``INTERLATENT_PROFILE_DIR``.
 
@@ -117,12 +128,26 @@ class NodeTeleopProfiler:
         self._f: Optional[TextIO] = None
         self._writer = None
         self._closed = False
-        self._warned = False
         self._t0 = time.perf_counter()
         self._reset_window()
 
         if not self.enabled:
             return
+
+        # Log-only header line FIRST, unconditionally — this is the one
+        # guaranteed signal that profiling is active for this session,
+        # independent of whether the CSV file below can be opened.
+        _LOG.info(
+            "TELEOP-PROFILE start session_id=%s robot_kind=%s fps=%s "
+            "teleop_configured=%s host=%s",
+            session_id, robot_kind, fps, teleop_configured, _hostname(),
+        )
+
+        # CSV file: best-effort convenience copy. Any failure here is
+        # logged once and otherwise ignored — record_tick/close below
+        # never check self.enabled to decide whether to LOG, only
+        # whether to WRITE THE FILE, so a failure here never silences
+        # the log line.
         try:
             out = out_dir or _default_dir()
             out.mkdir(parents=True, exist_ok=True)
@@ -145,14 +170,14 @@ class NodeTeleopProfiler:
             self._writer = csv.writer(self._f)
             self._writer.writerow(_CSV_COLUMNS)
             self._f.flush()
-            _LOG.info("teleop profiler: writing %s", self.path)
+            _LOG.info("teleop profiler: also writing CSV to %s", self.path)
         except Exception:
             _LOG.warning(
-                "teleop profiler: failed to open output file; profiling "
-                "disabled for this session (control loop unaffected)",
-                exc_info=True,
+                "teleop profiler: could not open CSV file (dir=%s) — "
+                "continuing with the TELEOP-PROFILE log line only, no "
+                "file will be produced for this session",
+                out_dir or _default_dir(), exc_info=True,
             )
-            self.enabled = False
             self._safe_close_file()
 
     # ---------- hot path ----------
@@ -170,7 +195,7 @@ class NodeTeleopProfiler:
         over_period: bool,
     ) -> None:
         """Record one control-loop tick. Never raises."""
-        if not self.enabled or self._f is None:
+        if not self.enabled:
             return
         try:
             self._ticks += 1
@@ -207,34 +232,33 @@ class NodeTeleopProfiler:
             if now - self._window_start >= 1.0:
                 self._flush_window(now)
         except Exception:
-            # Disable rather than risk a second failure on every future
-            # tick — the control loop's own timing/pacing must never be
-            # perturbed by a profiling bug.
-            if not self._warned:
-                _LOG.warning(
-                    "teleop profiler: record_tick failed; disabling "
-                    "profiling for the rest of this session (control loop "
-                    "unaffected)",
-                    exc_info=True,
-                )
-                self._warned = True
+            # The counting/bookkeeping above is pure arithmetic and
+            # should never raise; if it somehow does, disable rather
+            # than risk repeating the failure on every future tick.
+            _LOG.warning(
+                "teleop profiler: record_tick failed; disabling for the "
+                "rest of this session (control loop unaffected)",
+                exc_info=True,
+            )
             self.enabled = False
             self._safe_close_file()
 
     def close(self) -> None:
-        """Flush the final partial window and close the file. Never raises."""
+        """Flush the final partial window, log a close line, close the
+        file. Never raises."""
         if self._closed:
             return
         self._closed = True
-        if not self.enabled or self._f is None:
+        if not self.enabled:
             return
         try:
             self._flush_window(time.perf_counter())
         except Exception:
             pass
-        finally:
-            self._safe_close_file()
-            _LOG.info("teleop profiler: closed %s", self.path)
+        _LOG.info(
+            "TELEOP-PROFILE end path=%s", self.path if self._f or self.path else "(log-only, no file)",
+        )
+        self._safe_close_file()
 
     # ---------- internals ----------
 
@@ -258,31 +282,64 @@ class NodeTeleopProfiler:
         self._frame_age_max = 0.0
         self._over_period = 0
 
+    def _row_values(self, now: float) -> list:
+        cmd_avg = round((self._cmd_dt_sum / self._cmd_n) * 1000, 2) if self._cmd_n else None
+        cmd_max = round(self._cmd_dt_max * 1000, 2) if self._cmd_n else None
+        cap_avg = round((self._capture_dt_sum / self._capture_n) * 1000, 2) if self._capture_n else None
+        cap_max = round(self._capture_dt_max * 1000, 2) if self._capture_n else None
+        age_avg = round(self._frame_age_sum / self._frame_age_n, 1) if self._frame_age_n else None
+        age_max = round(self._frame_age_max, 1) if self._frame_age_n else None
+        return [
+            round(now - self._t0, 1),
+            self._ticks, self._engaged_ticks, self._teleop_ticks,
+            self._policy_ticks, self._estop_ticks,
+            round((self._loop_dt_sum / self._ticks) * 1000, 2),
+            round(self._loop_dt_max * 1000, 2),
+            cmd_avg, cmd_max, cap_avg, cap_max, age_avg, age_max,
+            self._over_period,
+        ]
+
     def _flush_window(self, now: float) -> None:
         if self._ticks == 0:
             # Nothing happened this window (e.g. between sessions) — skip
-            # rather than write an all-blank row.
+            # rather than log/write an all-blank row.
             self._window_start = now
             return
-        row = [
-            round(now - self._t0, 1),
-            self._ticks,
-            self._engaged_ticks,
-            self._teleop_ticks,
-            self._policy_ticks,
-            self._estop_ticks,
-            round((self._loop_dt_sum / self._ticks) * 1000, 2),
-            round(self._loop_dt_max * 1000, 2),
-            round((self._cmd_dt_sum / self._cmd_n) * 1000, 2) if self._cmd_n else "",
-            round(self._cmd_dt_max * 1000, 2) if self._cmd_n else "",
-            round((self._capture_dt_sum / self._capture_n) * 1000, 2) if self._capture_n else "",
-            round(self._capture_dt_max * 1000, 2) if self._capture_n else "",
-            round(self._frame_age_sum / self._frame_age_n, 1) if self._frame_age_n else "",
-            round(self._frame_age_max, 1) if self._frame_age_n else "",
-            self._over_period,
-        ]
-        self._writer.writerow(row)
-        self._f.flush()
+        values = self._row_values(now)
+
+        # 1. LOG — primary channel, always attempted, independent of the
+        #    CSV file's state.
+        try:
+            (
+                t_uptime, ticks, eng, tel, pol, estop, loop_avg, loop_max,
+                cmd_avg, cmd_max, cap_avg, cap_max, age_avg, age_max, over,
+            ) = values
+            _LOG.info(
+                "TELEOP-PROFILE t=%ss ticks=%d(eng=%d tel=%d pol=%d estop=%d) "
+                "loop_ms=%.2f/%.2f cmd_ms=%s/%s capture_ms=%s/%s "
+                "frame_age_ms=%s/%s over_period=%d",
+                t_uptime, ticks, eng, tel, pol, estop, loop_avg, loop_max,
+                cmd_avg, cmd_max, cap_avg, cap_max, age_avg, age_max, over,
+            )
+        except Exception:
+            pass  # logging itself must never break the loop either
+
+        # 2. CSV — best-effort secondary copy. A failure here stops
+        #    future file writes but leaves logging (and the profiler as
+        #    a whole) running.
+        if self._f is not None:
+            try:
+                self._writer.writerow(values)
+                self._f.flush()
+            except Exception:
+                _LOG.warning(
+                    "teleop profiler: CSV write failed; the TELEOP-PROFILE "
+                    "log line above (and future ones) is now the only "
+                    "record for this session",
+                    exc_info=True,
+                )
+                self._safe_close_file()
+
         self._reset_window()
 
     def _safe_close_file(self) -> None:
