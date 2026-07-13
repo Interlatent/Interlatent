@@ -98,11 +98,21 @@ def encode_state_datagram(qpos, seq: int, applied_seq: int = -1) -> bytes:
 
     ``applied_seq`` echoes the target seq the control loop most recently
     executed, so the browser can compute command round-trip latency against
-    its own clock (no cross-machine clock sync needed)."""
+    its own clock (no cross-machine clock sync needed).
+
+    ``ts_ms`` is the node's monotonic clock at send — the SAME clock domain
+    as the preview tee's video-frame ``ts_ms`` header. State datagrams are
+    tiny and drop-don't-queue (never parked behind a stalled congestion
+    window), so the browser's min over recent ``(arrival - ts_ms)`` is a
+    live clock-skew anchor: subtracting it from a video frame's skew gives
+    ABSOLUTE glass-to-eye video age, honest even while video frames queue —
+    the case the old above-fastest-frame lag metric absorbed into its
+    baseline."""
     return json.dumps({
         "type": "state",
         "seq": int(seq),
         "applied_seq": int(applied_seq),
+        "ts_ms": time.monotonic_ns() // 1_000_000,
         "qpos": [float(x) for x in qpos],
     }).encode("utf-8")
 

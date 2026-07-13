@@ -222,6 +222,15 @@ class UVCCamera:
         dev = self.spec.device
         target: Any = int(dev) if dev.isdigit() else dev
         cap = cv2.VideoCapture(target)
+        # V4L2 keeps a driver-side queue of captured frames (OpenCV default
+        # 4). A control loop that consumes slower than the camera produces
+        # (e.g. 27 Hz loop vs 30 fps camera) leaves that queue permanently
+        # full, so every read() returns the OLDEST buffered frame — a
+        # standing ~130 ms of staleness added BEFORE the capture timestamp,
+        # invisible to every downstream latency metric. One buffer = read()
+        # always dequeues the freshest frame. Best-effort: backends that
+        # don't support the property ignore the set.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.spec.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.spec.height)
         cap.set(cv2.CAP_PROP_FPS, self.spec.fps)
