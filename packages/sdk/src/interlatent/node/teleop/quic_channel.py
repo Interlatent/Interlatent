@@ -92,6 +92,23 @@ class LatestSeqBuffer:
         self._last_seq = -1
 
 
+def _advance_preview_deadline(next_due: float, now: float, period_s: float) -> float:
+    """Next preview deadline after a send at ``now``. Pure + unit-tested.
+
+    Credit-based: advance one period from where the deadline WAS, not from
+    ``now`` — the deadline is only sampled once per control tick, so
+    anchoring on ``now`` rounds every gap up to a whole number of ticks and
+    the delivered rate quantizes below the configured one (46 ms ticks vs a
+    50 ms period → every other tick → half rate). Advancing the deadline
+    itself lets a slightly-late send borrow from the next interval, so the
+    rate averages out to exactly the configured one. The ``now`` floor keeps
+    a stale deadline (viewer-absent gap, or ticks slower than the period)
+    from scheduling sends in the past — no catch-up burst; the rate simply
+    tops out at the tick rate.
+    """
+    return max(next_due + period_s, now)
+
+
 def encode_state_datagram(qpos, seq: int, applied_seq: int = -1) -> bytes:
     """Node→browser joint-state datagram (JSON). ``qpos`` is action-order,
     robot-native units — same convention as RecordTick's observation_state.
@@ -173,7 +190,7 @@ class QuicTeleopChannel:
         self._video_enabled = os.environ.get("INTERLATENT_QUIC_VIDEO", "1") != "0"
         self._preview_period_s = _preview_period_s()
         self._last_rx_at = 0.0  # viewer presence: any decoded target frame
-        self._last_preview_at = 0.0
+        self._next_preview_due = 0.0  # credit deadline; see preview_due()
         self._preview_seq = 0
         self._pv_window = 0  # frames handed to the child this stats window
         self._pv_logged_once = False
@@ -455,10 +472,16 @@ class QuicTeleopChannel:
 
         Gates (cheapest first): kill switch, link up, viewer present within
         the last few seconds (so idle sessions pay zero encode cost), preview
-        period elapsed. Unlike the WS channel there is no send-slot check —
+        deadline reached. Unlike the WS channel there is no send-slot check —
         the hand-off to the child is a non-blocking loopback sendto and load
         shedding (in-flight cap/TTL) lives in the child, which is the only
-        side that can see stream completion."""
+        side that can see stream completion.
+
+        The deadline is credit-based (see _advance_preview_deadline): this
+        method is only sampled once per control tick, and a naive
+        "period elapsed since last send" check beats against the tick rate —
+        46 ms ticks vs a 50 ms period quantizes to every-other-tick and caps
+        delivered fps at half the configured rate."""
         if not self._video_enabled:
             return False
         if not self._connected or self._child_addr is None:
@@ -466,9 +489,7 @@ class QuicTeleopChannel:
         now = time.monotonic()
         if now - self._last_rx_at > _VIEWER_PRESENCE_S:
             return False
-        if now - self._last_preview_at < self._preview_period_s:
-            return False
-        return True
+        return now >= self._next_preview_due
 
     def send_preview(self, jpegs: Dict[str, bytes], ts_ns: int) -> None:
         """Hand one preview set (cam → JPEG bytes) to the child, one
@@ -484,7 +505,9 @@ class QuicTeleopChannel:
         addr = self._child_addr
         if sock is None or addr is None or not self._connected:
             return
-        self._last_preview_at = time.monotonic()
+        self._next_preview_due = _advance_preview_deadline(
+            self._next_preview_due, time.monotonic(), self._preview_period_s
+        )
         self._preview_seq += 1
         ts_ms = int(ts_ns) // 1_000_000
         for cam, jpeg in jpegs.items():

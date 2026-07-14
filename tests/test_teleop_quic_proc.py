@@ -332,16 +332,45 @@ def test_preview_due_gating(channel):
     _make_viewer_present(chan, sim)
     assert chan.preview_due()
 
-    # Sending consumes the period budget...
+    # Steady state: a send advances the credit deadline by exactly one
+    # period, so the next tick is not due until the period elapses.
+    now = time.monotonic()
+    chan._next_preview_due = now
     chan.send_preview({"cam": b"\xff\xd8jpeg"}, ts_ns=1_000_000_000)
+    assert chan._next_preview_due == pytest.approx(now + chan._preview_period_s)
     assert not chan.preview_due()
-    # ...until the period elapses.
-    chan._last_preview_at = 0.0
+    # ...until the deadline passes.
+    chan._next_preview_due = 0.0
     assert chan.preview_due()
 
     # No viewer (no recent target datagrams) → no encode cost.
     chan._last_rx_at = time.monotonic() - 60.0
     assert not chan.preview_due()
+
+
+def test_preview_deadline_credit_beats_tick_quantization():
+    # A 46 ms control tick sampling a 50 ms preview period: naive
+    # "now + period" anchoring sends every OTHER tick (~10.9 fps); the
+    # credit deadline must hold the configured 20 fps average.
+    period, tick = 0.05, 0.046
+    next_due, sends, t = 0.0, 0, 0.0
+    while t < 10.0:
+        if t >= next_due:
+            sends += 1
+            next_due = qc._advance_preview_deadline(next_due, t, period)
+        t += tick
+    assert 195 <= sends <= 202
+
+
+def test_preview_deadline_no_burst_after_gap():
+    period = 0.05
+    # Deadline long stale (viewer was absent): the send must not schedule
+    # the next deadline in the past (catch-up burst)...
+    nd = qc._advance_preview_deadline(0.0, now=500.0, period_s=period)
+    assert nd == 500.0
+    # ...and the following send resumes the normal cadence.
+    nd = qc._advance_preview_deadline(nd, now=500.001, period_s=period)
+    assert nd == pytest.approx(500.05)
 
 
 def test_preview_kill_switch(monkeypatch):

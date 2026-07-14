@@ -677,7 +677,9 @@ def _capture_tick(
                 if cv2 is not None:
                     img = arr
                     if img.ndim == 3 and img.shape[2] == 3:
-                        img = np.ascontiguousarray(img[..., ::-1])  # RGB->BGR
+                        # cvtColor over a numpy flip: releases the GIL and is
+                        # faster than the fancy-index copy on the control thread.
+                        img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
                     ok, buf = cv2.imencode(
                         ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85],
                     )
@@ -775,7 +777,9 @@ def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
             try:
                 img = arr
                 if img.ndim == 3 and img.shape[2] == 3:
-                    img = np.ascontiguousarray(img[..., ::-1])  # RGB->BGR
+                    # cvtColor over a numpy flip: releases the GIL (see
+                    # _capture_tick).
+                    img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
                 if (new_w, new_h) != (w, h):
                     img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 ok, buf = cv2.imencode(
