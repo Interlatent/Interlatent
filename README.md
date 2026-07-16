@@ -145,53 +145,71 @@ than hardware-measured. Treat it as unverified.
 The file people don't expect, and the most important one here. A `RobotProfile` is the
 kinematic truth about an arm: joint names **and their order**, software limits, per-joint
 velocity caps, and the rest pose. The `SafetyGate` enforces it, `home` is generated from it,
-`action()` validates against it, and behaviors are checked against it at load. LeRobot can
-give us joint names and live positions, but it has no notion of a safe velocity cap or a
-declared home, which is why this file exists at all.
+`action()` validates against it, and behaviors are checked against it at load.
+
+It exists because no vendor gives you all of it. A driver (or LeRobot) hands you joint names
+and live positions; a URDF hands you mechanical limits. Neither declares a *safe per-tick
+velocity cap* or a *home pose*, and those are precisely what you need to move an arm without
+breaking it.
+
+YAM is the instructive case. SO-101 is a 6-joint arm in degrees and LeRobot already carries
+most of its tooling; YAM is a 14-DOF bimanual robot on raw CAN, where this file is doing all
+the work:
 
 ```python
 # packages/sdk/src/interlatent/node/teleop/robot_profile.py   (comments abridged)
 
-SO101_JOINT_NAMES = (
-    "shoulder_pan", "shoulder_lift", "elbow_flex",
-    "wrist_flex", "wrist_roll", "gripper",
-)
+# Units are i2rt/MuJoCo native: RADIANS for revolute joints, gripper [0, 1].
+# (SO-101 and Koch are in degrees. The profile is where that difference lives.)
+_YAM_ARM_JOINT_NAMES = ("joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5")
 
-SO101_JOINT_LIMITS = (        # degrees; deliberately tighter than the motor stops,
-    (-180.0, 180.0),          # so the software clamp trips before the hardware does
-    (-110.0, 110.0),
-    (-110.0, 110.0),
-    (-100.0, 100.0),
-    (-180.0, 180.0),
-    (   0.0, 100.0),          # gripper: 0 closed, 100 open
+# EXACT hardware limits, transcribed from i2rt's yam.urdf <limit lower=… upper=…>.
+_YAM_ARM_LIMITS = (
+    (-2.61799, 3.13),     # joint_0 / URDF joint1
+    (0.0, 3.65),          # joint_1 / URDF joint2   lower=0: home sits at this edge
+    (0.0, 3.13),          # joint_2 / URDF joint3   lower=0: home sits at this edge
+    (-1.5708, 1.5708),    # joint_3 / URDF joint4
+    (-1.5708, 1.5708),    # joint_4 / URDF joint5
+    (-2.0944, 2.0944),    # joint_5 / URDF joint6
 )
+_YAM_GRIPPER_LIMIT = (0.0, 1.0)      # 0 closed, 1 open. Not in the URDF; placeholder.
 
-SO101_MAX_VELOCITY = (        # deg/sec
-    120.0,   # shoulder_pan     no gravity load
-    50.0,    # shoulder_lift    gravity-loaded, so kept slow on purpose
-    80.0,    # elbow_flex       partially gravity-loaded
-    180.0,   # wrist_flex
-    240.0,   # wrist_roll       no load
-    400.0,   # gripper          small and fast
-)
+# The URDF declares velocity=10 rad/s on every joint (the motor max). That is far too
+# fast for the per-tick SafetyGate clamp, so we cap 5x below it and widen only after
+# reading the DRTC-DEBUG joints log on real hardware.
+_YAM_ARM_MAX_VELOCITY = tuple(2.0 for _ in _YAM_ARM_JOINT_NAMES)
+_YAM_GRIPPER_MAX_VELOCITY = 4.0
 
-SO101_REST_POSE = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)   # <- this is what `home` moves to
+_YAM_ARM_REST = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+_YAM_GRIPPER_REST = 1.0              # open. So `home` = 6 zeros + open gripper, per arm.
 
-SO101_PROFILE = RobotProfile(
-    name="so101_follower",
-    joint_names=SO101_JOINT_NAMES,
-    joint_limits=SO101_JOINT_LIMITS,
-    max_velocity=SO101_MAX_VELOCITY,
-    rest_pose=SO101_REST_POSE,
-)
+# One 7-joint block per side (6 revolute + gripper last), composed left-then-right
+# into the three topologies the adapter can report:
+YAM_PROFILE       = _yam_profile("yam",       ("left", "right"))   # 14 joints
+YAM_LEFT_PROFILE  = _yam_profile("yam_left",  ("left",))           #  7 joints
+YAM_RIGHT_PROFILE = _yam_profile("yam_right", ("right",))          #  7 joints
 ```
 
-Those velocity numbers are a good example of why the profile is hand-tuned rather than
-imported: SO-101's Feetech servos are position-only PID with limited torque, so under
-gravity `shoulder_lift` cannot actually slew at its unloaded maximum. Cap it too high and
-the commanded position runs ahead of the real one and the arm *feels stuck*. (Deriving as
-much of this as possible from the manufacturer's URDF instead is a
-[future direction](#-future-directions).)
+Three decisions in there are worth calling out, because each is judgement a "just import the
+URDF" approach would throw away:
+
+- **The limits are the URDF's, unmodified** - and deliberately *not* inset below the
+  mechanical range, the way SO-101's are. YAM's all-zeros home sits exactly on the lower
+  edge of `joint_1` and `joint_2` (URDF `lower=0`), so insetting them would make the robot
+  unable to home.
+- **The velocity caps are ours, not the URDF's.** The URDF says 10 rad/s because that's the
+  motor's maximum. We ship 2.0. A velocity cap here is a per-tick safety clamp, not a spec
+  sheet.
+- **The gripper isn't in the URDF at all** (i2rt combines it in separately from the
+  LINEAR_4310 model), so its `[0, 1]` range is still a placeholder pending hardware.
+
+That tension - the URDF is authoritative for *limits* but wrong for *caps*, and silent about
+the gripper - is exactly why profiles are still hand-written, and what makes
+[deriving them from URDFs](#-future-directions) a real design problem rather than a chore.
+
+One more load-bearing detail: `joint_names` order here **equals**
+`YAMNativeRobot.action_features`, and `base.py` raises if they ever diverge. A policy binds
+to joint *order*, not names, so this alignment is a correctness property, not a convention.
 
 **Adding a robot to the safety/behaviors/teleop world is: write one of these, register it in
 `_PROFILES`.**
