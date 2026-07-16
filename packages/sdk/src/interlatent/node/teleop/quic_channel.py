@@ -72,6 +72,35 @@ _SEQ_RESET_GAP = 1000
 _STATS_LOG_PERIOD_S = 5.0
 # Supervisor read cadence: recvfrom timeout doubles as the supervision tick.
 _SUPERVISE_TICK_S = 0.5
+# Rate-limit for answering browser ``request_spec`` datagrams: the browser
+# retries the request until it sees the spec, so without a floor a burst of
+# retries would open a burst of uni streams. One every this often is plenty.
+_SPEC_SEND_MIN_INTERVAL_S = 0.2
+
+
+def frame_spec_wire(spec_obj: dict, robot_kind: str) -> bytes:
+    """Frame a kinematic_spec for the browser: ``uint16-BE header length +
+    JSON {"type":"spec","robot_kind"} + spec-JSON body`` — the SAME envelope
+    the preview tee uses for video (header ``type`` distinguishes them), so the
+    browser's inbound-uni-stream reader is shared. Pure + unit-tested."""
+    header = json.dumps(
+        {"type": "spec", "robot_kind": robot_kind}
+    ).encode("utf-8")
+    body = json.dumps(spec_obj).encode("utf-8")
+    return struct.pack(">H", len(header)) + header + body
+
+
+def is_request_spec(payload: bytes) -> bool:
+    """True if a browser→node datagram is a ``request_spec`` control message
+    (not a target frame). Cheap substring guard first so the ~60 Hz target
+    hot path never pays a JSON parse. Pure + unit-tested."""
+    if b"request_spec" not in payload:
+        return False
+    try:
+        obj = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return False
+    return isinstance(obj, dict) and obj.get("type") == "request_spec"
 
 
 class LatestSeqBuffer:
@@ -154,14 +183,24 @@ class QuicTeleopChannel:
         api_key: str,
         token_path: Optional[str] = None,
         bypass_key: Optional[str] = None,
+        robot_kind: Optional[str] = None,
     ) -> None:
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
         self._bypass_key = bypass_key
+        self._robot_kind = robot_kind
         self._token_path = (
             token_path or f"/api/v1/inference/sessions/{session_id}/teleop-token"
         )
+
+        # Node-sourced kinematic_spec: the framed bytes we ship to the browser
+        # (on its own uni stream) when it sends a ``request_spec`` datagram, so
+        # it can build its IK solver from THIS node's installed robot data
+        # rather than the platform backend. Loaded best-effort at start(); None
+        # when no local data exists (browser falls back to the HTTP endpoint).
+        self._spec_wire: Optional[bytes] = None
+        self._last_spec_sent_at = 0.0
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
@@ -212,10 +251,40 @@ class QuicTeleopChannel:
         self._arr_seq_last = 0
         self._arr_window_started = time.monotonic()
 
+    def _load_spec_wire(self) -> Optional[bytes]:
+        """Frame this node's installed kinematic_spec, or None when there is no
+        local robot data (the browser then falls back to the platform's HTTP
+        ``kinematic-spec`` endpoint). Best-effort — never raises into start()."""
+        kind = (self._robot_kind or "").strip()
+        if not kind:
+            return None
+        try:
+            from interlatent import robots
+            spec = robots.load_kinematic_spec(kind)
+        except Exception as exc:
+            _LOG.info(
+                "teleop(quic) no local kinematic_spec for robot_kind=%r (%s); "
+                "browser will fetch it from the platform instead", kind, exc,
+            )
+            return None
+        try:
+            wire = frame_spec_wire(spec, kind)
+        except Exception as exc:
+            _LOG.warning(
+                "teleop(quic) failed to frame kinematic_spec for %r: %s", kind, exc
+            )
+            return None
+        _LOG.info(
+            "teleop(quic) serving local kinematic_spec for robot_kind=%r (%d bytes)",
+            kind, len(wire),
+        )
+        return wire
+
     # -- lifecycle --
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._spec_wire = self._load_spec_wire()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("127.0.0.1", 0))
         sock.settimeout(_SUPERVISE_TICK_S)
@@ -396,6 +465,12 @@ class QuicTeleopChannel:
             return
         if kind != _quic_ipc.TYPE_DATA or addr != self._child_addr:
             return
+        # A browser control datagram, not a target frame: answer its request
+        # for our kinematic_spec on a uni stream (via the child). Checked before
+        # frame decode; the substring guard keeps the target hot path parse-free.
+        if is_request_spec(payload):
+            self._maybe_send_spec(addr)
+            return
         frame = decode_target_datagram(payload)
         if frame is None:
             return
@@ -413,6 +488,26 @@ class QuicTeleopChannel:
         self._note_arrival(frame)
         with self._lock:
             self._latest = frame
+
+    def _maybe_send_spec(self, addr) -> None:
+        """Hand the framed kinematic_spec to the child (TYPE_SPEC) to ship on a
+        uni stream to the browser. Throttled: the browser retries until it sees
+        the spec, so we cap how often a retry burst can open streams. Silent
+        no-op when we have no local spec (browser uses the HTTP fallback)."""
+        wire = self._spec_wire
+        if wire is None or not self._connected:
+            return
+        now = time.monotonic()
+        if now - self._last_spec_sent_at < _SPEC_SEND_MIN_INTERVAL_S:
+            return
+        sock = self._sock
+        if sock is None:
+            return
+        self._last_spec_sent_at = now
+        try:
+            sock.sendto(_quic_ipc.encode_spec(wire), addr)
+        except OSError:
+            pass
 
     # -- read API (control loop) --
     def latest_frame(self) -> Optional[TeleopFrame]:
@@ -577,4 +672,6 @@ __all__ = [
     "LatestSeqBuffer",
     "encode_state_datagram",
     "decode_target_datagram",
+    "frame_spec_wire",
+    "is_request_spec",
 ]

@@ -23,6 +23,14 @@ Framing (both directions): ``type_byte + payload``.
     lets the child enforce its per-camera in-flight cap without parsing the
     wire bytes (which stay opaque, like DATA payloads). One loopback datagram
     per camera per preview tick (~8-15 KB JPEG, well under the 64 KB limit).
+  * ``TYPE_SPEC`` — parent→child only: the framed kinematic_spec to ship to the
+    browser on its own uni stream, in answer to a browser ``request_spec``
+    datagram (QUIC path: the browser builds its IK solver from the node's
+    installed robot data instead of the platform backend). Payload is the
+    browser-facing wire bytes verbatim (same ``uint16 header + JSON header +
+    body`` envelope as video, header ``type:"spec"``), opaque to the child.
+    Unlike video it is NOT governed/shed — it is one-shot and load-bearing, so
+    the child opens its stream unconditionally.
 
 The parent pins the child's address from the first hello whose ``cookie``
 matches the one it passed via env, and drops datagrams from anyone else.
@@ -35,6 +43,7 @@ from typing import Optional, Tuple
 TYPE_DATA = 0x00
 TYPE_CTRL = 0x01
 TYPE_VIDEO = 0x02
+TYPE_SPEC = 0x03
 
 # Loopback socket buffers, both ends. The parent's reader thread is still
 # GIL-exposed; sized so control datagrams (~60 Hz dup'd ~1.2 KB) plus the
@@ -94,6 +103,13 @@ def parse_video(payload: bytes) -> Optional[Tuple[str, bytes]]:
     return cam, wire
 
 
+def encode_spec(wire: bytes) -> bytes:
+    """Frame the kinematic_spec wire bytes for the child (TYPE_SPEC). ``wire``
+    is the browser-facing envelope, sent verbatim on a uni stream — opaque
+    here, exactly like a video frame's wire bytes."""
+    return bytes((TYPE_SPEC,)) + wire
+
+
 def parse_ctrl(payload: bytes) -> Optional[dict]:
     """Decode a TYPE_CTRL payload. None on garbage (never raises)."""
     try:
@@ -107,6 +123,7 @@ __all__ = [
     "TYPE_DATA",
     "TYPE_CTRL",
     "TYPE_VIDEO",
+    "TYPE_SPEC",
     "SOCK_BUF_BYTES",
     "ENV_PARENT_PORT",
     "ENV_COOKIE",
@@ -118,6 +135,7 @@ __all__ = [
     "encode_data",
     "encode_ctrl",
     "encode_video",
+    "encode_spec",
     "parse",
     "parse_ctrl",
     "parse_video",

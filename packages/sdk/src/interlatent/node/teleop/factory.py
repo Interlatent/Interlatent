@@ -31,6 +31,7 @@ def make_teleop_channel(
     api_key: str,
     token_path: Optional[str] = None,
     bypass_key: Optional[str] = None,
+    robot_kind: Optional[str] = None,
 ):
     probe_path = (
         token_path or f"/api/v1/inference/sessions/{session_id}/teleop-token"
@@ -76,5 +77,8 @@ def make_teleop_channel(
             _LOG.warning("QUIC teleop unavailable (%s); falling back to ws", exc)
         else:
             _LOG.info("teleop transport=quic session=%s", session_id)
-            return QuicTeleopChannel(**common)
+            # robot_kind is quic-only: the browser owns IK there and builds its
+            # solver from the node-served spec. The WS TeleopChannel has no use
+            # for it (the pod runs IK), so it stays out of the shared `common`.
+            return QuicTeleopChannel(robot_kind=robot_kind, **common)
     return TeleopChannel(**common)

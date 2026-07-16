@@ -113,6 +113,11 @@ nori = [
   # JPEG decode for those frames (PIL fallback exists but cv2 is the fast path).
   "opencv-python-headless>=4.8",
   "numpy",
+  # Embodiment data (URDF, ik_config, kinematic_spec) read via interlatent.robots.
+  # A separate distribution, not data inside `interlatent`, because the SDK and
+  # the internal engine are both the `interlatent` import package and collide;
+  # see packaging/build_robot_wheel.py. Meshes are fetched from its meshes.lock.
+  "interlatent-robot-nori>=0.1",
 ]
 
 [project.scripts]

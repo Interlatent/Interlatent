@@ -42,9 +42,46 @@ it validates the path to a managed pod.
 
 **Robot kind**:
 The robot family a **Node** drives, set with `--robot <name>` (carried as
-`robot_kind`). It selects the control loop: a registered vendor robot uses its
-native loop, otherwise the bundled LeRobot wrapper runs. _Avoid_: conflating with
-the `--loop module:function` override, which is a generic escape hatch, not a kind.
+`robot_kind`). It does three jobs off one string: it selects the control loop (a
+registered vendor robot uses its native loop, otherwise the bundled LeRobot
+wrapper runs); it is the **S3 bundle key** the platform resolves the pod's URDF +
+meshes + `ik_config.json` under (`urdf/{robot_kind}/{version}/`); and it is the
+**Robot data** key an operator installs with `pip install interlatent[<kind>]`.
+Because all three must agree, the kind MUST equal the string the live node
+reports — an early rig shipped its bundle under `so101_bimanual` while the node
+reported `nori`, leaving an unreachable prefix; `nori` is canonical. _Avoid_:
+conflating with the `--loop module:function` override, which is a generic escape
+hatch, not a kind.
+
+**Robot data**:
+A robot kind's teleop embodiment files — the URDF, `ik_config.json`,
+`kinematic_spec.json`, and `meshes.lock` — shipped as a standalone
+`interlatent-robot-<kind>` distribution (top-level namespace `interlatent_robots`,
+read via `interlatent.robots`). Kept out of the `interlatent` package on purpose:
+the SDK and the internal engine are both the `interlatent` import package and
+would collide on install. _Avoid_: calling the whole thing a "bundle" — that word
+is the platform's S3 artifact; the wheel is the operator-installable mirror of the
+same source.
+
+**IK config** (`ik_config.json`):
+The hand-authored half of **Robot data**: the robot-specific tuning the
+retarget/IK stage reads — solver damping, per-joint `max_dq`, reach limits,
+translation/rotation scales, `webxr_to_base_R`, gripper range, unit affines. The
+five browser-mapper fields are surfaced to the headset as `ik_hints`. Editing it
+without regenerating the **Kinematic spec** applies only half a tuning change.
+_Avoid_: hand-editing the spec to tune — this is the file you tune.
+
+**Kinematic spec** (`kinematic_spec.json`):
+The **generated** half: a compact serial-chain descriptor the in-browser IK solver
+walks, exported from URDF + **IK config** by the engine's MuJoCo step. A kind whose
+data is missing it makes the arms do nothing (the browser can't build a solver).
+On the **QUIC** teleop path the **Node** serves this spec to the browser directly
+over the relay (from its installed **Robot data**), and the browser reads *both*
+the solver parameters and the mapper hints from it — so it is the single source of
+browser kinematics there, and no platform backend is needed (the hosted HTTP
+`kinematic-spec` endpoint is only a fallback). On the WS path the pod owns IK and
+the browser needs only the mapper hints, which ride in the teleop token. _Avoid_:
+hand-editing — it is derived, and any edit is overwritten on regen.
 
 **Adapter**:
 A **robot adapter** — a subpackage under `interlatent.adapters.<vendor>` that maps

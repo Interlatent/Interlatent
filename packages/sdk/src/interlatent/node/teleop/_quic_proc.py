@@ -150,6 +150,7 @@ class _ParentLink(asyncio.DatagramProtocol):
         self._transport: Optional[asyncio.DatagramTransport] = None
         self._relay_send: Optional[Callable[[bytes], None]] = None
         self._video_send: Optional[Callable[[str, bytes], None]] = None
+        self._spec_send: Optional[Callable[[bytes], None]] = None
         self.video_governor: Optional[_VideoGovernor] = None  # stats only
         self.wt_session = None  # live session (datagram-drop counter), stats only
         self.rx_from_parent = 0  # DATA datagrams parent→relay
@@ -192,12 +193,26 @@ class _ParentLink(asyncio.DatagramProtocol):
                 vsend(*parsed_video)
             except Exception:
                 pass
+            return
+        if kind == _quic_ipc.TYPE_SPEC:
+            # The framed kinematic_spec — ship it on its own uni stream,
+            # ungoverned (one-shot and load-bearing, unlike per-frame video).
+            ssend = self._spec_send
+            if ssend is None:
+                return  # no session up — the browser retries its request
+            try:
+                ssend(payload)
+            except Exception:
+                pass
 
     def set_relay_sender(self, fn: Optional[Callable[[bytes], None]]) -> None:
         self._relay_send = fn
 
     def set_video_sender(self, fn: Optional[Callable[[str, bytes], None]]) -> None:
         self._video_send = fn
+
+    def set_spec_sender(self, fn: Optional[Callable[[bytes], None]]) -> None:
+        self._spec_send = fn
 
     def send_data(self, payload: bytes) -> None:
         if self._transport is not None:
@@ -274,9 +289,16 @@ async def _session_loop(cfg: _Cfg, link: _ParentLink, stop: asyncio.Event) -> No
                         if sid is not None:
                             governor.note_open(sid, cam)
 
+                def _send_spec(wire: bytes) -> None:
+                    # One uni stream, ungoverned: the kinematic_spec is one-shot
+                    # and load-bearing (the browser can't build its solver
+                    # without it), so it must never be cap-shed like video.
+                    wt.open_uni_stream(wire)
+
                 link.video_governor = governor
                 link.wt_session = wt
                 link.set_video_sender(_send_video)
+                link.set_spec_sender(_send_spec)
                 link.set_relay_sender(wt.send_datagram)
                 link.send_control({"t": "connected"})
                 _LOG.info("quic-proc connected session=%s", cfg.session_id)
@@ -294,6 +316,7 @@ async def _session_loop(cfg: _Cfg, link: _ParentLink, stop: asyncio.Event) -> No
         finally:
             link.set_relay_sender(None)
             link.set_video_sender(None)
+            link.set_spec_sender(None)
             link.wt_session = None
             gov = link.video_governor
             if gov is not None:

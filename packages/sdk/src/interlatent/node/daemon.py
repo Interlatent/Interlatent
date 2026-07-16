@@ -570,6 +570,9 @@ class NodeDaemon:
                     if is_recording else None
                 ),
                 bypass_key=self.cfg.bypass_key,
+                # Lets the quic channel serve this robot's kinematic_spec to the
+                # browser from the installed interlatent[<kind>] data.
+                robot_kind=self.cfg.robot_kind,
             )
             teleop_channel.start()
 
