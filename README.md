@@ -15,7 +15,7 @@ robot once (an adapter + a profile) and every capability above it comes for free
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[The idea](#-one-robot-class-many-adapters) · [How it works](#-how-the-sdk-works) · [Quickstart](#-quickstart) · [Robots](#-supported-robots) · [Docs](docs/)
+[The idea](#-one-robot-class-many-adapters) · [The map](#-what-actually-defines-a-robot) · [How it works](#-how-the-sdk-works) · [Quickstart](#-quickstart) · [Robots](#-supported-robots) · [Docs](docs/)
 
 </div>
 
@@ -110,6 +110,188 @@ rather say so here than let you discover it in the source. Today:
 The test for whether we've done this right: **adding an arm should be one file and a
 profile.** Anything more is a seam we haven't closed yet. Tracked in
 [Future directions](#-future-directions).
+
+## 🗺️ What actually defines a robot
+
+The section above says what a robot *does*. This one shows the files that say what your
+robot **is** - the whole map, before you write a line of code.
+
+### Robot kinds that work today
+
+`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python:
+
+| `--robot` | Joints | Units | Control loop | Extra |
+|---|---|---|---|---|
+| `so101`, `so101_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
+| `koch`, `koch_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
+| `yam`, `yam_bimanual` | 14 (left block, then right) | radians; gripper 0-1 | native | `[yam]` |
+| `yam_left`, `yam_right` | 7 | radians; gripper 0-1 | native | `[yam]` |
+| any other LeRobot robot | its own | LeRobot's | bundled LeRobot | `[lerobot]` |
+| `--loop module:fn` | yours | yours | yours | - |
+
+The first four rows are the kinds with a **`RobotProfile`** (the full list lives in
+`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
+That distinction is the one rule worth internalizing:
+
+> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
+> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
+> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
+
+Koch is wired and has a profile, but its envelope is a conservative starting guess rather
+than hardware-measured. Treat it as unverified.
+
+### 1. The profile: what your robot physically is
+
+The file people don't expect, and the most important one here. A `RobotProfile` is the
+kinematic truth about an arm: joint names **and their order**, software limits, per-joint
+velocity caps, and the rest pose. The `SafetyGate` enforces it, `home` is generated from it,
+`action()` validates against it, and behaviors are checked against it at load. LeRobot can
+give us joint names and live positions, but it has no notion of a safe velocity cap or a
+declared home, which is why this file exists at all.
+
+```python
+# packages/sdk/src/interlatent/node/teleop/robot_profile.py   (comments abridged)
+
+SO101_JOINT_NAMES = (
+    "shoulder_pan", "shoulder_lift", "elbow_flex",
+    "wrist_flex", "wrist_roll", "gripper",
+)
+
+SO101_JOINT_LIMITS = (        # degrees; deliberately tighter than the motor stops,
+    (-180.0, 180.0),          # so the software clamp trips before the hardware does
+    (-110.0, 110.0),
+    (-110.0, 110.0),
+    (-100.0, 100.0),
+    (-180.0, 180.0),
+    (   0.0, 100.0),          # gripper: 0 closed, 100 open
+)
+
+SO101_MAX_VELOCITY = (        # deg/sec
+    120.0,   # shoulder_pan     no gravity load
+    50.0,    # shoulder_lift    gravity-loaded, so kept slow on purpose
+    80.0,    # elbow_flex       partially gravity-loaded
+    180.0,   # wrist_flex
+    240.0,   # wrist_roll       no load
+    400.0,   # gripper          small and fast
+)
+
+SO101_REST_POSE = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)   # <- this is what `home` moves to
+
+SO101_PROFILE = RobotProfile(
+    name="so101_follower",
+    joint_names=SO101_JOINT_NAMES,
+    joint_limits=SO101_JOINT_LIMITS,
+    max_velocity=SO101_MAX_VELOCITY,
+    rest_pose=SO101_REST_POSE,
+)
+```
+
+Those velocity numbers are a good example of why the profile is hand-tuned rather than
+imported: SO-101's Feetech servos are position-only PID with limited torque, so under
+gravity `shoulder_lift` cannot actually slew at its unloaded maximum. Cap it too high and
+the commanded position runs ahead of the real one and the arm *feels stuck*. (Deriving as
+much of this as possible from the manufacturer's URDF instead is a
+[future direction](#-future-directions).)
+
+**Adding a robot to the safety/behaviors/teleop world is: write one of these, register it in
+`_PROFILES`.**
+
+### 2. The adapter: what talks to the motors
+
+One directory under [`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the
+five methods. `robot.py` is the only required file; see
+[the anatomy table above](#what-an-adapter-actually-is-today).
+
+```python
+class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py
+
+    def __init__(self, config: YAMAdapterConfig) -> None:
+        # robot_kind is per-instance, and it selects the profile topology:
+        # --robot-arg arms=left  ->  "yam_left"  ->  YAM_LEFT_PROFILE (7 joints)
+        self.robot_kind = "yam" if self._sides == ("left", "right") \
+                          else f"yam_{self._sides[0]}"
+
+    @property
+    def action_features(self) -> list[str]:    # ordered: defines the action vector
+        ...                                    # ['left_joint_0.pos', ..., 'right_gripper.pos']
+
+    def connect(self) -> None: ...             # opens the CAN buses + cameras
+    def get_observation(self) -> dict: ...     # joints + camera frames
+    def send_action(self, action: dict): ...   # non-blocking, latest-wins, delta-clamped
+    def disconnect(self) -> None: ...
+```
+
+That `robot_kind` line is worth a second look: it's how one adapter serves three profiles.
+Ask for one arm and the robot reports itself as `yam_left`, so the SafetyGate, `home`, and
+`action()` all bind to the 7-joint envelope automatically.
+
+The observation and action are plain dicts keyed by `action_features`, plus camera frames:
+
+```python
+{
+  "shoulder_pan.pos": 12.4,                        # degrees (SO-101)
+  "shoulder_lift.pos": -30.0,
+  ...
+  "gripper.pos": 80.0,
+  "observation.images.front": <ndarray (H, W, 3) uint8 RGB>,
+}
+```
+
+### 3. Runtime knobs: `--robot-arg` and `--camera`
+
+The adapter's `config.py` turns these flat CLI pairs into its typed config. They are
+per-robot, and each robot's config doc is authoritative. YAM's are the most illustrative:
+
+```bash
+interlatent-node run --robot yam \
+  --robot-arg arms=both \                 # both | left | right  (sets 14-DOF vs 7-DOF)
+  --robot-arg left_channel=can_follower_l \
+  --robot-arg right_channel=can_follower_r \
+  --robot-arg max_step_rad=0.05 \         # per-tick delta clamp (execution safety)
+  --robot-arg auto_home=false \           # true MOVES THE ARM the instant you connect
+  --camera front=/dev/video0              # -> observation.images.front
+```
+
+SO-101's surface is much smaller (`--robot-arg id=<calibration-id>` is the one you'll
+usually set, forwarded to LeRobot's `SO101FollowerConfig`). `--camera <name>=<device>`
+works the same everywhere: **`<name>` must match the policy's training camera keys**, since
+it becomes the `observation.images.<name>` the model sees.
+
+Full references: [SO-101 config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) ·
+[YAM config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md).
+
+### 4. `node.toml`: who this machine is
+
+Written for you by `interlatent-node pair`; you rarely touch it. It holds a long-lived
+credential, so it's created `0600`:
+
+```toml
+# ~/.interlatent/node.toml
+node_id  = "..."                        # assigned by the dashboard at pair time
+token    = "ilnode_..."                 # long-lived node credential
+api_base = "https://interlatent.com"
+name     = "my-arm"
+```
+
+### Where everything lives
+
+```
+~/.interlatent/
+  node.toml            # this machine's identity + node token (written by `pair`, 0600)
+  behaviors.toml       # your named behaviors (optional; overrides built-ins by name)
+
+packages/sdk/src/interlatent/
+  adapters/base.py                    # THE CONTRACT: RobotAdapter + ManualActionInterface
+  adapters/lerobot/robot.py           # SO-101 / Koch / any LeRobot robot
+  adapters/yam/{robot,cameras,config,loop}.py   # a native vendor adapter, in full
+  node/teleop/robot_profile.py        # every RobotProfile: limits, velocity, rest pose
+  node/teleop/safety.py               # SafetyGate: workspace / velocity / deadman
+  node/control.py                     # the bundled LeRobot control loop
+  behaviors/data/so101.toml           # built-in behaviors (`hello`)
+```
+
+If you read only two files to understand this SDK, read `adapters/base.py` (what a robot is)
+and `node/teleop/robot_profile.py` (what your robot is).
 
 ## 🧠 How the SDK works
 
@@ -346,7 +528,9 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 ## 🦾 Supported robots
 
 Each robot has its own config doc covering host requirements, `--robot-arg` knobs, camera
-declarations, joint names/units, and worked examples.
+declarations, joint names/units, and worked examples. For the joint counts, units, and
+which profile each kind binds to, see
+[What actually defines a robot](#-what-actually-defines-a-robot).
 
 | Robot | `--robot` | Extra | Config doc |
 |---|---|---|---|
