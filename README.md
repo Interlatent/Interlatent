@@ -15,7 +15,7 @@ robot once (an adapter + a profile) and every capability above it comes for free
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[The idea](#-robot-class) · [The map](#-what-actually-defines-a-robot) · [How it works](#-how-the-sdk-works) · [Quickstart](#-quickstart) · [Robots](#-supported-robots) · [Docs](docs/)
+[The idea](#robot-class) · [The map](#what-actually-defines-a-robot) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Docs](docs/)
 
 </div>
 
@@ -27,9 +27,9 @@ command joints, with a shared safety model underneath. Write against it once and
 teleoperate, run models, and collect data on any supported arm.
 
 This README leads with the architecture, because the architecture *is* the pitch. If you
-just want to move an arm, skip to the [Quickstart](#-quickstart).
+just want to move an arm, skip to the [Quickstart](#quickstart).
 
-## 🧩 Robot Class
+## Robot Class
 
 Everything in this SDK rests on a single idea: **a robot is one object with five methods.**
 
@@ -109,9 +109,9 @@ rather say so here than let you discover it in the source. Today:
 
 The test for whether we've done this right: **adding an arm should be one file and a
 profile.** Anything more is a seam we haven't closed yet. Tracked in
-[Future directions](#-future-directions).
+[Future directions](#future-directions).
 
-## 🗺️ What actually defines a robot
+## What actually defines a robot
 
 The section above says what a robot *does*. This one says what your robot **is**: the map,
 before you write a line of code. [ROBOT.md](ROBOT.md) is the file-by-file reference behind it.
@@ -181,7 +181,7 @@ packages/sdk/src/interlatent/
 If you read only two files to understand this SDK, read `adapters/base.py` (what a robot is)
 and `node/teleop/robot_profile.py` (what your robot is).
 
-## 🧠 How the SDK works
+## How the SDK works
 
 Four layers, bottom to top. Each only knows about the layer directly beneath it.
 
@@ -240,7 +240,7 @@ observations, actions, and rewards into local SQLite plus JPEGs. Building a LeRo
 dataset from that works fully offline with no account; uploading it is a separate, optional
 step.
 
-## ⚡ Quickstart
+## Quickstart
 
 ### 1. Install
 
@@ -256,7 +256,7 @@ pip install interlatent
 > ```
 > SO-101's Feetech servos additionally need the Feetech servo SDK; if the serial bus won't
 > open, `pip install feetech-servo-sdk`. See each robot's config doc under
-> [Supported robots](#-supported-robots) for full host requirements.
+> [Supported robots](#supported-robots) for full host requirements.
 
 **Requires Python 3.11+.**
 
@@ -413,12 +413,12 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 | `INTERLATENT_NODE_CONFIG` | Path to the node config TOML (default `~/.interlatent/node.toml`). |
 | `INTERLATENT_CALIB_PRESET` | Force or disable a joint-calibration preset (e.g. `so101_pre777`, or `none`). |
 
-## 🦾 Supported robots
+## Supported robots
 
 Each robot has its own config doc covering host requirements, `--robot-arg` knobs, camera
 declarations, joint names/units, and worked examples. For the joint counts, units, and
 which profile each kind binds to, see
-[What actually defines a robot](#-what-actually-defines-a-robot).
+[What actually defines a robot](#what-actually-defines-a-robot).
 
 | Robot | `--robot` | Extra | Config doc |
 |---|---|---|---|
@@ -434,7 +434,7 @@ For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 one `robot.py` and a profile. [ROBOT.md](ROBOT.md#adding-a-new-robot) is the walkthrough;
 [CONTRIBUTING.md](CONTRIBUTING.md) is the process.
 
-## 🖥️ Using the dashboard
+## Using the dashboard
 
 The [Interlatent dashboard](https://interlatent.com) owns the cloud side: the GPU pods, and
 which policy each robot is running. The core objects:
@@ -447,7 +447,7 @@ which policy each robot is running. The core objects:
 Create an environment, configure its policy, start a GPU box, pair and run your node, then
 start a session. The node picks it up and the arm starts moving under the policy.
 
-## 📚 Examples
+## Examples
 
 | Example | Hardware needed |
 |---|---|
@@ -456,7 +456,7 @@ start a session. The node picks it up and the arm starts moving under the policy
 | [`06_connect_hosted.py`](examples/06_connect_hosted.py) - the minimal cloud connect | none |
 | [`07_named_behaviors.py`](examples/07_named_behaviors.py) - named behaviors offline | none (fake arm) or a supported arm |
 
-## ☁️ Open source vs. Interlatent Cloud
+## Open source vs. Interlatent Cloud
 
 This SDK is open source and yours to run, but it's built to plug into the
 [dashboard](https://interlatent.com), which runs inference on managed GPUs and orchestrates
@@ -474,7 +474,7 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 | GPU autoscaling & warm pools | ❌ | ✅ |
 | Support / SLA | community | ✅ |
 
-## 📖 Documentation
+## Documentation
 
 - [Getting started](docs/getting-started.md) - robot → first rollout
 - [Defining a robot](ROBOT.md) - the profile, the adapter, and adding your own arm
@@ -485,7 +485,7 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 - [Going to cloud](docs/going-to-cloud.md)
 - [Architecture](ARCHITECTURE.md) - for contributors
 
-## 🤝 Contributing
+## Contributing
 
 We'd love your help - especially **adding robots**, which is how this project gets breadth.
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
@@ -494,20 +494,20 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
 This project uses the [Developer Certificate of Origin](https://developercertificate.org/)
 (`git commit -s`). Questions, demos, robot pics: team@interlatent.com.
 
-## 📄 License
+## License
 
 [Apache-2.0](LICENSE) © Interlatent Contributors.
 
 "Interlatent Cloud" and the hosted service at interlatent.com are operated separately from
 this open-source project.
 
-## 🔭 Future directions
+## Future directions
 
 Forward-looking work that isn't scheduled yet. Each item is a direction, not a spec.
 
 ### Fold the adapters into the robot class
 
-The [opening section](#-robot-class) states the goal; this is the shape of
+The [opening section](#robot-class) states the goal; this is the shape of
 the work. Today an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`,
 `loop.py`), and two of them exist only because we haven't finished the abstraction.
 

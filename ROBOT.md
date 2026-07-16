@@ -2,8 +2,8 @@
 
 Everything this SDK does to an arm goes through one contract: five methods on a robot object
 ([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)). The
-[README](README.md#-robot-class) explains that idea and lists the
-[robot kinds that work today](README.md#-what-actually-defines-a-robot). This document is the
+[README](README.md#robot-class) explains that idea and lists the
+[robot kinds that work today](README.md#what-actually-defines-a-robot). This document is the
 reference for the files underneath it: what each one is, what it decides, and what you would
 write to add an arm of your own.
 
@@ -86,7 +86,7 @@ URDF" approach would throw away:
 
 That tension - the URDF is authoritative for *limits* but wrong for *caps*, and silent about
 the gripper - is exactly why profiles are still hand-written, and what makes
-[deriving them from URDFs](README.md#-future-directions) a real design problem rather than a
+[deriving them from URDFs](README.md#future-directions) a real design problem rather than a
 chore.
 
 One more load-bearing detail: `joint_names` order here **equals**
@@ -190,7 +190,7 @@ Putting the four files together, the whole job for a new arm is:
 4. **Register a control loop** if your robot cannot use the bundled LeRobot one: add an
    entry to `_NATIVE_LOOPS` in [`node/daemon.py`](packages/sdk/src/interlatent/node/daemon.py),
    or pass `--loop module:fn`. (This step is the one we are trying to
-   [delete](README.md#-future-directions).)
+   [delete](README.md#future-directions).)
 5. **Optionally ship behaviors** as `behaviors/data/<robot>.toml`. You get `home` for free
    from the profile either way.
 
