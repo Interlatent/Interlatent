@@ -199,17 +199,66 @@ interface with nothing on top of it:
 import interlatent as il
 
 with il.Robot("so101", port="/dev/ttyACM0") as robot:
-    robot.act("home")                       # move to the rest pose, block until reached
-    robot.act("hello")                      # play the built-in wave
-    robot.act("home", speed=0.5)            # time-scale a behavior (gentler)
-    print(robot.pose())                     # {'shoulder_pan': 0.0, ...}
-    robot.move(wrist_roll=30, duration=0.5) # ad-hoc single-joint move
+    print(robot.pose())                     # read joint state: {'shoulder_pan': 0.0, ...}
+    robot.act("home")                       # go to the robot's rest pose, block until reached
+    robot.act("hello")                      # play the packaged SO-101 wave
+    robot.act("hello", speed=0.5)           # the same wave, at half speed
+    robot.move(wrist_roll=30, duration=0.5) # ad-hoc joint move, no behavior needed
 ```
 
-Named [behaviors](docs/behaviors.md) are **data** - a TOML of poses and keyframe
-trajectories, validated against the robot's joint limits and velocity caps before anything
-moves. Ship your own in `~/.interlatent/behaviors.toml`, or register one with `@il.behavior`.
-The same three commands work from the terminal:
+**Where do `home` and `hello` come from? You don't set them up.** That's the point, so it's
+worth being precise about what each one is:
+
+- **`home` is generated, never authored.** It is built from your robot's
+  `RobotProfile.rest_pose`, so it cannot drift from the hardware: change the profile and
+  `home` changes with it. On SO-101 the rest pose is all six joints at 0°. **Every robot
+  kind with a profile gets `home` for free**, including ones that ship no behavior file at
+  all. It is the one behavior you can always assume exists.
+- **`hello` is a packaged example**, and only for SO-101
+  ([`behaviors/data/so101.toml`](packages/sdk/src/interlatent/behaviors/data/so101.toml) is
+  the only built-in file today). It exists to show what a hand-authored behavior looks like.
+  Ask for it on an arm that doesn't define it and you get an error naming the behavior and
+  listing what that arm *does* have, rather than a surprise movement.
+
+A behavior is just **data**. `hello` in full is a keyframed wrist wave, and this is the
+entire definition:
+
+```toml
+[hello]
+type = "trajectory"
+interpolation = "min_jerk"
+description = "Raise the arm and wave the wrist."
+keyframes = [
+    { t = 0.0, shoulder_lift = 0.0, elbow_flex = 0.0, wrist_flex = 0.0, wrist_roll = 0.0 },
+    { t = 1.5, shoulder_lift = -30.0, elbow_flex = -40.0 },   # raise the forearm
+    { t = 2.1, wrist_roll = 35.0 },                           # wave
+    { t = 2.7, wrist_roll = -35.0 },
+    { t = 3.3, wrist_roll = 35.0 },
+    { t = 3.9, wrist_roll = -35.0 },
+    { t = 4.5, wrist_roll = 0.0 },                            # straighten the wrist
+    { t = 6.0, shoulder_lift = 0.0, elbow_flex = 0.0 },       # lower the forearm
+]
+```
+
+Times are seconds, arm joints are degrees, and `min_jerk` smooths between keyframes. The
+amplitudes are deliberately conservative: the wrist swings peak at ~219°/s against a 240°/s
+cap, and the shoulder raise at ~38°/s against a 50°/s cap. Those caps come from the same
+profile that generates `home`.
+
+Your own behaviors resolve through four layers, each overriding the previous **by name** -
+so you can redefine `home` or `hello` without touching the package:
+
+1. **Built-in** - generated `home`, plus any packaged `data/<robot>.toml`.
+2. **User file** - `~/.interlatent/behaviors.toml`.
+3. **Explicit file** - `Robot(behaviors=...)` or `--behaviors`.
+4. **Procedural** - Python functions registered with `@il.behavior`.
+
+Nothing moves before it is checked. Declarative behaviors are validated against the profile
+**as they load**: unknown joint names, out-of-limit targets, and velocity-cap violations all
+raise an error naming the behavior, joint, value, and limit. That is why `behavior validate`
+below needs no hardware. Full format reference: [docs/behaviors.md](docs/behaviors.md).
+
+The same commands work from the terminal:
 
 ```bash
 interlatent behavior ls --robot so101
