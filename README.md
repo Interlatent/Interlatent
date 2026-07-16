@@ -15,7 +15,7 @@ robot once (an adapter + a profile) and every capability above it comes for free
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[The idea](#-one-robot-class-many-adapters) · [The map](#-what-actually-defines-a-robot) · [How it works](#-how-the-sdk-works) · [Quickstart](#-quickstart) · [Robots](#-supported-robots) · [Docs](docs/)
+[The idea](#-robot-class) · [The map](#-what-actually-defines-a-robot) · [How it works](#-how-the-sdk-works) · [Quickstart](#-quickstart) · [Robots](#-supported-robots) · [Docs](docs/)
 
 </div>
 
@@ -29,7 +29,7 @@ teleoperate, run models, and collect data on any supported arm.
 This README leads with the architecture, because the architecture *is* the pitch. If you
 just want to move an arm, skip to the [Quickstart](#-quickstart).
 
-## 🧩 One robot class, many adapters
+## 🧩 Robot Class
 
 Everything in this SDK rests on a single idea: **a robot is one object with five methods.**
 
@@ -507,7 +507,7 @@ Forward-looking work that isn't scheduled yet. Each item is a direction, not a s
 
 ### Fold the adapters into the robot class
 
-The [opening section](#-one-robot-class-many-adapters) states the goal; this is the shape of
+The [opening section](#-robot-class) states the goal; this is the shape of
 the work. Today an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`,
 `loop.py`), and two of them exist only because we haven't finished the abstraction.
 

@@ -2,7 +2,7 @@
 
 Everything this SDK does to an arm goes through one contract: five methods on a robot object
 ([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)). The
-[README](README.md#-one-robot-class-many-adapters) explains that idea and lists the
+[README](README.md#-robot-class) explains that idea and lists the
 [robot kinds that work today](README.md#-what-actually-defines-a-robot). This document is the
 reference for the files underneath it: what each one is, what it decides, and what you would
 write to add an arm of your own.
