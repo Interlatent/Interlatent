@@ -61,11 +61,6 @@ Two rules shape everything above:
 - **An action is a waypoint, not a destination.** Sending one never blocks, and the newest
   one wins. The control loop sends one per tick.
 
-The profile is the piece people don't expect, and it carries the most weight: limits, speed
-caps, and the home pose all come from it, which is what lets a human drive an arm safely. No
-vendor hands you the whole thing. A driver gives you joint names and live positions; a URDF
-gives you mechanical limits. Neither declares a safe per-tick speed cap or a home pose.
-
 **Adding a robot is an adapter plus a profile.** [ROBOT.md](ROBOT.md) is the file-by-file
 reference; [Supported robots](#supported-robots) lists the arms that work today.
 
