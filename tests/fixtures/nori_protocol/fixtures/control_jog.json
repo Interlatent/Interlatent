@@ -1,0 +1,13 @@
+{
+  "type": "control",
+  "seq": 1234,
+  "send_ms": 1719240000123,
+  "jog": {
+    "left_arm": { "shoulder_pan": 0.0, "x": -1.0, "y": 0.0, "pitch": 0.0, "wrist_roll": 0.0, "gripper": 0.0 },
+    "right_arm": { "shoulder_pan": 0.5, "x": 0.0, "y": 1.0, "pitch": -0.25, "wrist_roll": 0.0, "gripper": 1.0 },
+    "base": { "linear": 0.3, "angular": 0.0 },
+    "left_lift": 0.0,
+    "right_lift": 0.0
+  },
+  "clutch": { "left": false, "right": true }
+}

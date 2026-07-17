@@ -1,0 +1,30 @@
+{
+  "type": "ack",
+  "accepted": true,
+  "protocol_version": 1,
+  "norm_mode": "range_m100_100",
+  "watchdog_profile": { "t_warn_ms": 300, "t_stop_ms": 1000 },
+  "descriptor": {
+    "buses": ["bus1", "bus2"],
+    "joints": [
+      "left_arm_shoulder_pan.pos", "left_arm_shoulder_lift.pos", "left_arm_elbow_flex.pos",
+      "left_arm_wrist_flex.pos", "left_arm_wrist_roll.pos", "left_arm_gripper.pos",
+      "right_arm_shoulder_pan.pos", "right_arm_shoulder_lift.pos", "right_arm_elbow_flex.pos",
+      "right_arm_wrist_flex.pos", "right_arm_wrist_roll.pos", "right_arm_gripper.pos"
+    ],
+    "base": ["x.vel", "theta.vel"],
+    "aux": ["left_lift", "right_lift"],
+    "cameras": ["front", "right_wrist"],
+    "ranges": {
+      "left_arm_shoulder_pan.pos": [-100, 100],
+      "left_arm_gripper.pos": [0, 100],
+      "right_arm_gripper.pos": [0, 100]
+    }
+  },
+  "initial_state": {
+    "right_arm_shoulder_pan.pos": 12.4,
+    "right_arm_gripper.pos": 3.0,
+    "x.vel": 0.0,
+    "theta.vel": 0.0
+  }
+}

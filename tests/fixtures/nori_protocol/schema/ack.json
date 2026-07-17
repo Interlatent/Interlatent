@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/ack.json",
+  "title": "ack",
+  "description": "Daemon -> client handshake response. accepted=false carries an error and ends the session.",
+  "type": "object",
+  "required": ["type", "accepted"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "ack" },
+    "accepted": { "type": "boolean" },
+    "protocol_version": { "type": "integer", "minimum": 1 },
+    "norm_mode": {
+      "enum": ["range_m100_100", "degrees"],
+      "description": "Normalization mode of all .pos values in state/action."
+    },
+    "watchdog_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "t_warn_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "t_stop_ms": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "required": ["t_warn_ms", "t_stop_ms"]
+    },
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "buses": { "type": "array", "items": { "type": "string" } },
+        "joints": { "type": "array", "items": { "type": "string" } },
+        "base": { "type": "array", "items": { "type": "string" } },
+        "aux": { "type": "array", "items": { "type": "string" } },
+        "cameras": { "type": "array", "items": { "type": "string" } },
+        "ranges": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    },
+    "initial_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": { "^[a-z0-9_]+\\.(pos|vel)$": { "type": "number" } }
+    },
+    "error": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "accepted": { "const": false } } },
+      "then": { "required": ["error"] }
+    }
+  ]
+}

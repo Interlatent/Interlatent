@@ -1,0 +1,6 @@
+{
+  "type": "error",
+  "code": "version_mismatch",
+  "msg": "client protocol_version 2 != daemon 1",
+  "fatal": true
+}

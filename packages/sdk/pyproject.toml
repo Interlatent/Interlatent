@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interlatent"
-version = "1.0.0"
-description = "Interlatent SDK — one open interface to control robots: drive them, run VLA policies, and collect LeRobot datasets."
+version = "1.1.0"
+description = "Interlatent SDK — one open interface to control robots: drive them, run policies, and collect data."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -44,6 +44,17 @@ lerobot = [
   "lerobot>=0.4.0",
   "pyarrow>=14",
   "Pillow>=9",
+]
+
+# pip install 'interlatent[teleop-quic]'
+# Low-latency in-browser teleop path: the node dials the QUIC/WebTransport relay
+# and consumes joint-target datagrams (node/teleop/quic_channel.py). aioquic is
+# optional — only needed on nodes running the QUIC transport; the default WS
+# teleop path (node/teleop/channel.py) needs only `websockets` (a core dep).
+teleop-quic = [
+  # >=1.3: the video tee's stream-completion check reads
+  # QuicConnection._streams (validated on 1.3.x; see quic teleop ADR).
+  "aioquic>=1.3.0,<2",
 ]
 
 # pip install 'interlatent[axol]'
@@ -85,6 +96,32 @@ yam = [
   # Generic UVC/V4L2 webcams (e.g. a Logitech on /dev/video2) capture via OpenCV.
   "opencv-python-headless>=4.8",
   "numpy",
+  # Embodiment data (URDF, ik_config, kinematic_spec) read via interlatent.robots;
+  # see the nori extra and packaging/build_robot_wheel.py for why it is a separate
+  # distribution rather than data inside `interlatent`.
+  "interlatent-robot-yam>=0.1",
+]
+
+# pip install 'interlatent[nori]'
+# Drives the Nori robot through its on-Pi daemon (NoriCoreAgent) over the
+# Nori-Protocol v1 NDJSON contract on TCP localhost:7777 (robot kind "nori";
+# see interlatent.adapters.nori), through a native control loop. Deliberately
+# NOT a dependency on the TypeScript @nori/sdk — the wire contract is the
+# dependency (vendored for tests at tests/fixtures/nori_protocol/). LAN/on-Pi
+# only: the node is expected to run on the robot's Pi next to the daemon.
+# All motion safety is enforced daemon-side; the adapter's keep-alive pump is
+# liveness-tied so it can never defeat the daemon watchdog (ADR 0015).
+nori = [
+  # Camera frames arrive on the daemon's companion ZeroMQ MJPEG channel.
+  "pyzmq>=25",
+  # JPEG decode for those frames (PIL fallback exists but cv2 is the fast path).
+  "opencv-python-headless>=4.8",
+  "numpy",
+  # Embodiment data (URDF, ik_config, kinematic_spec) read via interlatent.robots.
+  # A separate distribution, not data inside `interlatent`, because the SDK and
+  # the internal engine are both the `interlatent` import package and collide;
+  # see packaging/build_robot_wheel.py. Meshes are fetched from its meshes.lock.
+  "interlatent-robot-nori>=0.1",
 ]
 
 [project.scripts]

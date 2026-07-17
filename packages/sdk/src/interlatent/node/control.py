@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from .._clamp_log import warn_clamp
+from .teleop_profiler import NodeTeleopProfiler
 
 _LOG = logging.getLogger("interlatent.node.control")
 
@@ -75,17 +76,27 @@ def lerobot_control_loop(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     node_id: Optional[str] = None,
+    # Protection-bypass secret for a protected preview/test domain (mirrors
+    # NodeDaemonConfig.bypass_key) — needed here because robot-features
+    # reporting makes its own request rather than reusing the daemon's
+    # shared httpx client.
+    bypass_key: Optional[str] = None,
     # Browser/VR DAgger teleop receiver (set by the daemon when a session is
     # teleop-capable). The node consumes ``mode="targets"`` frames — absolute
     # joint vectors the hosted teleop engine already computed — and routes them
     # through the SafetyGate. None disables teleop (pure policy). See
-    # docs/adr/0012-teleop-receiver-stub-open-core-boundary.md.
+    # docs/adr/0009 (hosted relay + its amendments).
     teleop_channel: Optional[Any] = None,
     # Pre-encode square-resize target for camera frames (pixels per side).
     # None keeps native camera resolution. Set by the daemon when the
     # GPU-side policy is known to downsample anyway (e.g. MolmoAct2 →
     # 256), saving uplink bandwidth without losing information.
     image_resize: Optional[int] = None,
+    # False for teleop-recording assignments (no policy loaded): the loop
+    # never calls client.step() — all motion comes from the teleop channel,
+    # and disengaged ticks hold pose while still recording (so the episode
+    # is continuous). See the TeleopRecording resource.
+    policy_enabled: bool = True,
     **_: Any,
 ) -> None:
     """Generic LeRobot observe/act loop.
@@ -166,8 +177,9 @@ def lerobot_control_loop(
     # route through the gate's workspace + velocity clamp here on the node. It
     # needs a static per-robot profile (limits + velocity cap + rest pose) that
     # lerobot cannot supply; without one for this robot kind we refuse the gated
-    # teleop path and stay on policy. The keyboard/pose modality compute lives
-    # on the platform (see ADR 0012), so the node handles only ``mode="targets"``.
+    # teleop path and stay on policy. The pose-modality compute (clutch mapping
+    # + IK) lives on the compute pod (ADR 0009, second amendment), so the node
+    # handles only ``mode="keys"`` / ``mode="targets"``.
     from .teleop.robot_profile import get_profile
     from .teleop.safety import SafetyGate, TargetSample
 
@@ -222,6 +234,18 @@ def lerobot_control_loop(
     else:
         _LOG.info("Action smoothing DISABLED (--robot.action_filter_hz=none).")
 
+    # Local (node-side) per-second CSV profiler — see teleop_profiler.py.
+    # Purely additive: read-only clock samples around work the loop is
+    # already doing, written to a local file on this machine. Never
+    # raises; disables itself silently on any internal failure. Distinct
+    # from the "teleop exec latency" 5s log block below (which it also
+    # captures into the CSV as frame_age_*): that block only logs, it
+    # doesn't persist a file you can open after the session ends.
+    node_profiler = NodeTeleopProfiler(
+        session_id=session_id, robot_kind=robot_kind, fps=fps,
+        teleop_configured=teleop_gate is not None,
+    )
+
     try:
         period = 1.0 / fps if fps > 0 else 1.0 / 30.0
         step_counter = 0
@@ -233,15 +257,74 @@ def lerobot_control_loop(
         # to bare indices for this env.
         features_reported = False
         features_report_attempts = 0
+        # Teleop execution-latency window: age of each executed teleop frame
+        # (WS receive → send_action on this tick). This is the node-local
+        # half of teleop latency — pair it with the channel's WS
+        # inter-arrival summary to tell "network/pod is slow" apart from
+        # "control loop is slow". 5s rolling summary, teleop ticks only.
+        _tl_n = 0
+        _tl_age_sum_ms = 0.0
+        _tl_age_max_ms = 0.0
+        _tl_window_started = time.monotonic()
+        # One-shot: a preview encode that yields {} means cv2/PIL are
+        # missing (or obs has no camera arrays) — the headset video then
+        # silently rides the seconds-stale recording uplink. Say so once.
+        _pv_empty_warned = False
         while not should_stop():
             loop_start = time.perf_counter()
+            # Set only if this tick actually reaches that stage (e.g. the
+            # e-stop-latched path skips both, and the policy path skips
+            # both when client.step() returns no action yet) — record_tick
+            # below treats a None as "no sample", not zero.
+            _cmd_at: Optional[float] = None
+            _capture_at: Optional[float] = None
+            _frame_age_ms: Optional[float] = None
 
             obs = robot.get_observation()
+
+            # Feed the pod-side retarget stage's staleness gate directly
+            # over the teleop WS (~15 Hz, rate-limited inside send_state).
+            # RecordTick state rides the batched JPEG uplink and can lag
+            # seconds behind on a slow link, which made the stage flap
+            # between ready and stale_observation mid-engage. getattr +
+            # try/except so a version-skewed or custom channel object can
+            # never take down the control loop — worst case we just fall
+            # back to RecordTick-fed state (the pre-heartbeat behavior).
+            if teleop_channel is not None and action_keys:
+                _send_state = getattr(teleop_channel, "send_state", None)
+                if _send_state is not None:
+                    try:
+                        _send_state(
+                            _extract_joint_state(obs, action_keys).tolist()
+                        )
+                    except Exception:
+                        pass
 
             # Sample the latest teleop frame. None when no producer is
             # connected or the last frame is stale (channel drops > 250 ms).
             frame = teleop_channel.latest_frame() if teleop_channel is not None else None
             engaged = bool(frame and frame.engaged and frame.deadman)
+
+            # --- OPERATOR E-STOP (ADR 0016) ---
+            # Sticky channel latch first (it survives the 250 ms frame
+            # staleness rule and reconnects), then the live frame flag.
+            # Latching the SafetyGate is robot-agnostic; robots with a
+            # hardware latch (Nori) forward it in their native loops.
+            # Clearing is a human act, never this loop's (FUTURE.md #14).
+            _consume_estop = getattr(teleop_channel, "consume_estop", None)
+            estop_hit = bool(frame and frame.estop) or bool(
+                _consume_estop is not None and _consume_estop()
+            )
+            if (
+                estop_hit
+                and teleop_gate is not None
+                and not teleop_gate.config.estop_latched
+            ):
+                teleop_gate.latch_estop("teleop_frame")
+                _LOG.warning(
+                    "Operator e-stop received — SafetyGate latched; motion and "
+                    "capture suspended until an explicit reset."
+                )
 
             # Set by whichever branch records a tick; drives the one-time
             # feature/teleop-profile report after the branch.
@@ -253,7 +336,22 @@ def lerobot_control_loop(
                 and action_keys
                 and len(action_keys) == len(teleop_profile.joint_names)
             )
-            if teleop_ok:
+            estop_latched = (
+                teleop_gate is not None and teleop_gate.config.estop_latched
+            )
+            if estop_latched:
+                # --- E-STOP LATCHED PATH (ADR 0016) ---
+                # No motion, no capture. Queued policy chunks are dropped so
+                # nothing stale fires on reset; the smoother is reset so a
+                # post-reset resume warm-starts from the live pose. The gate
+                # stays latched until an explicit human reset outside this loop.
+                try:
+                    client.schedule.flush()
+                except Exception:
+                    pass
+                if action_filter is not None:
+                    action_filter.reset()
+            elif teleop_ok:
                 # --- TELEOP PATH (mode="targets" only) ---
                 # The hosted teleop engine already resolved an absolute joint
                 # target; we route it through the SafetyGate (workspace +
@@ -272,11 +370,13 @@ def lerobot_control_loop(
                 else:
                     # Malformed/length-mismatched, or a keys/pose frame the node
                     # can't compute locally: hold pose (gate idles toward it).
-                    if frame.mode in ("keys", "pose") and not teleop_warned:
+                    if frame.mode == "pose" and not teleop_warned:
                         _LOG.warning(
-                            "Teleop frame mode=%r received but the node only "
-                            "handles 'targets' (the modality engine runs on the "
-                            "platform); holding pose. See ADR 0012.", frame.mode,
+                            "Teleop frame mode='pose' reached the node — the "
+                            "pod-side retarget stage should have converted it "
+                            "to 'targets' (is the relay running without a "
+                            "teleop_view hook?); holding pose. See ADR 0009, "
+                            "second amendment.",
                         )
                         teleop_warned = True
                     target = actual_joints.copy()
@@ -298,11 +398,33 @@ def lerobot_control_loop(
                     step_counter, source="teleop",
                 )
                 robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+                _cmd_at = time.perf_counter()
+
+                # Echo the executed target's seq back to the producer so it can
+                # compute command round-trip latency against its own clock.
+                # Getattr-guarded — only the QUIC channel defines note_applied.
+                _note_applied = getattr(teleop_channel, "note_applied", None)
+                if _note_applied is not None:
+                    try:
+                        _note_applied(int(frame.seq))
+                    except Exception:
+                        pass
+
+                # Latency accounting: how old was the frame we just executed?
+                _tl_age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1e6
+                _tl_n += 1
+                _tl_age_sum_ms += _tl_age_ms
+                if _tl_age_ms > _tl_age_max_ms:
+                    _tl_age_max_ms = _tl_age_ms
+                _frame_age_ms = _tl_age_ms  # also feed the CSV profiler below
 
                 # Drop policy chunks queued or landing during teleop so they
-                # don't apply when the human releases.
+                # don't apply when the human releases. (schedule.flush() — a
+                # long-standing `client.flush_buffer()` call here named a
+                # method DRTCClient never had, so the drop silently never
+                # happened.)
                 try:
-                    client.flush_buffer()
+                    client.schedule.flush()
                 except Exception:
                     pass
 
@@ -316,6 +438,21 @@ def lerobot_control_loop(
                     client, obs, action_arr, step_counter,
                     control_source="teleop",
                 )
+                _capture_at = time.perf_counter()
+                step_counter += 1
+            elif not policy_enabled:
+                # --- HOLD PATH (teleop recording, disengaged) ---
+                # No policy to fall back to: send nothing (servos hold),
+                # but keep recording every tick so the episode is
+                # continuous across engage/disengage gaps.
+                if teleop_gate is not None:
+                    teleop_gate.reset()
+                actual_joints = _extract_joint_state(obs, action_keys)
+                state_keys = _capture_tick(
+                    client, obs, actual_joints, step_counter,
+                    control_source="hold",
+                )
+                _capture_at = time.perf_counter()
                 step_counter += 1
             else:
                 # Reset the gate so the next engage starts from the live pose
@@ -360,6 +497,7 @@ def lerobot_control_loop(
                         )
 
                     robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+                    _cmd_at = time.perf_counter()
 
                     # Per-tick capture — non-blocking; queues to a background
                     # thread in the DRTC client that ships via RecordTick.
@@ -367,7 +505,37 @@ def lerobot_control_loop(
                         client, obs, action_arr, step_counter,
                         control_source="policy",
                     )
+                    _capture_at = time.perf_counter()
                     step_counter += 1
+
+            # Live-preview tee (headset video): small downscaled JPEGs
+            # pushed over the teleop WS, decoupled from the batched
+            # full-resolution recording uplink (which over a real link
+            # runs seconds behind — the operator must never steer off
+            # that). preview_due() is checked FIRST so idle sessions
+            # (no viewer) pay zero encode cost, and this block runs
+            # AFTER send_action so it never delays pose→motion.
+            if teleop_channel is not None:
+                _pv_due = getattr(teleop_channel, "preview_due", None)
+                _pv_send = getattr(teleop_channel, "send_preview", None)
+                if _pv_due is not None and _pv_send is not None:
+                    try:
+                        if _pv_due():
+                            _pv = _encode_preview_jpegs(obs)
+                            if _pv:
+                                _pv_send(_pv, time.monotonic_ns())
+                            elif not _pv_empty_warned:
+                                _pv_empty_warned = True
+                                _LOG.warning(
+                                    "preview encode produced no frames "
+                                    "(cv2/PIL missing, or no uint8 camera "
+                                    "arrays in obs keys=%s) — headset video "
+                                    "will ride the recording uplink",
+                                    sorted(obs.keys()),
+                                )
+                    except Exception:
+                        # Previews are best-effort; never break the loop.
+                        pass
 
             # One-time robot-features + teleop-profile report (retry a few
             # ticks on failure). Runs on BOTH paths so the teleop_profile
@@ -383,10 +551,40 @@ def lerobot_control_loop(
                 if _report_robot_features(
                     api_base, node_id, api_key, state_keys, action_keys,
                     teleop_profile=_teleop_schema,
+                    bypass_key=bypass_key,
                 ):
                     features_reported = True
 
+            # Teleop execution-latency summary (5s window; only when teleop
+            # ticks actually ran, so pure-policy operation logs nothing).
+            _tl_now = time.monotonic()
+            if _tl_now - _tl_window_started >= 5.0:
+                if _tl_n > 0:
+                    _LOG.info(
+                        "teleop exec latency (%.0fs): n=%d age mean/max=%.0f/%.0fms "
+                        "(WS receive -> send_action)",
+                        _tl_now - _tl_window_started, _tl_n,
+                        _tl_age_sum_ms / _tl_n, _tl_age_max_ms,
+                    )
+                _tl_n = 0
+                _tl_age_sum_ms = 0.0
+                _tl_age_max_ms = 0.0
+                _tl_window_started = _tl_now
+
             elapsed = time.perf_counter() - loop_start
+            node_profiler.record_tick(
+                loop_dt_s=elapsed,
+                cmd_dt_s=(_cmd_at - loop_start) if _cmd_at is not None else None,
+                capture_dt_s=(
+                    (_capture_at - _cmd_at)
+                    if (_capture_at is not None and _cmd_at is not None) else None
+                ),
+                frame_age_ms=_frame_age_ms,
+                engaged=engaged,
+                teleop_ok=teleop_ok,
+                estop=estop_latched,
+                over_period=elapsed >= period,
+            )
             if elapsed < period:
                 time.sleep(period - elapsed)
     finally:
@@ -394,6 +592,7 @@ def lerobot_control_loop(
             robot.disconnect()
         except Exception:
             _LOG.warning("Robot disconnect failed", exc_info=True)
+        node_profiler.close()
         _LOG.info(
             "Control loop exiting for session %s; client.close() will "
             "flush recorder queue and trigger server-side upload.",
@@ -478,7 +677,9 @@ def _capture_tick(
                 if cv2 is not None:
                     img = arr
                     if img.ndim == 3 and img.shape[2] == 3:
-                        img = np.ascontiguousarray(img[..., ::-1])  # RGB->BGR
+                        # cvtColor over a numpy flip: releases the GIL and is
+                        # faster than the fancy-index copy on the control thread.
+                        img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
                     ok, buf = cv2.imencode(
                         ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85],
                     )
@@ -535,6 +736,79 @@ def _capture_tick(
         return None
 
 
+# Preview tee tunables: 320px longest side at q70 is ~8-15 KB per frame —
+# visually identical on the headset's 0.8 m quad, and 3-5× cheaper on the
+# uplink than the 640×480 q85 recording frames.
+_PREVIEW_MAX_DIM = 320
+_PREVIEW_JPEG_QUALITY = 70
+
+
+def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
+    """Downscale + JPEG-encode the observation's camera frames for the
+    live headset preview.
+
+    Camera detection matches ``_capture_tick`` exactly (uint8, ndim>=2)
+    and keys match RecordTick's raw camera names, so the pod merges both
+    feeds per camera. cv2 fast path (releases the GIL), PIL fallback;
+    a frame that fails to encode is simply skipped. ~1-2 ms per camera
+    at 10 Hz — negligible against a 33 ms tick budget.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        cv2 = None  # type: ignore
+
+    out: dict[str, bytes] = {}
+    for k, v in obs.items():
+        try:
+            arr = v if isinstance(v, np.ndarray) else np.asarray(v)
+        except Exception:
+            continue
+        if arr is None or arr.dtype != np.uint8 or arr.ndim < 2:
+            continue
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if max(h, w) > _PREVIEW_MAX_DIM:
+            scale = _PREVIEW_MAX_DIM / float(max(h, w))
+            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        else:
+            new_w, new_h = w, h
+        data: Optional[bytes] = None
+        if cv2 is not None:
+            try:
+                img = arr
+                if img.ndim == 3 and img.shape[2] == 3:
+                    # cvtColor over a numpy flip: releases the GIL (see
+                    # _capture_tick).
+                    img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
+                if (new_w, new_h) != (w, h):
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(
+                    ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, _PREVIEW_JPEG_QUALITY],
+                )
+                if ok:
+                    data = bytes(buf)
+            except Exception:
+                data = None
+        if data is None:
+            try:
+                from PIL import Image
+
+                img = arr
+                if img.ndim == 3 and img.shape[-1] == 1:
+                    img = img[:, :, 0]
+                pil = Image.fromarray(img)
+                if (new_w, new_h) != (w, h):
+                    pil = pil.resize((new_w, new_h), Image.BILINEAR)
+                buf2 = io.BytesIO()
+                pil.save(buf2, format="JPEG", quality=_PREVIEW_JPEG_QUALITY)
+                data = buf2.getvalue()
+            except Exception:
+                continue
+        if data:
+            out[k] = data
+    return out
+
+
 def _report_robot_features(
     api_base: Optional[str],
     node_id: Optional[str],
@@ -542,6 +816,7 @@ def _report_robot_features(
     state_names: Optional[list],
     action_names: Optional[list],
     teleop_profile: Optional[dict] = None,
+    bypass_key: Optional[str] = None,
 ) -> bool:
     """POST the robot's per-element feature names + teleop profile to the node endpoint.
 
@@ -573,9 +848,15 @@ def _report_robot_features(
         payload: dict = {"feature_element_names": names}
         if teleop_profile:
             payload["teleop_profile"] = teleop_profile
+        headers = {"x-api-key": token}
+        if (bypass_key or "").strip():
+            # Protected test domains (Vercel preview deployments) challenge
+            # un-bypassed requests; carry the automation bypass secret same
+            # as the daemon's shared heartbeat/poll client.
+            headers["x-vercel-protection-bypass"] = bypass_key.strip()
         resp = httpx.post(
             url,
-            headers={"x-api-key": token},
+            headers=headers,
             json=payload,
             timeout=10.0,
         )

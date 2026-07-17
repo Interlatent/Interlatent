@@ -1,0 +1,12 @@
+{
+  "type": "control",
+  "seq": 1235,
+  "action": {
+    "right_arm_shoulder_pan.pos": 12.5,
+    "right_arm_elbow_flex.pos": -8.0,
+    "right_arm_gripper.pos": 40.0,
+    "x.vel": 0.3,
+    "theta.vel": 0.0
+  },
+  "reset": { "left_arm": false, "right_arm": true }
+}

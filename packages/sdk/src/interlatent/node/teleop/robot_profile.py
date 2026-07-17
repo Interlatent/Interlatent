@@ -268,6 +268,82 @@ YAM_LEFT_PROFILE = _yam_profile("yam_left", ("left",))
 YAM_RIGHT_PROFILE = _yam_profile("yam_right", ("right",))
 
 
+# ---------------------------------------------------------------------------
+# Nori (bimanual; see interlatent.adapters.nori)
+# ---------------------------------------------------------------------------
+#
+# Nori is driven through its on-Pi daemon (NoriCoreAgent) over the Nori-Protocol
+# NDJSON contract, not a motor driver — so unlike every profile above, units are
+# the daemon's normalized `range_m100_100` scale: joints in [-100, 100],
+# grippers in [0, 100] (lerobot-native norm mode declared in the handshake ack).
+# Velocities below are therefore normalized-units/second, NOT deg/s or rad/s.
+#
+# Each arm is the SO-101 6-joint topology under `{side}_arm_` prefixes, matching
+# the daemon's `ack.descriptor.joints` (which carry a `.pos` suffix on the wire).
+# Bimanual order is left arm then right arm (axol/yam precedent); `joint_names`
+# order equals `NoriNativeRobot.action_features` — `base.py` raises if they
+# diverge. The daemon re-clamps every target robot-side, so these limits are the
+# node's SafetyGate envelope, not the last line of defense. The adapter also
+# fail-closes at connect if the live ack's ranges disagree with this profile.
+_NORI_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
+
+# Normalized units. Full daemon range: [-100, 100] per joint, gripper [0, 100].
+_NORI_ARM_LIMITS: tuple[tuple[float, float], ...] = (
+    (-100.0, 100.0),  # shoulder_pan
+    (-100.0, 100.0),  # shoulder_lift
+    (-100.0, 100.0),  # elbow_flex
+    (-100.0, 100.0),  # wrist_flex
+    (-100.0, 100.0),  # wrist_roll
+    (   0.0, 100.0),  # gripper   (0 closed, 100 open; lerobot convention)
+)
+
+# Normalized-units/second. Conservative placeholders scaled from the SO-101
+# deg/s values (same servos/topology; ~[-100,100] maps onto ~[-180,180] deg for
+# the pan/roll joints). Verify on hardware — the daemon clamps per-tick steps
+# robot-side regardless, so too-tight fails safe, too-loose is caught downstream.
+_NORI_ARM_MAX_VELOCITY: tuple[float, ...] = (
+    70.0,   # shoulder_pan
+    45.0,   # shoulder_lift        (gravity-loaded)
+    60.0,   # elbow_flex           (partially gravity-loaded)
+    150.0,  # wrist_flex
+    150.0,  # wrist_roll
+    400.0,  # gripper              (small, fast)
+)
+
+# Placeholder — TBD on hardware. Zeros are mid-range in the normalized scale.
+_NORI_ARM_REST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _nori_profile() -> RobotProfile:
+    """Compose the bimanual Nori profile (left arm block then right)."""
+    names: tuple[str, ...] = ()
+    limits: tuple[tuple[float, float], ...] = ()
+    velocity: tuple[float, ...] = ()
+    rest: tuple[float, ...] = ()
+    for side in ("left", "right"):
+        names += tuple(f"{side}_arm_{n}" for n in _NORI_ARM_JOINT_NAMES)
+        limits += _NORI_ARM_LIMITS
+        velocity += _NORI_ARM_MAX_VELOCITY
+        rest += _NORI_ARM_REST
+    return RobotProfile(
+        name="nori",
+        joint_names=names,
+        joint_limits=limits,
+        max_velocity=velocity,
+        rest_pose=rest,
+    )
+
+
+NORI_PROFILE = _nori_profile()
+
+
 # Registry keyed by robot kind. Keys match the `--robot` kinds resolved in
 # `control.py._make_lerobot_robot` (and their aliases). Each new teleop-capable
 # robot adds an entry here.
@@ -280,6 +356,7 @@ _PROFILES: dict[str, RobotProfile] = {
     "yam_bimanual": YAM_PROFILE,
     "yam_left": YAM_LEFT_PROFILE,
     "yam_right": YAM_RIGHT_PROFILE,
+    "nori": NORI_PROFILE,
 }
 
 
@@ -300,5 +377,6 @@ __all__ = [
     "YAM_PROFILE",
     "YAM_LEFT_PROFILE",
     "YAM_RIGHT_PROFILE",
+    "NORI_PROFILE",
     "get_profile",
 ]

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/error.json",
+  "title": "error",
+  "description": "Daemon -> client error. fatal=true ends the session.",
+  "type": "object",
+  "required": ["type", "code", "msg"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "error" },
+    "code": { "enum": ["version_mismatch", "bus_init", "auth", "internal", "startup_positions", "arm_offline"] },
+    "msg": { "type": "string" },
+    "fatal": { "type": "boolean", "default": false }
+  }
+}

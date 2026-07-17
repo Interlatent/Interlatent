@@ -6,10 +6,19 @@ and the pure `_motor_targets` action-writing seam (gripper post-step + delta cla
 """
 from __future__ import annotations
 
+import queue
+import time
+
 import numpy as np
 import pytest
 
-from interlatent.adapters.yam.cameras import CameraSpec, parse_camera_device
+from interlatent.adapters.yam.cameras import (
+    CameraSpec,
+    ThreadedCamera,
+    UVCCamera,
+    build_camera,
+    parse_camera_device,
+)
 from interlatent.adapters.yam.config import build_adapter_config
 from interlatent.adapters.yam.robot import FOLLOWER_HOME_POS, YAMNativeRobot
 from interlatent.node.teleop.robot_profile import get_profile
@@ -187,3 +196,100 @@ def test_invalid_arms_and_gripper_mode_rejected():
         build_adapter_config({"arms": "tri"}, None)
     with pytest.raises(ValueError, match="gripper_mode must be"):
         build_adapter_config({"gripper_mode": "snap"}, None)
+
+
+# --------------------------------------------------------------------------- #
+# ThreadedCamera (per-camera reader thread; read() = latest-frame snapshot)    #
+# --------------------------------------------------------------------------- #
+
+
+class _PumpedCamera:
+    """Inner camera for ThreadedCamera tests: read() blocks on a queue, like a
+    real driver waiting for the next frame. Queueing an Exception makes the
+    next read() raise it (also how tests unblock the reader before disconnect)."""
+
+    def __init__(self):
+        self.spec = CameraSpec("fake", "uvc", "9")
+        self.frames: queue.Queue = queue.Queue()
+        self.disconnected = False
+
+    def connect(self):
+        pass
+
+    def read(self):
+        item = self.frames.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def test_build_camera_wraps_every_backend_threaded():
+    cam = build_camera(CameraSpec("w", "uvc", "/dev/video9"))
+    assert isinstance(cam, ThreadedCamera)
+    assert isinstance(cam.inner, UVCCamera)
+
+
+def test_threaded_camera_read_returns_latest_frame():
+    inner = _PumpedCamera()
+    cam = ThreadedCamera(inner)
+    cam.connect()
+    try:
+        f1 = np.zeros((2, 2, 3), np.uint8)
+        inner.frames.put(f1)
+        assert cam.read() is f1  # blocks only for the FIRST frame
+
+        f2 = np.ones((2, 2, 3), np.uint8)
+        f3 = np.full((2, 2, 3), 2, np.uint8)
+        inner.frames.put(f2)
+        inner.frames.put(f3)
+        deadline = time.monotonic() + 2.0
+        while cam.read() is not f3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert cam.read() is f3  # newest wins; f2 was superseded
+    finally:
+        inner.frames.put(RuntimeError("shutdown"))
+        cam.disconnect()
+    assert inner.disconnected
+
+
+def test_threaded_camera_propagates_reader_error():
+    inner = _PumpedCamera()
+    cam = ThreadedCamera(inner)
+    cam.connect()
+    inner.frames.put(RuntimeError("device unplugged"))
+    with pytest.raises(RuntimeError, match="reader thread failed"):
+        cam.read()
+    cam.disconnect()
+    assert inner.disconnected
+
+
+def test_threaded_camera_first_frame_timeout():
+    inner = _PumpedCamera()
+    cam = ThreadedCamera(inner)
+    cam.first_frame_timeout_s = 0.05
+    cam.connect()
+    try:
+        with pytest.raises(RuntimeError, match="no frame within"):
+            cam.read()
+    finally:
+        inner.frames.put(RuntimeError("shutdown"))
+        cam.disconnect()
+
+
+def test_threaded_camera_stale_frame_raises():
+    inner = _PumpedCamera()
+    cam = ThreadedCamera(inner)
+    cam.stale_after_s = 0.05
+    cam.connect()
+    try:
+        inner.frames.put(np.zeros((2, 2, 3), np.uint8))
+        assert cam.read() is not None
+        time.sleep(0.15)  # device "stalls": reader alive, no new frames
+        with pytest.raises(RuntimeError, match="old"):
+            cam.read()
+    finally:
+        inner.frames.put(RuntimeError("shutdown"))
+        cam.disconnect()

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/hello.json",
+  "title": "hello",
+  "description": "Client -> daemon handshake opener.",
+  "type": "object",
+  "required": ["type", "protocol_version", "mode", "input_mode"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "hello" },
+    "protocol_version": { "type": "integer", "minimum": 1 },
+    "mode": { "enum": ["lan", "wan"] },
+    "input_mode": { "enum": ["keyboard", "vr", "leader"] },
+    "bus_choice": { "enum": ["1", "2", "3"], "default": "3" },
+    "token": {
+      "type": "string",
+      "description": "Agent token (value of the daemon's /etc/nori/agent.token). Enforcement is daemon-state-dependent, so it cannot be expressed as a schema conditional: a daemon WITH a token file rejects any hello whose token mismatches (ack accepted:false, error 'unauthorized'), regardless of mode; a daemon WITHOUT one (dev checkout) ignores the field."
+    }
+  }
+}

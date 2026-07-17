@@ -7,6 +7,12 @@ in the robot's own frame (degrees for SO-101 / Koch), not a Cartesian point.
 
     interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30 gripper=80 --hold-missing
     interlatent-act --robot so101 --port /dev/ttyACM0 --show   # just print the live pose
+    interlatent-act --robot nori --reset-latch                 # clear Nori's e-stop latch
+
+``--reset-latch`` (Nori only) is the human-only recovery from the daemon's
+e-stop hard latch (see ADR 0016): it sends the token-gated ``reset_latch``
+command and exits — it never moves the robot. The token comes from --token,
+--robot-arg token=..., or the daemon's own /etc/nori/agent.token.
 
 This is the same safety-gated path the example script uses (SafetyGate + delta clamp,
 RobotProfile required) — it refuses a robot kind with no profile rather than moving it
@@ -106,6 +112,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the current joint pose and exit without moving.",
     )
+    p.add_argument(
+        "--reset-latch",
+        action="store_true",
+        help="(--robot nori only) Clear the Nori daemon's e-stop hard latch "
+        "and exit. Human-only recovery; token-gated by the daemon.",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="(--robot nori) Daemon agent token for --reset-latch. Falls back "
+        "to --robot-arg token=... or the daemon's token file.",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -129,7 +147,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not args.joints and not args.show:
+    extra = dict(args.robot_arg or [])
+    kind = (args.robot or "").lower().strip()
+
+    if args.reset_latch and kind != "nori":
+        print(
+            f"error: --reset-latch only applies to --robot nori (got {args.robot!r}).",
+            file=sys.stderr,
+        )
+        return 2
+    if args.reset_latch and args.joints:
+        print(
+            "error: --reset-latch takes no joint targets (it never moves the robot).",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.joints and not args.show and not args.reset_latch:
         print(
             "error: no joint targets given. Pass name=value pairs (e.g. "
             "shoulder_pan=30), or --show to read the current pose.",
@@ -137,30 +171,66 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    extra = dict(args.robot_arg or [])
-    kind = (args.robot or "").lower().strip()
+    # Imported here so --help / arg errors don't pay the adapter import cost.
+    if kind == "nori":
+        # Native daemon kind: TCP NDJSON to the on-Pi daemon; no --port. The
+        # handshake fail-closes on any profile/descriptor mismatch.
+        from ..adapters.nori.config import build_adapter_config as _nori_config
+        from ..adapters.nori.robot import NoriNativeRobot
 
-    # Native CAN kinds (yam*) drive over their own bus and need no --port; every other
-    # kind is a LeRobot serial arm that does. resolve_adapter imports the adapter (and
-    # its heavy deps) lazily, so --help / arg errors above never pay that cost.
-    from ..adapters import _YAM_KINDS, resolve_adapter
+        adapter = NoriNativeRobot(_nori_config(extra, None))
+        where = f"tcp://{adapter.config.host}:{adapter.config.port}"
+    elif kind == "yam":
+        # Native CAN kind: build the YAM adapter directly. Default auto_home off for a
+        # one-shot CLI move (the action() itself drives the arm; --show must not move
+        # it) — pass --robot-arg auto_home=true to re-enable.
+        extra.setdefault("auto_home", "false")
+        from ..adapters.yam.config import build_adapter_config
+        from ..adapters.yam.robot import YAMNativeRobot
 
-    if kind not in _YAM_KINDS and not args.port:
-        print(
-            f"error: --port is required for robot kind {args.robot!r}.",
-            file=sys.stderr,
-        )
-        return 2
-    adapter = resolve_adapter(args.robot, port=args.port, extra=extra)
+        adapter = YAMNativeRobot(build_adapter_config(extra, None))
+        where = "CAN (--robot-arg left_channel=/right_channel=)"
+    else:
+        if not args.port:
+            print(
+                f"error: --port is required for robot kind {args.robot!r}.",
+                file=sys.stderr,
+            )
+            return 2
+        from ..adapters.lerobot.robot import LeRobotAdapter
+
+        adapter = LeRobotAdapter(args.robot, port=args.port, extra=extra)
+        where = args.port
 
     try:
         adapter.connect()
     except Exception as exc:  # noqa: BLE001 - surface a clean message, not a traceback
-        print(f"error: could not connect to {args.robot!r} on {args.port}: {exc}",
+        print(f"error: could not connect to {args.robot!r} on {where}: {exc}",
               file=sys.stderr)
+        # Network-level hint only for network-level failures — a handshake/
+        # validation error means the daemon IS up and talking.
+        if kind == "nori" and isinstance(exc, OSError):
+            print(
+                "hint: is the Nori daemon (NoriCoreAgent) running and listening "
+                "on that host:port (NORI_BIND_ADDR)? From off-Pi, pass "
+                "--robot-arg host=<pi-ip>. The daemon serves one client at a "
+                "time — a connected teleop bridge (webrtc_robot.py) also "
+                "refuses/occupies the slot.",
+                file=sys.stderr,
+            )
         return 1
 
     try:
+        if args.reset_latch:
+            # Daemon latch first; a session's SafetyGate (if any) is a fresh
+            # object per session, so there is nothing else to clear here.
+            adapter.reset_latch(args.token)
+            print(
+                "reset_latch sent — the daemon clears its e-stop latch if the "
+                "token matches (watch telemetry safety=ok)."
+            )
+            return 0
+
         _print_pose(adapter, "current")
         if args.show:
             return 0

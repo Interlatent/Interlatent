@@ -1,0 +1,74 @@
+{
+  "chains": {
+    "left": {
+      "solver_type": "so101_5dof",
+      "urdf": "so101_new_calib.urdf",
+      "urdf_joint_names": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll"
+      ],
+      "ee_body": "gripper_link",
+      "tool0_offset_xyz": [0.0, 0.0, 0.0],
+      "tool0_offset_rpy": [0.0, 0.0, 0.0],
+      "q_rest": [0.0, 0.0, 0.0, 0.0, 0.04868],
+      "ik_joint_action_indices": [0, 1, 2, 3, 4],
+      "gripper_action_index": 5,
+      "gripper_range": [100.0, 0.0],
+      "robot_units_to_rad": [
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295
+      ],
+      "webxr_to_base_R": [
+        [0.0, 0.0, -1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0]
+      ],
+      "scale_translation": 1.0,
+      "scale_rotation": 1.0,
+      "pos_reach_limit": 0.25,
+      "rot_reach_limit": 0.6,
+      "max_dq_per_joint": [0.2, 0.2, 0.2, 0.2, 0.2]
+    },
+    "right": {
+      "solver_type": "so101_5dof",
+      "urdf": "so101_new_calib.urdf",
+      "urdf_joint_names": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll"
+      ],
+      "ee_body": "gripper_link",
+      "tool0_offset_xyz": [0.0, 0.0, 0.0],
+      "tool0_offset_rpy": [0.0, 0.0, 0.0],
+      "q_rest": [0.0, 0.0, 0.0, 0.0, 0.04868],
+      "ik_joint_action_indices": [6, 7, 8, 9, 10],
+      "gripper_action_index": 11,
+      "gripper_range": [100.0, 0.0],
+      "robot_units_to_rad": [
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295,
+        0.017453292519943295
+      ],
+      "webxr_to_base_R": [
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0]
+      ],
+      "scale_translation": 1.0,
+      "scale_rotation": 1.0,
+      "pos_reach_limit": 0.25,
+      "rot_reach_limit": 0.6,
+      "max_dq_per_joint": [0.2, 0.2, 0.2, 0.2, 0.2]
+    }
+  }
+}

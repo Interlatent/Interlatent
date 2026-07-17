@@ -82,6 +82,11 @@ class NodeDaemonConfig:
     # start a session if this is unset everywhere (env var, this field,
     # session payload) — there is no hosted default.
     drtc_url: Optional[str] = None
+    # Protection-bypass secret for a protected preview/test domain (e.g. a
+    # Vercel branch deployment). Sent as x-vercel-protection-bypass on every
+    # heartbeat/poll so the daemon reaches the same domain the node paired
+    # against. None on production.
+    bypass_key: Optional[str] = None
     robot_kind: Optional[str] = None
     robot_port: Optional[str] = None
     robot_extra: dict[str, str] = field(default_factory=dict)
@@ -120,9 +125,14 @@ class NodeDaemonConfig:
 class NodeDaemon:
     def __init__(self, cfg: NodeDaemonConfig) -> None:
         self.cfg = cfg
+        _headers = {"x-api-key": cfg.token}
+        if (cfg.bypass_key or "").strip():
+            # Protected test domains (Vercel preview deployments) challenge
+            # un-bypassed requests; carry the automation bypass secret.
+            _headers["x-vercel-protection-bypass"] = cfg.bypass_key.strip()
         self._http = httpx.AsyncClient(
             base_url=cfg.api_base,
-            headers={"x-api-key": cfg.token},
+            headers=_headers,
             timeout=httpx.Timeout(cfg.poll_wait_s + 10),
         )
         self._known_session_id: str = ""  # what we've executed against
@@ -252,12 +262,22 @@ class NodeDaemon:
                 backoff = self.cfg.reconnect_backoff_s
                 data = r.json()
                 if data.get("changed"):
+                    # Assignment envelope (typed: inference_session |
+                    # teleop_recording). Legacy backends only send the
+                    # bare ``session`` field.
+                    envelope = data.get("assignment") or {}
+                    if envelope.get("type") == "teleop_recording":
+                        payload = envelope.get("recording")
+                        kind = "teleop_recording"
+                    else:
+                        payload = data.get("session") or envelope.get("session")
+                        kind = "inference_session"
                     # _converge runs a blocking connect_drtc() (the DRTC
                     # OpenSession can take 30s+ on a cold container). Run
                     # it off the event loop so the heartbeat coroutine
                     # keeps firing — otherwise the node looks offline and
                     # the backend drops its session assignment.
-                    await asyncio.to_thread(self._converge, data.get("session"))
+                    await asyncio.to_thread(self._converge, payload, kind)
             except Exception as e:
                 _LOG.warning("Poll failed: %s", e)
                 await asyncio.sleep(min(backoff, self.cfg.max_backoff_s))
@@ -296,7 +316,9 @@ class NodeDaemon:
         route = self._resolve_route(session)
         return route.get("address", "") if route else ""
 
-    def _converge(self, session: Optional[dict]) -> None:
+    def _converge(
+        self, session: Optional[dict], kind: str = "inference_session"
+    ) -> None:
         desired_id = (session or {}).get("id", "") if session else ""
         server_endpoint = (session or {}).get("drtc_endpoint", "") or ""
         desired_endpoint = self._resolve_endpoint(session or {}) if session else ""
@@ -334,7 +356,7 @@ class NodeDaemon:
             return
 
         try:
-            self._start_loop(session)
+            self._start_loop(session, kind=kind)
             self._known_session_id = desired_id
             self._known_endpoint = server_endpoint
             self._active_endpoint = desired_endpoint
@@ -360,6 +382,7 @@ class NodeDaemon:
     _NATIVE_LOOPS: dict[str, str] = {
         "axol": "interlatent.adapters.axol:control_loop",
         "yam": "interlatent.adapters.yam:control_loop",
+        "nori": "interlatent.adapters.nori:control_loop",
     }
 
     def _resolve_loop_fn(self) -> Callable[..., None]:
@@ -389,8 +412,15 @@ class NodeDaemon:
             self._loop_fn = lerobot_control_loop
         return self._loop_fn
 
-    def _start_loop(self, session: dict) -> None:
+    def _start_loop(self, session: dict, kind: str = "inference_session") -> None:
         from interlatent.inference.integration.connect import connect_drtc
+
+        # Full VR-teleop recording (no policy): the "session" payload is a
+        # TeleopRecordingOut. The loop runs with policy_enabled=False —
+        # never client.step() (the echo backend would drive the robot with
+        # a sinusoid) — and all motion comes from the teleop channel's
+        # mode="targets" frames; every tick still records via RecordTick.
+        is_recording = kind == "teleop_recording"
 
         # DRTC route resolution (see _resolve_route for precedence): env-var
         # override > dashboard-stamped ``route`` > legacy ``drtc_endpoint`` >
@@ -434,6 +464,11 @@ class NodeDaemon:
         # policy sees, so forward those keys through OpenSession.metadata.
         # The GPU backend ignores them for self-describing checkpoints.
         session_metadata: dict[str, str] = {}
+        # The pod-side teleop retarget stage picks the robot bundle
+        # (URDF + ik_config) by robot kind. Without this an engaged VR
+        # producer gets ee_state{ready:false, reason:"no_robot_kind"}.
+        if self.cfg.robot_kind:
+            session_metadata["robot_kind"] = str(self.cfg.robot_kind)
         if self.cfg.robot_cameras:
             image_keys = [
                 f"observation.images.{name}" for name in self.cfg.robot_cameras
@@ -486,8 +521,12 @@ class NodeDaemon:
             # rejected by the server's /environments probe.
             api_key=self.cfg.drtc_api_key or self.cfg.token,
             environment=env_slug,
-            policy_uri=session.get("policy_uri", ""),
-            policy_backend=session.get("policy_backend", "lerobot"),
+            # Recording sessions load no policy — the echo backend is a
+            # placeholder the loop never steps (policy_enabled=False).
+            policy_uri=("teleop-recording" if is_recording
+                        else session.get("policy_uri", "")),
+            policy_backend=("echo" if is_recording
+                            else session.get("policy_backend", "lerobot")),
             task=session.get("task", ""),
             chunk_size=int(session.get("chunk_size", 50) or 50),
             action_dim=int(session.get("action_dim", 6) or 6),
@@ -510,15 +549,30 @@ class NodeDaemon:
         # endpoint is owned by the user, not the node — the node token is
         # rejected by the relay's auth. Skipped (teleop disabled) when no user
         # key or session id is available.
-        from .teleop.channel import TeleopChannel
+        # The factory picks WS vs QUIC/WebTransport from the backend's
+        # ``transport`` flag (returned in the teleop-token response). Both
+        # channels expose the same surface, so the control loop is unchanged.
+        from .teleop.factory import make_teleop_channel
 
-        teleop_channel: Optional[TeleopChannel] = None
+        teleop_channel = None
         teleop_api_key = self.cfg.drtc_api_key or ""
         if teleop_api_key and session.get("id"):
-            teleop_channel = TeleopChannel(
+            teleop_channel = make_teleop_channel(
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
                 api_key=teleop_api_key,
+                # Recordings mint against their own route (the relay lives
+                # in the Modal container behind a TLS tunnel, not on a
+                # tailnet box). 409s while the pod provisions are absorbed
+                # by the channel's retry loop.
+                token_path=(
+                    f"/api/v1/teleop-recordings/{session['id']}/teleop-token"
+                    if is_recording else None
+                ),
+                bypass_key=self.cfg.bypass_key,
+                # Lets the quic channel serve this robot's kinematic_spec to the
+                # browser from the installed interlatent[<kind>] data.
+                robot_kind=self.cfg.robot_kind,
             )
             teleop_channel.start()
 
@@ -536,7 +590,11 @@ class NodeDaemon:
             "api_base": self.cfg.api_base,
             "teleop_channel": teleop_channel,
             "node_id": self.cfg.node_id,
+            "bypass_key": self.cfg.bypass_key,
             "image_resize": image_resize,
+            # False for teleop recordings: the loop must never client.step()
+            # (no policy is loaded; the echo backend returns sinusoids).
+            "policy_enabled": not is_recording,
         }
 
         def _runner():

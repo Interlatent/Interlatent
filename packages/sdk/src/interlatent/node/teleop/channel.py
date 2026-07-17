@@ -29,10 +29,12 @@ falls back to policy mode.
 from __future__ import annotations
 
 import logging
+import struct
 import threading
 import time
 from typing import Optional
 
+from ._mint import mint_teleop_token
 from .frame import TeleopFrame
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +51,43 @@ _FRAME_STALE_MS = 250
 _RECONNECT_INITIAL_S = 1.0
 _RECONNECT_MAX_S = 15.0
 
+# Node→pod state heartbeat rate. The pod-side retarget stage refuses to
+# solve against a robot state older than 0.5s (STALE_OBS_S); RecordTick
+# state rides the recorder's batched JPEG uplink and can arrive seconds
+# apart on a slow link, so the control loop pushes its joint vector over
+# this WS instead — tiny frames, RTT-bound. 15 Hz keeps the gate
+# comfortably fed at ~1/7th its threshold.
+_STATE_SEND_PERIOD_S = 1.0 / 15.0
+
+# Period of the rolling frame-arrival latency summary (INFO). Matches the
+# relay's 5s browser-frame summaries so pod and node logs line up.
+_STATS_LOG_PERIOD_S = 5.0
+
+# Live-preview push rate (node→pod, small downscaled JPEGs over this WS).
+# The in-headset video quad is fed from these instead of the batched
+# full-resolution recording uplink, which over a real link runs seconds
+# behind. The cadence is the dominant term in perceived video latency
+# (mean staleness ≈ half the period), so it's tunable per node via
+# INTERLATENT_PREVIEW_HZ; the cost is uplink bandwidth (~10-20 KB × cams
+# × Hz — 10 Hz on a 2-cam rig is ~2 Mbit/s, 20 Hz ~4 Mbit/s). Clamped to
+# [1, 30]; the control loop can't produce more than its tick rate anyway.
+def _preview_period_s() -> float:
+    import os
+
+    try:
+        hz = float(os.environ.get("INTERLATENT_PREVIEW_HZ", "") or 10.0)
+    except (TypeError, ValueError):
+        hz = 10.0
+    return 1.0 / max(1.0, min(30.0, hz))
+
+
+_PREVIEW_SEND_PERIOD_S = _preview_period_s()
+
+# A viewer is "present" while browser frames keep arriving on this WS
+# (the overlay sends keepalives even when disengaged). No frames for this
+# long ⇒ nobody is watching ⇒ stop burning uplink on previews.
+_VIEWER_PRESENCE_S = 5.0
+
 
 class TeleopChannel:
     """Background WS client that surfaces the latest browser teleop frame.
@@ -64,16 +103,113 @@ class TeleopChannel:
         session_id: str,
         api_base: str,
         api_key: str,
+        token_path: Optional[str] = None,
+        bypass_key: Optional[str] = None,
     ) -> None:
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
+        self._bypass_key = bypass_key
+        # Token-mint route. Defaults to the inference-session route; teleop
+        # recordings pass their own (/api/v1/teleop-recordings/{id}/teleop-token).
+        self._token_path = (
+            token_path
+            or f"/api/v1/inference/sessions/{session_id}/teleop-token"
+        )
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
+        # Sticky operator e-stop: latched at decode time, cleared only by
+        # consume_estop(). Deliberately survives frame staleness and channel
+        # reconnects — a panic press must never be droppable (ADR 0016).
+        self._estop_seen = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._connected = False
+        # Live WS handle for send_state() (websockets' sync connection is
+        # thread-safe: the control loop sends while the receive loop recvs;
+        # concurrent senders are serialized by the connection's own lock).
+        self._ws = None
+        self._last_state_sent_at = 0.0
+        # Live-preview pipeline: the control loop stages the latest
+        # downscaled JPEGs into a 1-slot buffer; a dedicated sender thread
+        # ships them so a saturated uplink can never block the control
+        # loop on a socket write. Latest-wins by construction.
+        self._preview_lock = threading.Lock()
+        self._preview_slot: Optional[tuple[dict[str, bytes], int]] = None
+        self._preview_event = threading.Event()
+        self._preview_thread: Optional[threading.Thread] = None
+        self._last_preview_staged_at = 0.0
+        # One-shot diagnostic flags: the preview path fails silently by
+        # design (best-effort), so log the FIRST success and FIRST
+        # failure to make a dead preview stream observable in the field.
+        self._pv_sent_logged = False
+        self._pv_err_logged = False
+        # Cumulative preview counters, surfaced in the 5s WS summary. The
+        # one-shot logs above catch a preview that fails; these catch a
+        # preview that is never ATTEMPTED (preview_due() never opening,
+        # control loop never staging) — the case where nothing else logs.
+        # Written from the control-loop/sender threads, read from the
+        # receive loop; plain ints under the GIL are fine for telemetry.
+        self._pv_staged_total = 0
+        self._pv_sent_total = 0
+        # monotonic time of the last message received from the relay —
+        # browser keepalives included — used as the viewer-presence gate.
+        self._last_rx_at = 0.0
+        # Frame-arrival latency window (receive-loop thread only): counts
+        # + inter-arrival gap stats since the last 5s summary. The gap is
+        # the node-observable half of teleop latency — it captures
+        # pod→node network jitter and retarget-stage stalls, which is
+        # what actually makes the arm feel laggy.
+        self._arr_count = 0
+        self._arr_last_ns = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_seq_first = 0
+        self._arr_seq_last = 0
+        self._arr_window_started = time.monotonic()
+
+    def _note_arrival(self, frame: TeleopFrame) -> None:
+        """Track inter-arrival gaps of producer frames; log a 5s summary.
+
+        Runs on the receive-loop thread only (no locking needed). Logged
+        rate below the producer's send rate, or a large max gap, means
+        frames are stalling somewhere between the pod and this node.
+        """
+        now_ns = frame.received_at_ns
+        if self._arr_count == 0:
+            self._arr_seq_first = frame.seq
+        else:
+            gap_ms = (now_ns - self._arr_last_ns) / 1e6
+            self._arr_gap_sum_ms += gap_ms
+            if gap_ms > self._arr_gap_max_ms:
+                self._arr_gap_max_ms = gap_ms
+        self._arr_last_ns = now_ns
+        self._arr_seq_last = frame.seq
+        self._arr_count += 1
+
+        now = time.monotonic()
+        elapsed = now - self._arr_window_started
+        if elapsed < _STATS_LOG_PERIOD_S:
+            return
+        n = self._arr_count
+        gaps = n - 1
+        # seq span vs frames received ≈ producer frames the relay/retarget
+        # collapsed or dropped en route (latest-wins everywhere, so >0 is
+        # normal under load — it's the trend that matters).
+        seq_span = self._arr_seq_last - self._arr_seq_first
+        _LOG.info(
+            "teleop WS frames (%.0fs): n=%d rate=%.1fHz gap mean/max=%.0f/%.0fms "
+            "seq_span=%d pv_staged=%d pv_sent=%d session=%s",
+            elapsed, n, n / elapsed if elapsed > 0 else 0.0,
+            (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
+            self._arr_gap_max_ms, seq_span,
+            self._pv_staged_total, self._pv_sent_total, self._session_id,
+        )
+        self._arr_count = 0
+        self._arr_gap_sum_ms = 0.0
+        self._arr_gap_max_ms = 0.0
+        self._arr_window_started = now
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -87,12 +223,22 @@ class TeleopChannel:
             daemon=True,
         )
         self._thread.start()
+        self._preview_thread = threading.Thread(
+            target=self._preview_run,
+            name=f"teleop-preview[{self._session_id[:8]}]",
+            daemon=True,
+        )
+        self._preview_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._preview_event.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        if self._preview_thread is not None:
+            self._preview_thread.join(timeout=3.0)
+            self._preview_thread = None
 
     # ------------------------------------------------------------------
     # Read API (called from the control loop)
@@ -114,13 +260,153 @@ class TeleopChannel:
             return None
         return frame
 
+    def consume_estop(self) -> bool:
+        """Return-and-clear the sticky operator e-stop flag.
+
+        Latched at decode time (not subject to the 250 ms staleness rule or
+        the disconnect frame-drop), so an ``estop:true`` frame that arrives
+        during a loop stall or right before a reconnect still reaches the
+        control loop's next tick exactly once. The caller owns what "handle"
+        means (latch the SafetyGate; forward a hardware latch where one
+        exists). See ADR 0016.
+        """
+        with self._lock:
+            seen, self._estop_seen = self._estop_seen, False
+        return seen
+
     @property
     def connected(self) -> bool:
         return self._connected
 
     # ------------------------------------------------------------------
+    # Write API (called from the control loop)
+    # ------------------------------------------------------------------
+
+    def send_state(self, qpos) -> None:
+        """Best-effort push of the robot's current joint vector (action
+        order, robot-native units — same convention as RecordTick's
+        ``observation_state``) to the pod's teleop relay.
+
+        Rate-limited to ~15 Hz internally, so callers can just invoke it
+        every control tick. Never raises and never blocks meaningfully —
+        connection failures are owned by the reconnect loop; a send racing
+        a disconnect is simply dropped.
+        """
+        ws = self._ws
+        if ws is None or qpos is None:
+            return
+        now = time.monotonic()
+        if now - self._last_state_sent_at < _STATE_SEND_PERIOD_S:
+            return
+        self._last_state_sent_at = now
+        try:
+            import json
+
+            ws.send(json.dumps({
+                "type": "state",
+                "qpos": [float(x) for x in qpos],
+            }))
+        except Exception:
+            # Socket mid-close / reconnecting — the receive loop notices
+            # and re-establishes; state resumes on the next connection.
+            pass
+
+    def preview_due(self) -> bool:
+        """Should the control loop encode + stage a preview this tick?
+
+        True only when the WS is up, a viewer has sent a frame recently
+        (the overlay keeps sending even while disengaged), the ~10 Hz
+        rate window has elapsed, and the sender has consumed the prior
+        slot. Callers check this BEFORE encoding so idle sessions pay
+        zero encode cost.
+        """
+        if self._ws is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_rx_at > _VIEWER_PRESENCE_S:
+            return False
+        if now - self._last_preview_staged_at < _PREVIEW_SEND_PERIOD_S:
+            return False
+        with self._preview_lock:
+            return self._preview_slot is None
+
+    def send_preview(self, jpegs: dict[str, bytes], ts_ns: int) -> None:
+        """Stage one set of downscaled camera JPEGs for the sender thread.
+
+        Non-blocking and latest-wins: overwrites any unsent slot. ``ts_ns``
+        is the node's monotonic capture time — the same clock RecordTick's
+        control_timestamp uses, which is how the pod keeps whichever frame
+        (preview vs recording) was captured later.
+        """
+        if not jpegs:
+            return
+        self._last_preview_staged_at = time.monotonic()
+        self._pv_staged_total += 1
+        with self._preview_lock:
+            self._preview_slot = (jpegs, int(ts_ns))
+        self._preview_event.set()
+
+    # ------------------------------------------------------------------
     # Background thread
     # ------------------------------------------------------------------
+
+    def _preview_run(self) -> None:
+        """Drain the 1-slot preview buffer onto the WS.
+
+        Binary frame layout (mirrors the relay's pod→browser video frame)::
+
+            [0..2)   uint16 big-endian: header length H
+            [2..2+H) UTF-8 JSON: {"type":"preview","cam":...,"ts_ns":...}
+            [2+H..)  raw JPEG bytes
+
+        One frame per camera per slot. Send errors are dropped — the
+        receive loop owns reconnection, and the next slot rides the new
+        connection. An old relay simply ignores binary node frames.
+        """
+        while not self._stop.is_set():
+            if not self._preview_event.wait(timeout=0.5):
+                continue
+            self._preview_event.clear()
+            with self._preview_lock:
+                slot = self._preview_slot
+                self._preview_slot = None
+            if slot is None:
+                continue
+            ws = self._ws
+            if ws is None:
+                continue
+            jpegs, ts_ns = slot
+            try:
+                import json
+
+                for cam, data in jpegs.items():
+                    if not data:
+                        continue
+                    hdr = json.dumps({
+                        "type": "preview",
+                        "cam": cam,
+                        "ts_ns": ts_ns,
+                    }).encode("utf-8")
+                    ws.send(struct.pack(">H", len(hdr)) + hdr + bytes(data))
+                self._pv_sent_total += 1
+                if not self._pv_sent_logged:
+                    self._pv_sent_logged = True
+                    _LOG.info(
+                        "teleop preview tee active: sent %s",
+                        ", ".join(
+                            f"{c}={len(d)}B" for c, d in jpegs.items() if d
+                        ),
+                    )
+            except Exception as exc:
+                # Socket mid-close / reconnecting — drop this slot; the
+                # next preview_due() cycle stages a fresh one.
+                if not self._pv_err_logged:
+                    self._pv_err_logged = True
+                    _LOG.warning(
+                        "teleop preview send failed (%s: %s); "
+                        "further preview errors suppressed",
+                        type(exc).__name__, exc,
+                    )
 
     def _run(self) -> None:
         """Token-mint + connect + receive, with reconnect-on-drop."""
@@ -143,6 +429,18 @@ class TeleopChannel:
             try:
                 self._run_session(ws_url, token)
                 backoff = _RECONNECT_INITIAL_S  # clean disconnect — reset
+            except (OSError, TimeoutError) as exc:
+                # Expected transport churn: connection refused (relay/pod
+                # stopped or not up yet), reset, host unreachable, open
+                # timeout. The reconnect loop IS the handler — one quiet
+                # line, no traceback.
+                _LOG.warning(
+                    "teleop WS unreachable (%s: %s); reconnecting in %.0fs",
+                    type(exc).__name__, exc, backoff,
+                )
+                if self._stop.wait(backoff):
+                    return
+                backoff = min(backoff * 2, _RECONNECT_MAX_S)
             except Exception:
                 _LOG.warning("teleop WS errored; reconnecting", exc_info=True)
                 if self._stop.wait(backoff):
@@ -154,17 +452,13 @@ class TeleopChannel:
 
         Returns ``(ws_url, token)``. Raises on any non-2xx response.
         """
-        import httpx
-
-        url = f"{self._api_base}/api/v1/inference/sessions/{self._session_id}/teleop-token"
-        with httpx.Client(timeout=10.0) as client:
-            r = client.post(
-                url,
-                params={"role": "node"},
-                headers={"x-api-key": self._api_key},
-            )
-            r.raise_for_status()
-            data = r.json()
+        data = mint_teleop_token(
+            api_base=self._api_base,
+            token_path=self._token_path,
+            api_key=self._api_key,
+            bypass_key=self._bypass_key,
+            role="node",
+        )
         return str(data["ws_url"]), str(data["token"])
 
     def _run_session(self, ws_url: str, token: str) -> None:
@@ -178,6 +472,7 @@ class TeleopChannel:
         _LOG.info("teleop channel connecting: %s", _redact_token(full_url))
         with connect(full_url, open_timeout=10, close_timeout=5) as ws:
             self._connected = True
+            self._ws = ws
             _LOG.info("teleop channel connected session=%s", self._session_id)
             try:
                 while not self._stop.is_set():
@@ -187,6 +482,10 @@ class TeleopChannel:
                         continue
                     if raw is None:
                         break
+                    # Any relay→node message counts as viewer presence —
+                    # the preview pipeline only spends uplink while a
+                    # browser is actually attached and sending.
+                    self._last_rx_at = time.monotonic()
                     if isinstance(raw, bytes):
                         try:
                             raw = raw.decode("utf-8")
@@ -195,10 +494,14 @@ class TeleopChannel:
                     frame = TeleopFrame.from_json(raw)
                     if frame is None:
                         continue
+                    self._note_arrival(frame)
                     with self._lock:
                         self._latest = frame
+                        if frame.estop:
+                            self._estop_seen = True
             finally:
                 self._connected = False
+                self._ws = None
                 # Drop the last known frame on disconnect so a stale
                 # "engaged" doesn't keep driving the arm. The control
                 # loop sees latest_frame() == None and falls back to

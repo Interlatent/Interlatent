@@ -24,5 +24,6 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent.cli",                     # interlatent
         "interlatent.adapters.yam",            # --robot yam native loop
         "interlatent.behaviors",               # interlatent.Robot / behavior ls|run
+        "interlatent.adapters.nori",           # --robot nori native loop
     ):
         assert needed in pkgs, f"{needed} missing from sdk wheel (no __init__.py?)"

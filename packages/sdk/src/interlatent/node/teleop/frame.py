@@ -6,22 +6,35 @@ parser; each producer re-implements the encoder against this contract (the
 contract is duplicated across the WS boundary by design — see ADR 0009 — so the
 node never depends on a producer package).
 
-Three modes converge on one node-side gated path (`control.py`):
+Three modes exist on the wire; the node executes two of them
+(`control.py`):
 
 - ``mode="keys"``    — ``held_keys`` is a set of currently-held key strings; the
                        node integrates them into an absolute joint target
                        (``keyboard.next_target``). The dashboard keyboard overlay.
-- ``mode="pose"``    — ``ee_pos`` (+ optional ``ee_quat``) is a raw 6-DoF
-                       end-effector pose and ``pinch`` a gripper close amount;
-                       the node retargets to joint targets via ``retarget`` /
-                       node-side IK. The WebXR browser producer (see ADR 0009).
-- ``mode="targets"`` — ``joint_targets`` is an absolute joint-target vector the
-                       producer already computed. Used directly. (Retained for
-                       producers that do their own IK; the WebXR path uses
-                       ``pose`` so IK stays node-side.)
+- ``mode="pose"``    — ``ee_pos``/``ee_quat`` is an absolute 6-DoF end-effector
+                       TARGET in the arm-base frame (browser clutch mapper
+                       output) and ``pinch`` a gripper close amount. Consumed by
+                       the POD-side retarget stage in the relay, which solves IK
+                       and forwards ``mode="targets"`` — a pose frame should
+                       never reach the node (ADR 0009, second amendment); if one
+                       does, the node holds pose.
+- ``mode="targets"`` — ``joint_targets`` is an absolute joint-target vector
+                       (``action_features`` order, robot-native units) the
+                       producer or the pod retarget stage already computed.
+                       Routed through the SafetyGate and executed.
 
 Back-compat: a frame with no ``mode`` is treated as ``"keys"``, so the existing
 overlay (which sends no ``mode``) keeps working untouched.
+
+``estop`` (additive, default False) is the operator's HARD stop — orthogonal to
+``deadman``, whose release is a soft hold. On receipt the control loop latches
+the SafetyGate (and a robot with a hardware latch, e.g. Nori, forwards it);
+clearing is an explicit human act, never the loop's. Because a single estop
+datagram must survive the 250 ms staleness window and channel reconnects, both
+channels also latch a sticky ``estop_seen`` flag at decode time — see
+``consume_estop()`` — so a panic press can never be lost to frame freshness
+rules (ADR 0016).
 """
 from __future__ import annotations
 
@@ -46,6 +59,7 @@ class TeleopFrame:
     seq: int
     received_at_ns: int            # monotonic_ns at decode time
     mode: str = "keys"
+    estop: bool = False            # operator hard stop (latches; human-cleared)
     held_keys: set[str] = field(default_factory=set)
     joint_targets: Optional[list[float]] = None
     ee_pos: Optional[list[float]] = None       # mode="pose": [x, y, z] (meters, WebXR frame)
@@ -99,6 +113,7 @@ class TeleopFrame:
             seq=int(obj.get("seq", 0) or 0),
             received_at_ns=time.monotonic_ns(),
             mode=mode,
+            estop=bool(obj.get("estop", False)),  # absent -> False (back-compat)
             held_keys=held_keys,
             joint_targets=joint_targets,
             ee_pos=ee_pos,

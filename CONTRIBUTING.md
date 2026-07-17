@@ -23,7 +23,7 @@ docs/              user documentation
 git clone https://github.com/interlatent/interlatent
 cd interlatent
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ./packages/sdk pytest pytest-timeout ruff
+pip install -e ./packages/sdk pytest pytest-timeout ruff jsonschema
 ```
 
 Run the tests (no GPU, no robot):
