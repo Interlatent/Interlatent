@@ -98,8 +98,19 @@ to joint *order*, not names, so this alignment is a correctness property, not a 
 
 ## 2. The adapter: what talks to the motors
 
-One directory under [`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the
-five methods:
+[`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py) declares the contract as
+two pieces:
+
+- **`RobotAdapter`** - a `Protocol` (a duck type, not a base class you must subclass).
+  Lifecycle plus observe/act, plus the metadata the manual path needs (`action_features`,
+  `joint_specs`).
+- **`ManualActionInterface`** - a mixin carrying the *one* piece of shared behavior:
+  `action(shoulder_pan=30, gripper=80)`, a named-joint, block-then-settle move composed
+  entirely out of the adapter's own `send_action` + `get_observation`. Every adapter
+  inherits it; none of them implement it.
+
+An adapter is one directory under
+[`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the five methods:
 
 | File | Role |
 |---|---|

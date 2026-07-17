@@ -15,7 +15,7 @@ robot once (an adapter + a profile) and every capability above it comes for free
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[The idea](#robot-class) · [The map](#what-actually-defines-a-robot) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Docs](docs/)
+[Robot class](#robot-class) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Defining a robot](ROBOT.md) · [Docs](docs/)
 
 </div>
 
@@ -31,70 +31,43 @@ just want to move an arm, skip to the [Quickstart](#quickstart).
 
 ## Robot Class
 
-Everything in this SDK rests on a single idea: **a robot is one object with five methods.**
+Everything in this SDK rests on one idea: **a robot is a single object with five methods.**
 
 ```python
 robot.connect()
-obs = robot.get_observation()   # {'shoulder_pan.pos': 12.4, 'observation.images.front': <HxWx3 uint8>, ...}
-robot.send_action(action)       # {'shoulder_pan.pos': 30.0, ...}  fire-and-forget, latest-wins
+obs = robot.get_observation()   # joint positions + camera frames
+robot.send_action(action)       # absolute joint targets
 robot.disconnect()
-robot.action_features           # ordered joint keys; defines what the action vector means
+robot.action_features           # the ordered joint names; defines what an action means
 ```
 
-That contract lives in [`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)
-and it is the only thing the layers above a robot are allowed to know about. Behaviors, VLA
-policies, teleop, and dataset recording are all written against those five methods, so
-adding a robot gives you all of them at once.
+That is the whole contract, and it is the only thing the layers above a robot are allowed to
+know about. Behaviors, VLA policies, teleop, and dataset recording are all written against
+those five methods, so adding a robot gives you all of them at once.
 
-`base.py` defines two things:
+Four words carry the rest of the docs:
 
-- **`RobotAdapter`** - a `Protocol` (a duck type, not a base class you must subclass).
-  Lifecycle plus observe/act, plus the metadata the manual path needs (`action_features`,
-  `joint_specs`).
-- **`ManualActionInterface`** - a mixin carrying the *one* piece of shared behavior:
-  `action(shoulder_pan=30, gripper=80)`, a named-joint, block-then-settle move composed
-  entirely out of the adapter's own `send_action` + `get_observation`. Every adapter
-  inherits it; none of them implement it.
+| Term | What it means |
+|---|---|
+| **contract** | the five methods above. Nothing above a robot knows anything else about it. |
+| **adapter** | the code that implements them for one robot: its motors, cameras, and units. |
+| **profile** | your arm's physical facts: joint names and their order, limits, speed caps, and the home pose. |
+| **kind** | the name you ask for (`--robot yam`, `il.Robot("so101")`). It selects the adapter and the profile. |
 
-Two invariants worth stating up front, because they shape everything else:
+Two rules shape everything above:
 
-- **All actions are joint-space.** A vector of absolute joint targets, one per
-  `action_feature`. There is no IK or Cartesian frame anywhere in the robot-side stack.
-- **Each action is a waypoint, not a destination.** `send_action` is non-blocking and
-  latest-wins; the control loop calls it once per tick.
+- **Actions are joint-space.** Absolute joint targets, one per joint. There is no IK and no
+  Cartesian frame anywhere in the robot-side stack.
+- **An action is a waypoint, not a destination.** Sending one never blocks, and the newest
+  one wins. The control loop sends one per tick.
 
-An adapter that satisfies the contract is one directory under
-[`adapters/`](packages/sdk/src/interlatent/adapters/), and `robot.py` is the only file in it
-that has to exist. [ROBOT.md](ROBOT.md#2-the-adapter-what-talks-to-the-motors) breaks that
-directory down.
+The profile is the piece people don't expect, and it carries the most weight: limits, speed
+caps, and the home pose all come from it, which is what lets a human drive an arm safely. No
+vendor hands you the whole thing. A driver gives you joint names and live positions; a URDF
+gives you mechanical limits. Neither declares a safe per-tick speed cap or a home pose.
 
-## What actually defines a robot
-
-The section above says what a robot *does*. This one says what your robot **is**: the map,
-before you write a line of code. For the list of arms that work today, see
-[Supported robots](#supported-robots); [ROBOT.md](ROBOT.md) is the file-by-file reference
-behind both.
-
-### The four files
-
-| File | What it decides | Yours to write? |
-|---|---|---|
-| **The profile** - `node/teleop/robot_profile.py` | joint names and their order, software limits, velocity caps, and the rest pose that `home` moves to | yes |
-| **The adapter** - `adapters/<kind>/robot.py` | what talks to the motors and the cameras | yes |
-| **`--robot-arg` / `--camera`** | per-run configuration | declared by your adapter |
-| **`node.toml`** | which machine this is, and its credential | generated by `interlatent-node pair` |
-
-The profile is the one people don't expect, and it carries the most weight: the `SafetyGate`
-enforces it, `home` is generated from it, `action()` validates against it, and behaviors are
-checked against it at load. It exists because no vendor gives you all of it. A driver (or
-LeRobot) hands you joint names and live positions; a URDF hands you mechanical limits.
-Neither declares a *safe per-tick velocity cap* or a *home pose*, and those are exactly what
-you need to move an arm without breaking it.
-
-**[ROBOT.md](ROBOT.md) walks through all four**, using the real YAM profile: why its joint
-limits are the URDF's verbatim while its velocity caps are 5x below what that same URDF
-claims, how one adapter serves the `yam` / `yam_left` / `yam_right` topologies, and what
-adding your own arm actually costs.
+**Adding a robot is an adapter plus a profile.** [ROBOT.md](ROBOT.md) is the file-by-file
+reference; [Supported robots](#supported-robots) lists the arms that work today.
 
 ## How the SDK works
 
