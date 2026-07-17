@@ -31,7 +31,8 @@ just want to move an arm, skip to the [Quickstart](#quickstart).
 
 ## Robot Class
 
-Everything in this SDK rests on one idea: **a robot is a single object with five methods.**
+Everything in this SDK rests on one idea: **a robot is a single object with four methods
+and the metadata that gives them meaning.**
 
 ```python
 robot.connect()
@@ -39,17 +40,19 @@ obs = robot.get_observation()   # joint positions + camera frames
 robot.send_action(action)       # absolute joint targets
 robot.disconnect()
 robot.action_features           # the ordered joint names; defines what an action means
+robot.joint_specs               # per-joint specs, aligned with action_features
+robot.robot_kind                # the kind string the platform keys config on
 ```
 
 That is the whole contract, and it is the only thing the layers above a robot are allowed to
 know about. Behaviors, VLA policies, teleop, and dataset recording are all written against
-those five methods, so adding a robot gives you all of them at once.
+this contract, so adding a robot gives you all of them at once.
 
 Four words carry the rest of the docs:
 
 | Term | What it means |
 |---|---|
-| **contract** | the five methods above. Nothing above a robot knows anything else about it. |
+| **contract** | the interface above. Nothing above a robot knows anything else about it. |
 | **adapter** | the code that implements them for one robot: its motors, cameras, and units. |
 | **profile** | your arm's physical facts: joint names and their order, limits, speed caps, and the home pose. |
 | **kind** | the name you ask for (`--robot yam`, `il.Robot("so101")`). It selects the adapter and the profile. |
@@ -81,18 +84,19 @@ Four layers, bottom to top. Each only knows about the layer directly beneath it.
                                         │
                               ┌─────────▼─────────┐
                               │  robot interface  │  adapters/base.py
-                              │    five methods   │
+                              │   robot contract  │
                               └─────────┬─────────┘
                     ┌───────────────────┼───────────────────┐
                     ▼                   ▼                   ▼
               lerobot adapter      yam adapter         your adapter
-              SO-101, Koch         I2RT YAM            --loop module:fn
+              SO-101               I2RT YAM            --loop module:fn
 ```
 
 **The control loop is the heart.** Once per tick it reads an observation, decides which
-source is driving the robot this tick (a human on teleop, the policy, or nothing at all),
-produces a joint vector, clamps it, calls `send_action`, and records the tick. Everything
-above the robot interface is just a different answer to "who is driving."
+source is driving the robot this tick (the policy, a VR teleoperator recording a
+demonstration, or nothing at all), produces a joint vector, clamps it, calls
+`send_action`, and records the tick. Everything above the robot interface is just a
+different answer to "who is driving."
 
 **Safety is layered, and always local to the motors** - never across the network:
 
@@ -304,22 +308,22 @@ host requirements, `--robot-arg` knobs, camera declarations, and worked examples
 | Robot | `--robot` | Joints and units | Extra | Config doc |
 |---|---|---|---|---|
 | **SO-101** (reference) | `so101`, `so101_follower` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| **Koch v1.1** (unverified) | `koch`, `koch_follower` | 6; degrees, gripper 0-100 | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
+| **Almond Axol** (dual arm, **unstable beta**) | `axol` | 16 (7 + gripper per side); radians, gripper 0-1 | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
 | Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
 | Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
 
-Those first four rows are the kinds that ship a **`RobotProfile`** (the full list lives in
-`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
+The SO-101, YAM, and Nori rows are the kinds that ship a **`RobotProfile`** (the full
+list lives in
+`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py));
+Axol does not yet, so it is policy-only.
 That distinction is the one rule worth internalizing:
 
 > **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
 > fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
 > profile, rather than move an arm with no safety envelope. This fails closed on purpose.
-
-Koch is marked unverified because its envelope is a conservative starting guess rather than
-hardware-measured. It should work; nobody has confirmed it on a real arm.
 
 For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 [docs/robots-and-policies.md](docs/robots-and-policies.md).
@@ -380,6 +384,7 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 - [The action interface](docs/action-interface.md) - the robot contract in depth
 - [Concepts](docs/concepts.md) - DRTC, sessions, chunks, the node
 - [Supported robots & policies](docs/robots-and-policies.md)
+- [Teleoperation](docs/teleop.md) - drive the robot in VR to collect demonstrations, safety, recordings
 - [Going to cloud](docs/going-to-cloud.md)
 - [Architecture](ARCHITECTURE.md) - for contributors
 

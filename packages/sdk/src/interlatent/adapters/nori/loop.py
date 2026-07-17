@@ -88,7 +88,7 @@ def control_loop(
         action_keys, session_id,
     )
 
-    # --- Teleop receiver setup (hosted DAgger path) ----------------------
+    # --- Teleop receiver setup (hosted relay path) -----------------------
     # Mirrors node/control.py: the SafetyGate is the single safety authority
     # for human-driven motion; the daemon re-clamps everything robot-side.
     from interlatent.node.teleop.robot_profile import get_profile
@@ -229,7 +229,7 @@ def control_loop(
             # the teleop channel (~15 Hz, rate-limited inside send_state).
             # (Mirrors node/control.py — this native loop replaces that one
             # wholesale, so every teleop-channel tee must exist here too or
-            # Nori silently loses it. See FUTURE.md #13.)
+            # Nori silently loses it.)
             if teleop_channel is not None and action_keys:
                 _send_state = getattr(teleop_channel, "send_state", None)
                 if _send_state is not None:
@@ -396,7 +396,7 @@ def control_loop(
             # over the teleop channel, decoupled from the batched recording
             # uplink. preview_due() first so idle sessions pay zero encode
             # cost; runs AFTER send_action so it never delays pose→motion.
-            # (Mirrors node/control.py; see FUTURE.md #13.)
+            # (Mirrors node/control.py.)
             if teleop_channel is not None:
                 _pv_due = getattr(teleop_channel, "preview_due", None)
                 _pv_send = getattr(teleop_channel, "send_preview", None)

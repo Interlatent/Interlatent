@@ -542,7 +542,7 @@ class NodeDaemon:
             synchronous=self.cfg.synchronous,
         )
 
-        # Hosted DAgger teleop receiver. The TeleopChannel owns a background WS
+        # Hosted teleop receiver. The TeleopChannel owns a background WS
         # to the GPU-box relay for the session lifetime (idle when no producer
         # is engaged); the control loop reads the latest frame and overrides the
         # policy when engaged. We use ``drtc_api_key`` because the teleop-token

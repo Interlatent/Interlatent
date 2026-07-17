@@ -6,8 +6,8 @@ native :class:`~interlatent.adapters.axol.robot.AxolNativeRobot` and reuses the
 LeRobot-free DRTC wire helpers from :mod:`interlatent.node.control` so the
 observation payload and recording are byte-identical to the built-in loop.
 
-Scope: inference + per-tick recording (``control_source="policy"``). Teleop/
-DAgger is intentionally not wired (no SafetyGate/RobotProfile for Axol yet); the
+Scope: inference + per-tick recording (``control_source="policy"``). Teleop
+is intentionally not wired (no SafetyGate/RobotProfile for Axol yet); the
 ``teleop_channel`` kwarg is accepted and ignored.
 """
 

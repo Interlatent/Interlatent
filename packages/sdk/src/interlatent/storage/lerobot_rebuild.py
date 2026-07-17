@@ -70,7 +70,7 @@ class StepRow:
     metrics: Mapping[str, float] = field(default_factory=dict)
     failure_type: Optional[str] = None
     # "policy" for steps driven by the inference policy, "teleop" for
-    # steps driven by a human via DAgger intervention. Defaults to None
+    # steps driven by a human via teleop. Defaults to None
     # when the source doesn't distinguish — the rebuilder treats that
     # as "policy" so legacy datasets stay schema-consistent.
     control_source: Optional[str] = None

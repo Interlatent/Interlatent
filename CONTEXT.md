@@ -85,8 +85,8 @@ the solver parameters and the mapper hints from it — so it is the single and *
 source of browser kinematics there: no platform backend is involved and there is no
 fallback, by design. A node that cannot serve its spec fails QUIC teleop loudly
 rather than letting the browser solve against a hosted copy of kinematics it isn't
-driving. On the WS path the pod owns IK and the browser needs only the mapper
-hints, which ride in the teleop token. _Avoid_: hand-editing — it is derived, and
+driving. On the hosted-IK relay path the pod owns IK and the browser needs only
+the mapper hints, which ride in the teleop token. _Avoid_: hand-editing — it is derived, and
 any edit is overwritten on regen.
 
 **Adapter**:
@@ -136,12 +136,14 @@ fight (observed as robot thrashing; MolmoAct2 on the yam). _Avoid_: conflating t
 independent.
 
 **Teleop receiver stub**:
-The node-side half of hosted DAgger takeover (`interlatent.node.teleop`). A
-`TeleopChannel` opens a WebSocket to the hosted relay and decodes `TeleopFrame`s;
+The node-side half of hosted VR teleop (`interlatent.node.teleop`) — remote
+human demonstration today; mid-policy takeover (live intervention) is coming in
+a future release. A
+`TeleopChannel` opens a channel to the hosted relay and decodes `TeleopFrame`s;
 the control loop applies engaged `mode="targets"` frames (absolute joint vectors
 the **platform** already computed) through the **SafetyGate** before driving the
 robot. _Avoid_: implying the node computes targets — the teleop *engine*
-(keyboard integration, pose IK, retargeting) runs on the platform; the client is
+(pose IK, retargeting) runs on the platform; the client is
 a receiver + safety only. See [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md).
 
 **SafetyGate**:
@@ -152,7 +154,7 @@ Needs a static **robot profile** (limits / velocity cap / rest pose).
 
 **Delta clamp**:
 A source-agnostic execution-safety guard that caps the per-tick joint jump for
-*every* action — policy and teleop alike — to a per-robot limit (`--robot.max_step`,
+*every* action — policy and teleop alike — to a per-robot limit (`--robot-arg max_step=…`,
 or `max_step_rad` for axol). Configured as part of the **adapter**. Together with
 the SafetyGate this is the **layered client-side safety model**: the delta clamp
 bounds single-tick slams from any source; the SafetyGate adds workspace/velocity/
@@ -164,8 +166,8 @@ for the Nori robot: the **Node** runs on the robot's Pi and drives the on-board
 daemon (`NoriCoreAgent`) over the **Nori-Protocol** v1 wire contract —
 newline-delimited JSON on TCP `localhost:7777`, absolute `{"<joint>.pos": v}`
 targets carried in `control` frames, 12 arm joints (left-then-right) in the
-daemon-normalized `range_m100_100` units. v1 is arms-only (base/lifts:
-FUTURE.md #15). It depends on the Nori-Protocol schema repo only (vendored for
+daemon-normalized `range_m100_100` units. v1 is arms-only (base/lift support is
+future work). It depends on the Nori-Protocol schema repo only (vendored for
 conformance tests at `tests/fixtures/nori_protocol/`); `@nori/sdk` is a browser
 WebRTC client with no reusable logic and is not a dependency. Nori keeps all
 safety enforcement robot-side (range clamping, e-stop hard latch, watchdog
@@ -176,8 +178,8 @@ daemon-reported latch/safe-stop is a hard episode boundary: the native loop
 ends the session, freeing the daemon's single control-client slot for
 `interlatent-act --robot nori --reset-latch`. While the Node holds that slot,
 Nori's own browser/VR teleop cannot connect — interlatent teleop rides the
-interlatent QUIC/WS relay instead. _Avoid_: "Nori teleop" for interlatent
-DAgger takeover — Nori's own teleop stack is a separate system that is
+interlatent relay instead. _Avoid_: "Nori teleop" for interlatent
+teleop — Nori's own teleop stack is a separate system that is
 displaced, not reused, during a session. See ADR 0015/0016.
 
 **Keep-alive pump (Nori)**:
@@ -201,12 +203,13 @@ loop's job: for Nori it is an explicit `--reset-latch` act on `--robot nori`,
 which sends the daemon's token-gated `reset_latch` (token from
 `/etc/nori/agent.token` on the Pi) and then clears the gate latch — daemon
 first, gate second. _Avoid_: conflating with deadman release, which is a soft
-hold, not a stop. Universal adapter-level e-stop is future work (FUTURE.md #14).
+hold, not a stop. Universal adapter-level e-stop is future work.
 
 **control_source**:
 Per-tick provenance recorded into the LeRobot dataset: `"policy"` for
-policy-driven steps, `"teleop"` for human DAgger interventions. Carried on the
-`RecordTick` wire message and rebuilt into `annotation.interlatent.control_source`.
+policy-driven steps, `"teleop"` for human-driven (VR demonstration) ticks,
+`"hold"` for disengaged hold ticks. Carried on the `RecordTick` wire message and
+rebuilt into `annotation.interlatent.control_source`.
 
 ## Relationships
 

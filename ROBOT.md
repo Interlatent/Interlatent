@@ -1,6 +1,7 @@
 # Defining a robot
 
-Everything this SDK does to an arm goes through one contract: five methods on a robot object
+Everything this SDK does to an arm goes through one contract: four methods plus three
+pieces of metadata (`action_features`, `joint_specs`, `robot_kind`) on a robot object
 ([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)). The
 [README](README.md#robot-class) explains that idea, and
 [Supported robots](README.md#supported-robots) lists the arms that work today. This document
@@ -41,7 +42,7 @@ the work:
 # packages/sdk/src/interlatent/node/teleop/robot_profile.py   (comments abridged)
 
 # Units are i2rt/MuJoCo native: RADIANS for revolute joints, gripper [0, 1].
-# (SO-101 and Koch are in degrees. The profile is where that difference lives.)
+# (SO-101 is in degrees. The profile is where that difference lives.)
 _YAM_ARM_JOINT_NAMES = ("joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5")
 
 # EXACT hardware limits, transcribed from i2rt's yam.urdf <limit lower=… upper=…>.
@@ -110,11 +111,11 @@ two pieces:
   inherits it; none of them implement it.
 
 An adapter is one directory under
-[`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the five methods:
+[`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the contract:
 
 | File | Role |
 |---|---|
-| `robot.py` | **The robot.** Implements the five methods. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. The only file that has to exist. |
+| `robot.py` | **The robot.** Implements the contract. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. The only file that has to exist. |
 | `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
 | `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
 | `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
@@ -136,6 +137,10 @@ class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py
     @property
     def action_features(self) -> list[str]:    # ordered: defines the action vector
         ...                                    # ['left_joint_0.pos', ..., 'right_gripper.pos']
+
+    @property
+    def joint_specs(self) -> Sequence[JointSpec]:  # ordered, aligned with action_features
+        ...
 
     def connect(self) -> None: ...             # opens the CAN buses + cameras
     def get_observation(self) -> dict: ...     # joints + camera frames
@@ -204,7 +209,7 @@ Putting the four files together, the whole job for a new arm is:
    names in the adapter's order, software limits, per-joint velocity caps, rest pose.
    Register it in `_PROFILES` under your robot kind. Start conservative; the `SafetyGate`
    fails safe when limits are too tight, not too loose.
-2. **Write the adapter.** A `robot.py` implementing the five methods, inheriting
+2. **Write the adapter.** A `robot.py` implementing the contract, inheriting
    `ManualActionInterface` so `action()` comes free. Keep vendor SDK imports lazy (inside
    methods) so importing the package never requires your extra.
 3. **Make sure `action_features` order matches the profile's `joint_names`.** `base.py`

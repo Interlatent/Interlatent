@@ -13,8 +13,8 @@ passthrough to LeRobot. The OLD<->NEW policy-calibration affine
 applied here.
 
 Manual ``action()`` needs a :class:`RobotProfile` for the kind (limits + velocity);
-so101 has one today, koch does not yet — koch ``action()`` fails closed until a koch
-profile is added in ``interlatent.node.teleop.robot_profile``.
+so101 has a hardware-verified one. koch carries only a placeholder profile and is
+not supported — do not drive a Koch arm through this adapter.
 """
 from __future__ import annotations
 

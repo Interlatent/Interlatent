@@ -1,6 +1,6 @@
-"""Node-side teleop: the thin client receiver stub for the hosted DAgger path.
+"""Node-side teleop: the thin client receiver stub for the hosted teleop path.
 
-The teleop *engine* (keyboard integration, pose IK, retargeting) runs on the
+The teleop *engine* (pose IK, retargeting) runs on the
 Interlatent platform; the node keeps only a receiver stub plus the last-hop
 safety clamp. The node connects to the GPU-box relay
 (`interlatent.inference.server.teleop_relay`), receives ``mode="targets"`` frames

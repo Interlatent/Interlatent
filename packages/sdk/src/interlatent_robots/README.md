@@ -34,7 +34,8 @@ incomplete, mis-named, or missing from the tree.
   to build the browser's `ik_hints`.
 - **`kinematic_spec.json`** — **generated**, do not hand-edit. The compact serial-chain
   descriptor the in-browser solver walks. Produced from the URDF + `ik_config.json` by
-  `interlatent.inference.server.retarget.kinematic_spec` (needs MuJoCo). A bundle
+  `interlatent.inference.server.retarget.kinematic_spec` (an engine/pod-side
+  maintainer tool — it lives in the platform codebase, not this SDK; needs MuJoCo). A bundle
   missing it makes the arms do **nothing** — the browser can't build a solver.
 
 Regenerate the spec after any `ik_config.json` or URDF change, or the browser solver

@@ -30,7 +30,7 @@ dependencies = [
   "protobuf>=4.25",
   "sonora>=0.2.2",
   # Node-side teleop receiver stub (node/teleop/channel.py) opens a sync
-  # WebSocket to the hosted DAgger relay. Small, pure-Python.
+  # connection to the hosted teleop relay. Small, pure-Python.
   "websockets>=12",
 ]
 

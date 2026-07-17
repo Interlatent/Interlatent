@@ -62,7 +62,7 @@ metadata, the lingua franca of open robot learning. Two recording paths:
 ## The node
 
 `interlatent-node` is a long-running daemon for robots that should be remotely operable: it
-pairs the machine to your account (`interlatent-node pair --api-key ilat_…`), polls the
+pairs the machine to your account (`interlatent-node pair --name <name> --api-key ilat_…`), polls the
 [dashboard](https://interlatent.com), and converges to whatever inference session is
 assigned to it (policy, cameras). The DRTC GPU endpoint is provided per-session by the
 dashboard. The node is the managed counterpart of hand-writing the `connect_drtc()` loop —

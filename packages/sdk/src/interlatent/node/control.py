@@ -82,7 +82,7 @@ def lerobot_control_loop(
     # reporting makes its own request rather than reusing the daemon's
     # shared httpx client.
     bypass_key: Optional[str] = None,
-    # Browser/VR DAgger teleop receiver (set by the daemon when a session is
+    # Browser/VR teleop receiver (set by the daemon when a session is
     # teleop-capable). The node consumes ``mode="targets"`` frames — absolute
     # joint vectors the hosted teleop engine already computed — and routes them
     # through the SafetyGate. None disables teleop (pure policy). See
@@ -172,7 +172,7 @@ def lerobot_control_loop(
     except Exception:
         _LOG.warning("DRTC-DEBUG robot-units introspection failed", exc_info=True)
 
-    # --- Teleop receiver setup (hosted DAgger path) ---------------------
+    # --- Teleop receiver setup (hosted relay path) ----------------------
     # The SafetyGate is the single safety authority for human-driven motion:
     # the platform streams absolute joint targets (``mode="targets"``) and they
     # route through the gate's workspace + velocity clamp here on the node. It
@@ -321,7 +321,7 @@ def lerobot_control_loop(
             # staleness rule and reconnects), then the live frame flag.
             # Latching the SafetyGate is robot-agnostic; robots with a
             # hardware latch (Nori) forward it in their native loops.
-            # Clearing is a human act, never this loop's (FUTURE.md #14).
+            # Clearing is a human act, never this loop's.
             _consume_estop = getattr(teleop_channel, "consume_estop", None)
             estop_hit = bool(frame and frame.estop) or bool(
                 _consume_estop is not None and _consume_estop()

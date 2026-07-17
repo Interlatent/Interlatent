@@ -50,7 +50,7 @@ class MovementSource(str, Enum):
     # Reserved for Phase 2 — declared here so the priority ladder has one home:
     #   ESTOP        — highest priority; overrides every source (safety latch)
     #   INTERVENTION — human override *of a running policy*; identical on the
-    #                  wire to TELEOP today, split out later so DAgger gets clean
+    #                  wire to TELEOP today, split out later so interventions get clean
     #                  correction labels.
 
 

@@ -1,14 +1,14 @@
 # SO-101 / LeRobot robot configuration
 
-Robot-specific arguments for `--robot so101` (and `--robot koch`), the LeRobot-backed
+Robot-specific arguments for `--robot so101`, the LeRobot-backed
 serial arms driven through LeRobot's own follower configs. Built by
 [`_make_lerobot_robot`](../../node/control.py); extra knobs are forwarded to the
 matching LeRobot `*FollowerConfig` dataclass.
 
-SO-101 is the **reference platform** for this project. Koch v1.1 shares the same code
-path and is **planned but untested** — it is wired up (and has a placeholder
-`RobotProfile`) but has not been verified on hardware, so it is not advertised as
-functional. Treat `--robot koch` as experimental.
+SO-101 is the **reference platform** for this project. Koch v1.1 shares the same
+code path and remains wired up (`--robot koch`, a placeholder `RobotProfile`),
+but Koch arms are **not supported** — the path has never been verified on
+hardware. Do not use it.
 
 Arguments are passed the same way across `interlatent-node` and `interlatent-act`:
 

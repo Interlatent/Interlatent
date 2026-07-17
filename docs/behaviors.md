@@ -3,8 +3,8 @@
 Named, deterministic behaviors let you drive a robot through canned moves and
 trajectories — `home`, `hello`, or your own — with a dead-simple Python API and CLI.
 **No cloud account, no GPU, no policy, no API key.** It all runs on the robot side,
-offline, through the same adapter action path the policy loop uses (so the adapter's
-delta clamp still applies).
+offline, through the same adapter action path the policy loop uses (so on the native
+adapters the in-adapter delta clamp still applies).
 
 Use it for bring-up, resets between episodes, demos, and "wave hello" party tricks —
 anywhere you want a repeatable motion without standing up an inference session.
@@ -28,7 +28,7 @@ use. Behaviors are **joint-space only**; there is no IK / Cartesian frame.
 
 | Robot | Arm joints | Gripper | Velocity caps |
 |---|---|---|---|
-| SO-101 / Koch | degrees | `0` (closed) … `100` (open) | deg/s, from the profile |
+| SO-101 | degrees | `0` (closed) … `100` (open) | deg/s, from the profile |
 | I2RT YAM | radians | `0` (closed) … `1` (open) | rad/s, from the profile |
 
 Every target is validated against the profile's joint **limits** and per-joint
@@ -36,7 +36,7 @@ Every target is validated against the profile's joint **limits** and per-joint
 
 ## The Python API
 
-### `il.Robot(robot_type, *, port=None, behaviors=None, robot_arg=None, cameras=None, control_hz=30.0, realtime=True, force=False)`
+### `il.Robot(robot_type, *, port=None, behaviors=None, robot_arg=None, cameras=None, control_hz=30.0, realtime=True, force=False, connect=True)`
 
 Resolves the robot kind to an adapter (exactly as `interlatent-act` does), opens it,
 loads the behavior registry, and gives you:
@@ -59,7 +59,7 @@ fast. A `speed` (or an explicit `duration`) that would break a velocity cap **ra
 handle = robot.act("hello", wait=False)
 # ... do other work ...
 handle.cancel()          # decelerate smoothly to a stop (never a hard freeze)
-result = handle.wait()   # ActResult(reached, aborted, elapsed, joint_error, reason)
+result = handle.wait()   # ActResult(behavior, reached, aborted, elapsed, joint_error, reason)
 ```
 
 ### Programmatic behaviors: the `@il.behavior` decorator
@@ -172,8 +172,10 @@ one:
   caps** — at load time for trajectories, at plan time for poses — and a violation
   raises *before* any motion.
 - The planned trajectory is velocity-safe by construction, then sent through the
-  adapter's ordinary `send_action`, so the adapter's **delta clamp** stays in force as
-  a final backstop. Behaviors never write to the motor bus directly.
+  adapter's ordinary `send_action` — on the native adapters (YAM, Axol, Nori) the
+  in-adapter **delta clamp** stays in force as a final backstop; on the LeRobot
+  adapters the velocity-validated plan is the backstop. Behaviors never write to the
+  motor bus directly.
 - If a joint stalls (the commanded target outruns the measured position past a margin
   for several consecutive ticks) or the adapter errors, the run **aborts cleanly and
   raises** `BehaviorExecutionError`.

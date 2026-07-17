@@ -84,13 +84,18 @@ as teleop:
 
 - The **SafetyGate** velocity/workspace/deadman-clamps every commanded step, walking
   the arm to the target at a safe speed (this is also what drives "settle").
-- The robot's **delta clamp** caps the per-tick joint jump inside `send_action`.
+- On the native adapters (YAM, Axol, Nori) the robot's **delta clamp** additionally
+  caps the per-tick joint jump inside `send_action` itself. The LeRobot adapters
+  (SO-101) have no in-adapter clamp — there the manual path is guarded by the
+  SafetyGate alone (the engine loop's opt-in `max_step` clamp applies only to
+  engine-driven sessions).
 
-Both require a [`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
+The SafetyGate requires a
+[`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
 for the robot kind (joint limits + velocity caps). **If there is no profile for the
 kind, `action()` refuses to run** (raises) rather than driving the arm unguarded.
-Built-in profiles: `so101` (`koch` is wired with a placeholder profile but untested —
-treat it as experimental). The engine path (`send_action`) does not need a profile.
+LeRobot-side profile: `so101`; YAM and Nori ship their own profiles — see the
+full registry in `_PROFILES`. The engine path (`send_action`) does not need a profile.
 
 ### Smoothing the engine stream
 
@@ -100,11 +105,11 @@ jitter. It is a **2nd-order Butterworth** low-pass designed at the control rate,
 default cutoff **3 Hz** — deliberate arm motion sits well below it, per-tick wobble
 above. It runs *before* the delta clamp, so the clamp stays the final execution-safety
 guard, and is warm-started from the live pose (no zero-ramp) and reset across teleop
-takeovers. Tune or disable it via the robot smoothing arg:
+engagements. Tune or disable it via the robot smoothing arg:
 
 ```
-interlatent-node --robot so101 --robot.action_filter_hz=3     # default
-interlatent-node --robot so101 --robot.action_filter_hz=none  # disable
+interlatent-node run --robot so101 --robot-arg action_filter_hz=3     # default
+interlatent-node run --robot so101 --robot-arg action_filter_hz=none  # disable
 ```
 
 Smoothing applies only to the **engine path**. The manual `action()` path is already

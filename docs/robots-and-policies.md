@@ -29,7 +29,8 @@ paths:
 |---|---|---|---|---|
 | SO-101 | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](../packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) | reference platform; manual [`action()`](action-interface.md) |
 | I2RT YAM | `yam` | `[yam]` | [config](../packages/sdk/src/interlatent/adapters/yam/CONFIG.md) | bimanual, native CAN via i2rt |
-| Almond Axol | `axol` | `[axol]` | [config](../packages/sdk/src/interlatent/adapters/axol/CONFIG.md) | dual-arm, native async SDK |
+| Almond Axol | `axol` | `[axol]` | [config](../packages/sdk/src/interlatent/adapters/axol/CONFIG.md) | dual-arm, native async SDK — **unstable beta** |
+| Nori | `nori` | `[nori]` | [config](../packages/sdk/src/interlatent/adapters/nori/CONFIG.md) | dual-SO-101 rig, on-Pi daemon over NDJSON — **unstable beta** |
 | Any LeRobot robot | `<type>` | `[lerobot]` | — | cameras attach as `observation.images.<name>` |
 | Custom hardware | `--loop module:fn` | — | — | bring your own I/O |
 

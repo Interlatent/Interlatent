@@ -53,7 +53,6 @@ real GPU pod — that path lives in the cloud and is validated separately.
   frames + MP4 video + JSON metadata).
 - [ ] **Recording destinations** flush on stop: local `output_dir` and `s3_uri`
   merge-on-stop into one flat dataset; the hosted inbox path requires an API key.
-- [ ] **`examples/05_collect_dataset.py`** runs end-to-end offline.
 
 ## Tier 4 — Real policy on a cloud pod (manual, against the dashboard)
 

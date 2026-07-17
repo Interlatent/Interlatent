@@ -8,14 +8,25 @@
 > embodiment data (URDF, `ik_config.json`, `kinematic_spec.json`) ships in the SDK
 > wheel as `interlatent_robots/<kind>/`; the solver stays on the platform.
 
+> **Amendment (2026-07-17):** teleop's supported scope is **remote human
+> demonstration** — policy-less VR teleop recordings. Mid-policy takeover
+> (live intervention) is built on this same split but is not yet fully
+> implemented and tested; it is coming in a future release. The **keyboard producer is
+> scrapped** as a product surface: `mode="keys"` survives on the wire only as
+> the legacy decode default and (per the decision below) results in a hold, not
+> motion. The boundary this ADR draws is unchanged.
+
 ## Context
 
-Interlatent supports **DAgger teleop**: a human operator can take over a robot
-mid-policy (keyboard overlay or a VR/WebXR bridge), and the intervention is
-recorded into the LeRobot dataset (`control_source="teleop"`) for later training.
+Interlatent supports **teleop**: a human operator drives a robot remotely
+(VR/WebXR), and every human-driven step is recorded into the LeRobot dataset
+(`control_source="teleop"`) for later training — today as policy-less
+demonstration recordings, eventually also as mid-policy corrections (live
+intervention, coming in a future release; see the 2026-07-17 amendment).
 
-The teleop pipeline has several stages: a **producer** (dashboard overlay or VR
-bridge) emits operator intent; a **relay** carries it to the robot; the robot
+The teleop pipeline has several stages: a **producer** (the browser VR overlay;
+historically also a keyboard overlay, since scrapped) emits operator intent; a
+**relay** carries it to the robot; the robot
 turns intent into an absolute joint target and drives the arm. Historically the
 node owned almost all of this — keyboard-to-target integration, WebXR
 pose→joint inverse kinematics, pose retargeting, and per-robot kinematic
@@ -59,7 +70,7 @@ The platform performs these and streams `mode="targets"`.
 
 A second, source-agnostic guard — the **adapter delta clamp** — caps the
 per-tick joint jump for *every* action (policy and teleop alike) configured per
-robot (`--robot.max_step`, or `max_step_rad` for the axol adapter). See the
+robot (`--robot-arg max_step=…`, or `max_step_rad` for the axol adapter). See the
 "layered safety" note in `CONTEXT.md`.
 
 ## Consequences

@@ -74,7 +74,7 @@ Observation payload convention (npz keys mirror LeRobot features):
 | Key | Type |
 |---|---|
 | `observation.images.<camera>` | uint8 `(H, W, 3)` |
-| `observation.state` | float32 `(action_dim,)` |
+| `observation.state` | float32 `(state_dim,)` |
 | `task` | str (the instruction) |
 
 ## 4. Or run a robot node + CLI

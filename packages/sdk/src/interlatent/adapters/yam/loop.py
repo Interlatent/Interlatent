@@ -7,7 +7,7 @@ LeRobot-free DRTC wire helpers from :mod:`interlatent.node.control` so the
 observation payload and recording are byte-identical to the built-in loop.
 
 Scope: inference + per-tick recording (``control_source="policy"``), plus the
-hosted DAgger teleop receiver: ``mode="targets"`` frames from the platform
+hosted teleop receiver: ``mode="targets"`` frames from the platform
 route through the node-side SafetyGate exactly as in the built-in LeRobot
 loop (``node/control.py``), and intervened ticks record
 ``control_source="teleop"``.
@@ -73,7 +73,7 @@ def control_loop(
         action_keys, session_id,
     )
 
-    # --- Teleop receiver setup (hosted DAgger path) ----------------------
+    # --- Teleop receiver setup (hosted relay path) -----------------------
     # Mirrors node/control.py: the SafetyGate is the single safety authority
     # for human-driven motion. The platform streams absolute joint targets
     # (``mode="targets"``); they route through the gate's workspace +

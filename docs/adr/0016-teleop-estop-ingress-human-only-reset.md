@@ -1,5 +1,10 @@
 # Operator e-stop rides the teleop frame; reset is human-only
 
+> **Scope note (2026-07-17):** everything here applies to teleop as shipped —
+> VR demonstration recordings. Mentions of mid-policy takeover concern the
+> live-intervention feature coming in a future release (see 0012's 2026-07-17
+> amendment); the e-stop ingress is the same either way.
+
 Before this decision interlatent had **no operator hard stop at all**: the
 teleop wire frame carried only `engaged`/`deadman` (release = soft hold), and
 `SafetyGate.latch_estop` existed with zero callers. Integrating Nori made the
@@ -43,12 +48,11 @@ Decision, three layers:
 ## Consequences
 
 - The estop→gate ingress lands in `node/control.py` and the Nori loop only.
-  The YAM/Axol native loops do not yet check it — the known loop-drift hazard
-  (FUTURE.md #13); promoting e-stop to a first-class adapter capability every
-  loop gets for free is FUTURE.md #14.
-- Producers (dashboard overlay, VR bridge) still need an e-stop control that
-  sets the field; until one ships, the path is exercisable via a hand-sent
-  frame.
+  The YAM/Axol native loops do not yet check it — the known loop-drift hazard;
+  promoting e-stop to a first-class adapter capability every loop gets for free
+  is planned future work.
+- Producers (the VR overlay) still need an e-stop control that sets the field;
+  until one ships, the path is exercisable via a hand-sent frame.
 - Fixed en passant: the teleop-takeover "drop queued policy chunks" call sites
   named a method (`client.flush_buffer()`) that `DRTCClient` never had and
   swallowed the `AttributeError` — takeover never actually flushed. Both call
