@@ -54,14 +54,15 @@ conflating with the `--loop module:function` override, which is a generic escape
 hatch, not a kind.
 
 **Robot data**:
-A robot kind's teleop embodiment files — the URDF, `ik_config.json`,
-`kinematic_spec.json`, and `meshes.lock` — shipped as a standalone
-`interlatent-robot-<kind>` distribution (top-level namespace `interlatent_robots`,
-read via `interlatent.robots`). Kept out of the `interlatent` package on purpose:
-the SDK and the internal engine are both the `interlatent` import package and
-would collide on install. _Avoid_: calling the whole thing a "bundle" — that word
-is the platform's S3 artifact; the wheel is the operator-installable mirror of the
-same source.
+A robot kind's teleop embodiment files — a kinematics-only URDF, `ik_config.json`,
+and `kinematic_spec.json` — shipped as a standalone `interlatent-robot-<kind>`
+distribution (top-level namespace `interlatent_robots`, read via
+`interlatent.robots`). Kept out of the `interlatent` package on purpose: the SDK
+and the internal engine are both the `interlatent` import package and would collide
+on install. Meshes are **not** part of it — IK needs no geometry — though a
+`meshes.lock` may optionally be added for a kind that later needs STLs (viewer/sim).
+_Avoid_: calling the whole thing a "bundle" — that word is the platform's S3
+artifact; the wheel is the operator-installable mirror of the same source.
 
 **IK config** (`ik_config.json`):
 The hand-authored half of **Robot data**: the robot-specific tuning the

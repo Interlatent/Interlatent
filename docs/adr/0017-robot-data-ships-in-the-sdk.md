@@ -47,12 +47,17 @@ installed kind by `robot_kind` (`load`, `ensure_bundle`, `ensure_meshes`).
    the engine *and* a robot wheel in one environment. Verified by a coexistence
    install test.
 
-2. **Meshes are not vendored.** `meshes.lock` pins each STL by `sha256` against a
-   stable upstream (`TheRobotStudio/SO-ARM100` for SO-101); `ensure_meshes` fetches
-   and verifies on demand into a cache. Keeps ~15 MB of geometry out of every wheel
-   and out of git, and makes the previously-ad-hoc `curl` reproducible. The node's
-   forward-the-spec-to-browser path needs no meshes and never fetches; the engine/pod
-   (MuJoCo) path calls `ensure_bundle`.
+2. **Meshes are off the critical path entirely.** IK is a function of the joint
+   tree (origins, axes, limits, tool0), not geometry, so the shipped URDF is
+   **kinematics-only** — `<visual>`/`<collision>` stripped — and MuJoCo compiles it
+   with zero mesh assets. No `meshes.lock`, nothing fetched, ~0 MB of STL in the wheel
+   or git. The browser proves the principle: it runs full IK from `kinematic_spec.json`
+   with no URDF, no meshes, no MuJoCo. The mesh machinery (`meshes.lock` +
+   `ensure_meshes`, sha256-pinned) is retained but **unused by default**, for a kind
+   that genuinely needs STLs later (a 3D preview, sim, collision-aware retargeting);
+   a full mesh-referencing URDF stays reconstructable (meshes upstream, calibration in
+   the kept joints). This supersedes the earlier "meshes are vendored via a lock but
+   not in the wheel" position — they are now simply not part of the IK story.
 
 3. **What crosses the open-core line, and what does not.** Robot data (URDF,
    `ik_config`, `kinematic_spec`) now ships publicly. The **solver** (`so101_dls.py`

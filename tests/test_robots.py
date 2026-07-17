@@ -169,10 +169,28 @@ def test_build_validation_rejects_bad_kind(tmp_path):
         b._validate("X-Bad", src, files)
 
 
+def test_resolver_imports_clean_in_a_fresh_interpreter():
+    """`interlatent.robots` must work in a process where nothing else has
+    imported `importlib.util` first — pytest imports it, masking a missing
+    `import importlib.util` that would otherwise crash `is_installed`."""
+    import subprocess
+    import sys as _sys
+    r = subprocess.run(
+        [_sys.executable, "-c",
+         "from interlatent import robots; "
+         "assert robots.is_installed('definitely-absent') is False; "
+         "print('ok')"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "ok" in r.stdout
+
+
 def test_real_nori_wheel_installs_here_or_skips():
     """If interlatent[nori] is installed in this env, its data must resolve."""
     if not robots.is_installed("nori"):
         pytest.skip("interlatent-robot-nori not installed in this environment")
     data = robots.load("nori")
     assert list(data.ik_config["chains"]) == ["left", "right"]
-    assert robots.has_meshes("nori")
+    # nori is kinematics-only: no meshes shipped or needed for IK.
+    assert not robots.has_meshes("nori")

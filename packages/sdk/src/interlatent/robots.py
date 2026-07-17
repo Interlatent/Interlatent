@@ -12,17 +12,21 @@ the internal ``interlatent-engine`` are both the top-level package ``interlatent
 and collide on install, so robot data buried in ``interlatent`` could never reach
 a pod running the engine. See ``packaging/build_robot_wheel.py``.
 
-Meshes are not shipped in the wheel (~15 MB of STL/rig). :func:`ensure_meshes`
-resolves ``meshes.lock`` on demand and verifies every file by ``sha256``;
-:func:`ensure_bundle` lays out a complete, real-filesystem bundle dir (URDF +
-configs + ``assets/`` meshes) — what MuJoCo needs and what the node's
-forward-to-browser path (spec only) does not.
+IK needs no geometry (it is a function of the joint tree), so the shipped URDF is
+kinematics-only and by default no meshes are involved anywhere — a kind ships no
+``meshes.lock`` and :func:`has_meshes` is False for it. The mesh machinery remains
+for a kind that genuinely needs STLs later (a 3D preview, sim, collision-aware
+retargeting): if a ``meshes.lock`` is present, :func:`ensure_meshes` resolves it on
+demand and verifies every file by ``sha256``, and :func:`ensure_bundle` lays out a
+real-filesystem bundle dir (URDF + configs, plus ``assets/`` meshes only when a lock
+exists).
 """
 from __future__ import annotations
 
 import hashlib
 import importlib
 import importlib.resources as ir
+import importlib.util
 import json
 import logging
 import os

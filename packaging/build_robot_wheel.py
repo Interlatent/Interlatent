@@ -15,12 +15,13 @@ shared **namespace** package ``interlatent_robots`` (PEP 420 — no top-level
             <robot>.urdf
             ik_config.json
             kinematic_spec.json
-            meshes.lock
+            meshes.lock          (OPTIONAL — omitted by default; IK needs no geometry)
 
 ``pip install interlatent[<kind>]`` pulls the matching wheel via an extra; the
 SDK's :mod:`interlatent.robots` resolver reads it back with
-``importlib.resources``. Meshes are *not* vendored — ``meshes.lock`` pins them and
-``interlatent.robots.ensure_meshes`` fetches on demand.
+``importlib.resources``. The URDF is kinematics-only (no mesh geometry), so by
+default no meshes are involved anywhere; a ``meshes.lock`` may be added for a kind
+that later needs STLs, and ``interlatent.robots.ensure_meshes`` fetches on demand.
 
 This is pure-data packaging: no compiled deps, no MuJoCo, so it builds anywhere.
 
