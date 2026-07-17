@@ -1,7 +1,10 @@
-# 0017 — Robot embodiment data ships in the SDK, per-kind, via public PyPI
+# 0017 — Robot embodiment data ships in the SDK wheel, per-kind
 
 - Status: Accepted
 - Date: 2026-07-16
+- Amended: 2026-07-16 — robot data ships **in the `interlatent` wheel**, not as a
+  separate `interlatent-robot-<kind>` distribution per kind. See "Amendment" below.
+  The rest of the decision (public, per-kind, in-repo, mesh-free) is unchanged.
 - Supersedes part of: [0012](0012-teleop-receiver-stub-open-core-boundary.md) (the open-core boundary — see below)
 - Extends: [0011](0011-vendor-robot-subpackage-via-robot-kind.md) (vendor subpackage selected by robot kind)
 
@@ -34,18 +37,21 @@ in `interlatent` could never reach a pod running the engine, and would bloat the
 
 ## Decision
 
-Robot data ships as a **separate distribution per kind**, `interlatent-robot-<kind>`,
-each contributing `interlatent_robots/<kind>/` to a shared **PEP 420 namespace**
-package `interlatent_robots` (no top-level `__init__.py`, so any number coexist).
-Source of truth is the **public SDK repo** under `robots/<kind>/`; wheels publish
-to **public PyPI**; `pip install interlatent[<kind>]` pulls the matching wheel via
-the kind's existing extra. The SDK's `interlatent.robots` module resolves an
-installed kind by `robot_kind` (`load`, `ensure_bundle`, `ensure_meshes`).
+Robot data ships **in the `interlatent` wheel** as `interlatent_robots/<kind>/`, one
+data-only subpackage per kind under a **PEP 420 namespace** package
+`interlatent_robots` (no top-level `__init__.py`). Source of truth is the **public
+SDK repo** under `packages/sdk/src/interlatent_robots/<kind>/`. Every kind ships with
+every install — `pip install interlatent` is enough to resolve one; the per-kind
+extras carry that robot's **driver** deps, not its data. The SDK's
+`interlatent.robots` module resolves an installed kind by `robot_kind` (`load`,
+`ensure_bundle`, `ensure_meshes`).
 
-1. **Distinct top-level name (`interlatent_robots`), not `interlatent`.** This is
-   the crux: it collides with neither the SDK nor the engine, so a pod can install
-   the engine *and* a robot wheel in one environment. Verified by a coexistence
-   install test.
+1. **Distinct top-level name (`interlatent_robots`), not `interlatent`.** It collides
+   with neither the SDK nor the engine, and — as an unowned PEP 420 namespace —
+   resolution walks the namespace without caring which distribution provides a kind.
+   So a kind can be split into its own distribution later without changing an import
+   or a line of `robots.py`. That is the option this decision keeps open; see the
+   Amendment for why it is not exercised now.
 
 2. **Meshes are off the critical path entirely.** IK is a function of the joint
    tree (origins, axes, limits, tool0), not geometry, so the shipped URDF is
@@ -73,20 +79,52 @@ installed kind by `robot_kind` (`load`, `ensure_bundle`, `ensure_meshes`).
    — honest about the fact that a new robot needs maintainer review anyway
    (`webxr_to_base_R`/`tool0_offset` encode rig geometry no file carries).
 
-5. **The kind is the key, everywhere.** `robots/<kind>/` dir = `robot_kind` the node
-   reports = wheel kind = S3 bundle key. The canonical dual-SO-101 kind is `nori`;
-   `so101_bimanual` (a stale S3 mis-upload) is retired.
+5. **The kind is the key, everywhere.** `interlatent_robots/<kind>/` dir =
+   `robot_kind` the node reports = subpackage name. The canonical dual-SO-101 kind is
+   `nori`; `so101_bimanual` (a stale S3 mis-upload) is retired.
+
+## Amendment (2026-07-16): one distribution, not one per kind
+
+As first written, this ADR shipped each kind as its own `interlatent-robot-<kind>`
+distribution on PyPI. That rested on one argument — the SDK and the engine are both
+the import package `interlatent` and collide, so **a pod running the engine could
+never `pip install` data buried in `interlatent`**. The wheels were never published,
+which made `pip install interlatent[yam]` unresolvable (the extra required a registry
+package that did not exist). Revisiting it, the argument does not hold:
+
+- **No pod ever consumes the data by pip.** The engine has zero references to
+  `interlatent_robots`; it resolved bundles from the backend/S3 (`retarget/bundle_cache.py`),
+  and that path is being retired. The new design sends `kinematic_spec` to the browser
+  over QUIC from the node, and the browser runs IK — so the pod needs no robot data at
+  all. The only pip consumer is the **node** (`node/teleop/quic_channel.py`), which
+  installs the SDK and therefore has no collision to avoid.
+- **The size argument died with the meshes.** The "~15 MB of STL per robot" that
+  motivated separation was eliminated by point 2 above. The real payload is ~18 KB per
+  kind, so gating it behind an extra saves nothing worth a distribution boundary.
+- **Separation was not what bought the collision fix anyway.** The collision is on the
+  *import* name `interlatent`; `interlatent_robots` is a different top-level name, and
+  a single wheel can ship both.
+
+What that design cost was real and recurring: a PyPI project and a manual pending-publisher
+step per kind (in an ADR whose goal was reviewable, PR-only onboarding), a publish
+workflow, and version skew between the SDK and its data.
+
+Reversing is cheap to undo. Because point 1 keeps `interlatent_robots` an unowned PEP
+420 namespace, splitting a kind back into its own distribution is a packaging change
+with no import changes — worth doing **if** a pod ever needs to `pip install` robot
+data, and not before.
 
 ## Consequences
 
-- Adding a robot approaches "add `robots/<kind>/` and open a PR"; the wheel build
-  (`packaging/build_robot_wheel.py`) is pure-data and runs anywhere.
-- An operator can `pip install interlatent[<kind>]` and get a real, verifiable
-  embodiment — the standalone-teleop story 0012 had foreclosed.
-- The S3 bundle path for the hosted pod is **unchanged**; this adds a second
-  distribution channel, it does not retire the first. Two sources of the same data
-  now exist (S3 + wheel); keeping them from drifting is a follow-up (single build
-  that publishes both).
+- Adding a robot is "add `packages/sdk/src/interlatent_robots/<kind>/`, list it in
+  `package-data`, open a PR" — no publish step, no PyPI project, no release lever.
+  `tests/test_robots.py` fails a kind that is incomplete or mis-named (the guard that
+  previously lived in the wheel builder's `_validate`).
+- An operator can `pip install interlatent` and get a real, verifiable embodiment —
+  the standalone-teleop story 0012 had foreclosed.
+- Robot data now versions **with the SDK**, so the two cannot drift apart, and a kind
+  is either in your `interlatent` version or it is not. Shipping a robot means
+  releasing the SDK — acceptable while robot data is ~18 KB/kind and changes rarely.
 - Public tuning: `ik_config` values (and the `damping`/`w_rot` embedded in the
   spec) are now visible. Accepted.
 - Open question deferred: who runs the MuJoCo exporter on an untrusted public PR

@@ -257,8 +257,8 @@ class QuicTeleopChannel:
 
     def _load_spec_wire(self) -> Optional[bytes]:
         """Frame this node's installed kinematic_spec, or None when there is no
-        local robot data (the browser then falls back to the platform's HTTP
-        ``kinematic-spec`` endpoint). Best-effort — never raises into start()."""
+        local robot data — the node is the only source of the spec, so None means
+        QUIC teleop will not start. Best-effort — never raises into start()."""
         kind = (self._robot_kind or "").strip()
         if not kind:
             return None
@@ -266,10 +266,14 @@ class QuicTeleopChannel:
             from interlatent import robots
             spec = robots.load_kinematic_spec(kind)
         except Exception as exc:
+            # Robot data ships in the SDK wheel for every kind, so this is not a
+            # missing-extra problem: the kind is unknown to this SDK version (or
+            # the node reports a robot_kind no robots dir matches).
             _LOG.warning(
                 "teleop(quic) no local kinematic_spec for robot_kind=%r (%s) — "
                 "QUIC teleop will not start for this node (no fallback source). "
-                "Install it: pip install 'interlatent[%s]'", kind, exc, kind,
+                "This SDK ships no data for that kind; check --robot, or upgrade "
+                "interlatent if the kind is newer than this install.", kind, exc,
             )
             return None
         try:

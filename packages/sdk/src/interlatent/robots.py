@@ -1,16 +1,22 @@
 """Resolve installed robot embodiment data by ``robot_kind``.
 
 Robot data (URDF, ``ik_config.json``, ``kinematic_spec.json``, ``meshes.lock``)
-ships as separate ``interlatent-robot-<kind>`` distributions, each contributing
-``interlatent_robots/<kind>/`` to a shared PEP 420 namespace, and is pulled in by
-``pip install interlatent[<kind>]``. This module is the read side: given a kind,
-find its installed data and hand back paths or parsed JSON, uniformly, whether or
-not the wheel happens to be unpacked on disk.
+ships in the SDK wheel as ``interlatent_robots/<kind>/``, one data-only subpackage
+per kind. This module is the read side: given a kind, find its installed data and
+hand back paths or parsed JSON, uniformly, whether or not the wheel happens to be
+unpacked on disk.
 
-Why a separate distribution rather than data inside ``interlatent``: the SDK and
-the internal ``interlatent-engine`` are both the top-level package ``interlatent``
-and collide on install, so robot data buried in ``interlatent`` could never reach
-a pod running the engine. See ``packaging/build_robot_wheel.py``.
+Why the distinct top-level ``interlatent_robots`` rather than data inside
+``interlatent``: the SDK and the internal ``interlatent-engine`` are both the
+top-level package ``interlatent`` and collide on install, so a name of our own
+keeps the data reachable from either. It is also a PEP 420 namespace that the SDK
+never claims (no ``interlatent_robots/__init__.py``), so a kind can move into its
+own distribution later without changing a single import — the resolution below
+walks the namespace and does not care which distribution provides a kind.
+
+The data is ~18 KB per kind and ships for every kind, so ``pip install interlatent``
+is enough to resolve one. The per-kind extras (``interlatent[yam]``) carry that
+robot's *driver* dependencies, not its data.
 
 IK needs no geometry (it is a function of the joint tree), so the shipped URDF is
 kinematics-only and by default no meshes are involved anywhere — a kind ships no
@@ -53,7 +59,7 @@ def _pkg(kind: str) -> str:
 
 
 def is_installed(kind: str) -> bool:
-    """True if ``interlatent-robot-<kind>`` is importable in this environment."""
+    """True if ``interlatent_robots.<kind>`` is importable in this environment."""
     try:
         return importlib.util.find_spec(_pkg(kind)) is not None
     except (ImportError, ValueError):

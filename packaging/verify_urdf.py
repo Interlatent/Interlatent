@@ -7,7 +7,7 @@ regenerating a spec, and especially after stripping meshes to a kinematics-only
 URDF: it's the check that the model still builds with no mesh assets and that the
 shipped `kinematic_spec.json` still matches the URDF.
 
-Three levels, each gated on what's present in `robots/<kind>/`:
+Three levels, each gated on what's present in `interlatent_robots/<kind>/`:
 
   1. COMPILE — load the URDF exactly as the engine does (`MjSpec.from_file` +
      `compile`) and report bodies / joints / DOF / mesh count. This is the
@@ -23,7 +23,7 @@ Three levels, each gated on what's present in `robots/<kind>/`:
 
 Usage::
 
-    python packaging/verify_urdf.py robots/nori
+    python packaging/verify_urdf.py packages/sdk/src/interlatent_robots/nori
     python packaging/verify_urdf.py --all
     python packaging/verify_urdf.py path/to/robot.urdf --ik-config ic.json \
         --kinematic-spec spec.json --samples 512
@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ROBOTS_DIR = REPO_ROOT / "robots"
+ROBOTS_DIR = REPO_ROOT / "packages" / "sdk" / "src" / "interlatent_robots"
 
 DEFAULT_SAMPLES = 256
 DEFAULT_POS_TOL = 1e-4   # metres
@@ -294,8 +294,8 @@ def _resolve_inputs(target: Path, args):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("target", nargs="?", help="a robots/<kind>/ dir or a .urdf path")
-    ap.add_argument("--all", action="store_true", help="verify every robots/<kind>/")
+    ap.add_argument("target", nargs="?", help="an interlatent_robots/<kind>/ dir or a .urdf path")
+    ap.add_argument("--all", action="store_true", help="verify every interlatent_robots/<kind>/")
     ap.add_argument("--ik-config", help="override ik_config.json path")
     ap.add_argument("--kinematic-spec", help="override kinematic_spec.json path")
     ap.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
@@ -316,11 +316,11 @@ def main() -> None:
         targets = sorted(p for p in ROBOTS_DIR.iterdir()
                          if p.is_dir() and any(p.glob("*.urdf")))
         if not targets:
-            raise SystemExit("no robots/<kind>/ dirs with a .urdf")
+            raise SystemExit("no interlatent_robots/<kind>/ dirs with a .urdf")
     elif args.target:
         targets = [Path(args.target)]
     else:
-        ap.error("give a robots/<kind>/ dir, a .urdf path, or --all")
+        ap.error("give an interlatent_robots/<kind>/ dir, a .urdf path, or --all")
 
     all_ok = True
     for target in targets:

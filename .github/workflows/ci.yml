@@ -34,7 +34,7 @@ jobs:
           pip install build
           python -m build --wheel ./packages/sdk -o /tmp/wheels
           python - <<'EOF'
-          import glob, zipfile
+          import glob, pathlib, zipfile
           required = {
               "interlatent-": ["interlatent/node/cli.py",                # interlatent-node
                                "interlatent/node/act_cli.py",             # interlatent-act
@@ -47,7 +47,23 @@ jobs:
               names = zipfile.ZipFile(wheel).namelist()
               for f in files:
                   assert f in names, f"{f} missing from {wheel}"
-          print("all wheels complete")
+          # Robot data ships in this wheel (ADR 0017). package-data is opt-in per
+          # kind, so a new robots dir can be added and silently not ship — the node
+          # then cannot start QUIC teleop for it. Check the tree against the wheel.
+          [wheel] = glob.glob("/tmp/wheels/interlatent-*.whl")
+          names = set(zipfile.ZipFile(wheel).namelist())
+          src = pathlib.Path("packages/sdk/src/interlatent_robots")
+          kinds = sorted(p.name for p in src.iterdir() if p.is_dir() and p.name != "__pycache__")
+          assert kinds, f"no robot kinds found under {src}"
+          for kind in kinds:
+              for f in src.glob(f"{kind}/*"):
+                  if f.suffix in (".urdf", ".json", ".lock", ".py"):
+                      assert f"interlatent_robots/{kind}/{f.name}" in names, \
+                          (f"interlatent_robots/{kind}/{f.name} missing from {wheel} — "
+                           f"add the kind to [tool.setuptools.package-data]")
+          # PEP 420: the SDK must not claim the namespace (ADR 0017 point 1).
+          assert "interlatent_robots/__init__.py" not in names
+          print(f"all wheels complete (robot kinds: {', '.join(kinds)})")
           EOF
 
   secret-scan:

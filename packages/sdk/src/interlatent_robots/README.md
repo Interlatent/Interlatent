@@ -1,13 +1,19 @@
-# `robots/` — teleop embodiment data, one directory per robot kind
+# `interlatent_robots/` — teleop embodiment data, one subpackage per robot kind
 
-Each subdirectory is the **source** for one `interlatent-robot-<kind>` wheel: the
-robot data an operator's node and the browser IK need, keyed by the `robot_kind`
-string the node reports (`--robot <kind>`). Publishing is `packaging/build_robot_wheel.py`.
+Each subdirectory is the robot data an operator's node and the browser IK need,
+keyed by the `robot_kind` string the node reports (`--robot <kind>`). It ships in
+the `interlatent` wheel (~18 KB/kind) and is read back through `interlatent.robots`
+— never by path from here.
+
+`interlatent_robots` is a **PEP 420 namespace**: it has no `__init__.py`, and must
+not gain one. The SDK does not own the name, so a kind can be split into its own
+distribution later without changing an import.
 
 Adding a robot is meant to be "drop a URDF in and open a PR":
 
 ```
-robots/<kind>/
+packages/sdk/src/interlatent_robots/<kind>/
+    __init__.py           # data-only marker; copy an existing kind's.
     <robot>.urdf          # KINEMATICS-ONLY: links + joints + inertials, no
                           #   <visual>/<collision> geometry. Joint <limit>/<origin>/
                           #   <axis> are authoritative; there are no mesh refs.
@@ -16,6 +22,10 @@ robots/<kind>/
     meshes.lock           # OPTIONAL: {name,url,sha256} per mesh. Omit it (default)
                           #   — IK needs no geometry. Add only if a kind ships meshes.
 ```
+
+Also add the kind to `[tool.setuptools.package-data]` in `packages/sdk/pyproject.toml`,
+or its data files will not ship. `tests/test_robots.py` fails on a kind that is
+incomplete, mis-named, or missing from the tree.
 
 ## The two configs are different jobs — do not confuse them
 
@@ -54,8 +64,8 @@ stripping meshes:
 
 ```bash
 pip install mujoco numpy
-python packaging/verify_urdf.py robots/nori        # one kind
-python packaging/verify_urdf.py --all              # every robots/<kind>/
+python packaging/verify_urdf.py packages/sdk/src/interlatent_robots/nori
+python packaging/verify_urdf.py --all   # every kind
 ```
 
 It (1) compiles the URDF exactly as the engine does (`MjSpec.from_file` + `compile`)
@@ -66,6 +76,6 @@ loudly. Exit status is nonzero on any failure.
 
 ## Naming
 
-The directory name **is** the `robot_kind` and **is** the wheel's kind — it must equal
+The directory name **is** the `robot_kind` and **is** the kind's subpackage name — it must equal
 the string the live node reports. `nori` is the dual-SO-101 rig (historically also
 mis-labelled `so101_bimanual` in an early S3 upload; that name is retired).

@@ -10,6 +10,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -135,38 +136,47 @@ def test_ensure_meshes_rejects_tampered_hash(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The build script's validation (runs without building anything).
+# Every kind shipped in the SDK source tree is complete and well-named. This is
+# the guard that used to live in the standalone wheel builder's _validate(); the
+# data now ships in the SDK wheel, so it is checked against the real tree on
+# every run instead of only at wheel-build time.
 # ---------------------------------------------------------------------------
 
-def _load_builder():
-    path = (Path(__file__).resolve().parents[1] / "packaging" / "build_robot_wheel.py")
-    spec = importlib.util.spec_from_file_location("_build_robot_wheel", path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+_SRC_KINDS_DIR = Path(__file__).resolve().parents[1] / "packages" / "sdk" / "src" / "interlatent_robots"
+# A kind is a Python package-name component and the robot_kind the node reports,
+# so hold it to what both accept.
+_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def test_build_validation_requires_spec(tmp_path):
-    b = _load_builder()
-    src = tmp_path / "x"
-    src.mkdir()
-    (src / "arm.urdf").write_text("<robot/>")
-    (src / "ik_config.json").write_text("{}")
-    files = b._collect_data(src)
-    with pytest.raises(SystemExit, match="kinematic_spec.json"):
-        b._validate("x", src, files)
+def _source_kinds() -> list[Path]:
+    return sorted(p for p in _SRC_KINDS_DIR.iterdir()
+                  if p.is_dir() and p.name != "__pycache__")
 
 
-def test_build_validation_rejects_bad_kind(tmp_path):
-    b = _load_builder()
-    src = tmp_path / "X-Bad"
-    src.mkdir()
-    for n in ("arm.urdf", "ik_config.json", "kinematic_spec.json"):
-        (src / n).write_text("{}" if n.endswith(".json") else "<robot/>")
-    files = b._collect_data(src)
-    with pytest.raises(SystemExit, match="must match"):
-        b._validate("X-Bad", src, files)
+def test_source_tree_has_kinds():
+    """Guard the guard: if the layout moves, the checks below must not silently
+    pass by iterating an empty dir."""
+    assert [p.name for p in _source_kinds()] == ["nori", "yam"]
+
+
+@pytest.mark.parametrize("kind_dir", _source_kinds(), ids=lambda p: p.name)
+def test_shipped_kind_is_complete(kind_dir):
+    assert _KIND_RE.match(kind_dir.name), f"{kind_dir.name!r} must match {_KIND_RE.pattern}"
+    names = {f.name for f in kind_dir.iterdir()}
+    # A kind without kinematic_spec.json installs clean and then makes the arms
+    # do nothing — the browser cannot build a solver from it.
+    for required in ("ik_config.json", "kinematic_spec.json", "__init__.py"):
+        assert required in names, f"{kind_dir.name}/: missing {required}"
+    urdfs = [f for f in kind_dir.iterdir() if f.suffix == ".urdf"]
+    assert len(urdfs) == 1, f"{kind_dir.name}/: expected one .urdf, found {len(urdfs)}"
+    for jf in ("ik_config.json", "kinematic_spec.json"):
+        json.loads((kind_dir / jf).read_text(encoding="utf-8"))
+
+
+def test_namespace_stays_unowned():
+    """interlatent_robots must have no __init__.py: it is a PEP 420 namespace, so
+    a kind can be split into its own distribution later without moving imports."""
+    assert not (_SRC_KINDS_DIR / "__init__.py").exists()
 
 
 def test_resolver_imports_clean_in_a_fresh_interpreter():
@@ -186,10 +196,11 @@ def test_resolver_imports_clean_in_a_fresh_interpreter():
     assert "ok" in r.stdout
 
 
-def test_real_nori_wheel_installs_here_or_skips():
-    """If interlatent[nori] is installed in this env, its data must resolve."""
-    if not robots.is_installed("nori"):
-        pytest.skip("interlatent-robot-nori not installed in this environment")
+def test_real_nori_data_resolves():
+    """Robot data ships in the SDK wheel, so every kind resolves wherever the SDK
+    is installed — no extra, no skip. `interlatent[nori]` adds the nori *driver*
+    deps; the data is there either way."""
+    assert robots.is_installed("nori")
     data = robots.load("nori")
     assert list(data.ik_config["chains"]) == ["left", "right"]
     # nori is kinematics-only: no meshes shipped or needed for IK.

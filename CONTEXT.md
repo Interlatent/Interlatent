@@ -55,14 +55,17 @@ hatch, not a kind.
 
 **Robot data**:
 A robot kind's teleop embodiment files — a kinematics-only URDF, `ik_config.json`,
-and `kinematic_spec.json` — shipped as a standalone `interlatent-robot-<kind>`
-distribution (top-level namespace `interlatent_robots`, read via
-`interlatent.robots`). Kept out of the `interlatent` package on purpose: the SDK
-and the internal engine are both the `interlatent` import package and would collide
-on install. Meshes are **not** part of it — IK needs no geometry — though a
-`meshes.lock` may optionally be added for a kind that later needs STLs (viewer/sim).
+and `kinematic_spec.json` — shipped **in the `interlatent` wheel** under the
+top-level namespace `interlatent_robots` (one subpackage per kind, read via
+`interlatent.robots`). Under `interlatent_robots`, not `interlatent`, on purpose:
+the SDK and the internal engine are both the `interlatent` import package and would
+collide on install. Every kind ships with every install (~18 KB each); the per-kind
+extras carry that robot's **driver** deps, not its data. Meshes are **not** part of
+it — IK needs no geometry — though a `meshes.lock` may optionally be added for a
+kind that later needs STLs (viewer/sim).
 _Avoid_: calling the whole thing a "bundle" — that word is the platform's S3
-artifact; the wheel is the operator-installable mirror of the same source.
+artifact, a path being retired; robot data in the SDK is the operator-installable
+source of the same files.
 
 **IK config** (`ik_config.json`):
 The hand-authored half of **Robot data**: the robot-specific tuning the
