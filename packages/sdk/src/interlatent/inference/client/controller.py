@@ -105,6 +105,7 @@ class DRTCConfig:
     metadata: dict[str, str] = field(default_factory=dict)
     stats_interval_s: float = 5.0          # period of the DRTC telemetry log line; 0 disables
     rec_batch_max_ticks: int = 16          # coalesce up to N queued ticks per RecordTicks RPC
+    synchronous: bool = False              # sequential (request-response) chunking: one fully-drained chunk per observation, no overlap
 
 
 
@@ -131,6 +132,13 @@ class DRTCClient:
         self._receiver: Optional[ActionReceiver] = None
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Sequential (--synchronous) chunking gate: set when a chunk request is
+        # outstanding, cleared when the chunk — or a failed Infer — returns. Lets
+        # step() fire exactly one observation per fully-drained schedule with no
+        # overlap. Set by the control-loop thread, cleared by the sender thread;
+        # an Event gives the cross-thread visibility a plain bool would not. Unused
+        # in async mode.
+        self._in_flight = threading.Event()
         # close() can be driven from two threads: the control-loop runner's
         # finally AND the node daemon's stop path (which force-closes when a
         # robot teardown wedges). Guard the body so exactly one caller runs
@@ -149,6 +157,7 @@ class DRTCClient:
         self._stat_t0 = time.monotonic()
         self._stat_steps = 0          # step() calls this window
         self._stat_none = 0           # step() calls that returned None (starved)
+        self._stat_wait = 0           # step() None-returns that are expected sync-mode holds (not starvation)
         self._stat_infer = 0          # observations sent this window
         self._stat_chunk = 0          # action chunks received this window
         self._stat_qmin = 1 << 30     # min queue depth seen this window
@@ -260,6 +269,10 @@ class DRTCClient:
             schedule=self.schedule,
             latency=self.latency,
             sent_at=self._sent_at,
+            # Sequential (--synchronous) chunking: clear the in-flight gate when a
+            # chunk lands so step() can fire the next observation once the schedule
+            # drains. Runs on the sender thread; harmless no-op in async mode.
+            on_chunk=lambda _chunk: self._in_flight.clear(),
         )
 
         def _send(msg: pb.Observation) -> None:
@@ -277,6 +290,10 @@ class DRTCClient:
             except Exception:
                 log.exception("Infer RPC failed; cooldown will re-fire")
                 self._sent_at.pop(msg.control_timestamp, None)
+                # Sync mode has no cooldown fallback: release the in-flight gate so
+                # the next tick retries instead of stalling the robot forever. No-op
+                # in async mode (the gate is unused there).
+                self._in_flight.clear()
                 return
             self._last_rtt_s = time.monotonic() - t0
             self._last_compute_s = chunk.server_compute_ns / 1e9
@@ -659,20 +676,33 @@ class DRTCClient:
         # DRTC cooldown O^c: decrement once per control step.
         self.cooldown.tick()
 
-        # DRTC trigger: fire an inference request when the schedule has
-        # drained below the horizon AND the cooldown has elapsed
-        # (O^c == 0). The horizon is the latency estimate plus a margin
-        # (min_execution_horizon) so the chunk lands before the queue
-        # hits zero; the cooldown — armed to the estimated latency —
-        # both prevents double-firing within one inference and re-fires
-        # automatically if a chunk is lost (O^c reaches 0 with the
-        # schedule still below the horizon).
+        # Trigger a new inference request. Two cadences:
+        #  - ASYNC (default, overlapping/replace-mode chunking): fire when the
+        #    schedule has drained below the execution horizon AND the cooldown
+        #    O^c has elapsed. The horizon (latency estimate + min_execution_horizon)
+        #    lands the chunk before the queue empties; the cooldown — armed to the
+        #    estimated latency — prevents double-firing within one inference and
+        #    re-fires automatically if a chunk is lost.
+        #  - SYNCHRONOUS (sequential / request-response chunking, opt-in): fire ONLY
+        #    when the schedule is fully drained (depth == 0) and no request is in
+        #    flight. One chunk executes to completion before the next observation,
+        #    so a fresh chunk never overwrites an unexecuted tail. The in-flight
+        #    Event replaces the cooldown as the anti-double-fire gate — there is no
+        #    cooldown fallback here, so the _send error path clears the gate to keep
+        #    a dropped Infer from stalling the robot forever.
         delay = self.latency.estimate_steps(self.cfg.control_period_s)
-        horizon = delay + self.cfg.min_execution_horizon
-        if depth < horizon and self.cooldown.ready():
+        if self.cfg.synchronous:
+            should_send = depth == 0 and not self._in_flight.is_set()
+        else:
+            horizon = delay + self.cfg.min_execution_horizon
+            should_send = depth < horizon and self.cooldown.ready()
+        if should_send:
             payload = observation() if callable(observation) else observation
-            # O^c <- (latency estimate, or s_min before one exists) + epsilon
-            self.cooldown.arm(delay if delay > 0 else self.cfg.min_execution_horizon)
+            if self.cfg.synchronous:
+                self._in_flight.set()
+            else:
+                # O^c <- (latency estimate, or s_min before one exists) + epsilon
+                self.cooldown.arm(delay if delay > 0 else self.cfg.min_execution_horizon)
             self._sender.submit(
                 PendingObservation(
                     payload=payload,
@@ -683,7 +713,13 @@ class DRTCClient:
 
         action = self.schedule.pop_next()
         if action is None:
-            self._stat_none += 1
+            # In sync mode the gap between chunks is an EXPECTED hold (the robot
+            # holds its last pose while it waits for the next chunk), not transport
+            # starvation — count it separately so starvation_pct stays meaningful.
+            if self.cfg.synchronous and self._in_flight.is_set():
+                self._stat_wait += 1
+            else:
+                self._stat_none += 1
             return None
         # Track step-to-step action change — large jumps on a HEALTHY
         # queue point at the policy, not the transport.
@@ -755,6 +791,7 @@ class DRTCClient:
             "control_hz": round(steps / dt, 1),
             "action_hz": round((steps - none) / dt, 1),
             "starvation_pct": round(100.0 * none / steps, 1) if steps else 0.0,
+            "sync_wait_pct": round(100.0 * self._stat_wait / steps, 1) if steps else 0.0,
             "queue_depth": self.schedule.queue_depth(),
             "queue_min": 0 if self._stat_qmin == (1 << 30) else self._stat_qmin,
             "infer_ms": round(self._last_rtt_s * 1000.0, 1),
@@ -770,7 +807,7 @@ class DRTCClient:
             "rec_dropped": self._rec_dropped_full + self._rec_dropped_close,
         }
         self._stat_t0 = now
-        self._stat_steps = self._stat_none = 0
+        self._stat_steps = self._stat_none = self._stat_wait = 0
         self._stat_infer = self._stat_chunk = 0
         self._stat_qmin = 1 << 30
         self._stat_jitter_sum = 0.0
@@ -785,11 +822,13 @@ class DRTCClient:
             if s["control_hz"] == 0.0:
                 continue  # loop not running yet — nothing to report
             log.info(
-                "DRTC | %.1f Hz (actions %.1f Hz, starvation %.1f%%) | "
+                "DRTC | %.1f Hz (actions %.1f Hz, starvation %.1f%%, "
+                "sync-wait %.1f%%) | "
                 "queue %d (min %d) | infer %.0fms = compute %.0fms + net %.0fms "
                 "(est %.0fms) | sent %d recv %d | action Δ %.4f | "
                 "rec %.1f Hz (%.0f KB/s, q %d, dropped %d)",
                 s["control_hz"], s["action_hz"], s["starvation_pct"],
+                s["sync_wait_pct"],
                 s["queue_depth"], s["queue_min"], s["infer_ms"],
                 s["compute_ms"], s["net_ms"], s["infer_est_ms"],
                 s["infer_sent"], s["chunks_recv"], s["action_delta"],

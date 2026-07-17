@@ -56,6 +56,7 @@ def connect_drtc(
     payload_codec: str = "npz",
     task: str = "",
     stats_interval_s: float = 5.0,
+    synchronous: bool = False,
     metadata: Optional[dict[str, str]] = None,
     # Server-side episode recording (DRTC node path). When ``record=True``
     # the GPU container persists every Infer observation + the returned
@@ -120,6 +121,14 @@ def connect_drtc(
         # string; round to the nearest control rate.
         md.setdefault("fps", str(int(round(fps)) if fps > 0 else 30))
 
+    # Sequential (request-response) chunking. The behavior is entirely client-side
+    # (see DRTCConfig.synchronous / controller.step); the server needs no change
+    # because RTC in-painting and crossfade self-disable when chunks stop
+    # overlapping. We still flag it in OpenSession metadata so the GPU-side log
+    # records which cadence a session ran.
+    if synchronous:
+        md.setdefault("synchronous", "1")
+
     # The DRTC wire protocol still names this field ``model_id`` (out of
     # scope for the SDK model_id retirement — that contract is owned by
     # Modal). We pass the env slug through it so the server can identify
@@ -140,6 +149,7 @@ def connect_drtc(
         # uses host:port; the hosted Modal endpoint is an https URL.
         use_grpc_web=url.startswith(("http://", "https://")),
         stats_interval_s=stats_interval_s,
+        synchronous=synchronous,
         metadata=md,
     )
     client = DRTCClient(cfg)

@@ -99,6 +99,12 @@ class NodeDaemonConfig:
     # Auto-defaulted to 256 for MolmoAct2 sessions (its image processor
     # downsamples anyway, so sending native 640x480 burns bandwidth).
     image_resize: Optional[int] = None
+    # Sequential (request-response) chunking for every session this node runs:
+    # one fully-drained chunk per observation, no async overlap. Diagnostic
+    # fallback for high-latency policies whose overlapping plans thrash the robot
+    # (MolmoAct2). Node-level today; the per-Session home is the dashboard payload
+    # (see the SDK CONTEXT.md flagged ambiguity).
+    synchronous: bool = False
 
     heartbeat_period_s: float = 10.0
     poll_wait_s: int = 25
@@ -494,6 +500,7 @@ class NodeDaemon:
             record=True,
             episode_id=session.get("id"),
             env_id=session.get("environment_id"),
+            synchronous=self.cfg.synchronous,
         )
 
         # Hosted DAgger teleop receiver. The TeleopChannel owns a background WS
