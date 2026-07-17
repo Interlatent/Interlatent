@@ -99,8 +99,19 @@ to joint *order*, not names, so this alignment is a correctness property, not a 
 ## 2. The adapter: what talks to the motors
 
 One directory under [`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the
-five methods. `robot.py` is the only required file; see
-[the anatomy table](README.md#what-an-adapter-actually-is-today) for what the others do.
+five methods:
+
+| File | Role |
+|---|---|
+| `robot.py` | **The robot.** Implements the five methods. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. The only file that has to exist. |
+| `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
+| `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
+| `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
+
+A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
+the rest is plumbing that exists because a robot needs configuring and looking at. Two of
+those four exist only because the abstraction isn't closed yet, which is why folding them
+into the robot class is a [future direction](README.md#fold-the-adapters-into-the-robot-class).
 
 ```python
 class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py

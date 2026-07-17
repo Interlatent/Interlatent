@@ -63,21 +63,10 @@ Two invariants worth stating up front, because they shape everything else:
 - **Each action is a waypoint, not a destination.** `send_action` is non-blocking and
   latest-wins; the control loop calls it once per tick.
 
-### What an adapter actually is today
-
-An adapter is a directory under [`adapters/`](packages/sdk/src/interlatent/adapters/):
-
-| File | Role |
-|---|---|
-| `robot.py` | **The robot.** Implements the five methods above. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. This is the only file that has to exist. |
-| `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
-| `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
-| `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
-
-A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
-the rest is plumbing that exists because a robot needs configuring and looking at. Two of
-those four files exist only because the abstraction isn't finished yet; folding them into
-the robot class is a [future direction](#fold-the-adapters-into-the-robot-class).
+An adapter that satisfies the contract is one directory under
+[`adapters/`](packages/sdk/src/interlatent/adapters/), and `robot.py` is the only file in it
+that has to exist. [ROBOT.md](ROBOT.md#2-the-adapter-what-talks-to-the-motors) breaks that
+directory down.
 
 ## What actually defines a robot
 
@@ -102,7 +91,7 @@ LeRobot) hands you joint names and live positions; a URDF hands you mechanical l
 Neither declares a *safe per-tick velocity cap* or a *home pose*, and those are exactly what
 you need to move an arm without breaking it.
 
-**→ [ROBOT.md](ROBOT.md) walks through all four**, using the real YAM profile: why its joint
+**[ROBOT.md](ROBOT.md) walks through all four**, using the real YAM profile: why its joint
 limits are the URDF's verbatim while its velocity caps are 5x below what that same URDF
 claims, how one adapter serves the `yam` / `yam_left` / `yam_right` topologies, and what
 adding your own arm actually costs.
@@ -145,9 +134,9 @@ above the robot interface is just a different answer to "who is driving."
 - The **`SafetyGate`** adds workspace, velocity, and deadman limits on human-driven motion.
   Its velocity-limited stepping is also what makes the manual `action()` call
   block-then-settle rather than slam.
-- Limits come from a per-robot **`RobotProfile`** (joint names, order, limits, velocity caps,
-  rest pose). A robot kind with no profile **refuses** manual motion rather than run
-  unguarded.
+- Both read their limits from the robot's **`RobotProfile`** (joint names, order, limits,
+  velocity caps, rest pose), which is why a robot without one gets no human-driven motion at
+  all.
 
 **Running a policy** means talking to a GPU, and big VLA models are too slow for naive
 request/response - the arm would stutter. So the client and the pod speak **DRTC**
@@ -361,9 +350,10 @@ That distinction is the one rule worth internalizing:
 > fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
 > profile, rather than move an arm with no safety envelope. This fails closed on purpose.
 
-Koch is wired and has a profile, but its envelope is a conservative starting guess rather
-than hardware-measured, so treat it as unverified until you have checked it on real
-hardware. For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
+Koch is marked unverified because its envelope is a conservative starting guess rather than
+hardware-measured. It should work; nobody has confirmed it on a real arm.
+
+For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 [docs/robots-and-policies.md](docs/robots-and-policies.md).
 
 **Missing your arm?** Adding robots is the contribution we most want, and it should cost you
@@ -375,10 +365,14 @@ one `robot.py` and a profile. [ROBOT.md](ROBOT.md#adding-a-new-robot) is the wal
 The [Interlatent dashboard](https://interlatent.com) owns the cloud side: the GPU pods, and
 which policy each robot is running. The core objects:
 
-- **Environments** - a robot setup and its task, the unit everything else hangs off. The `environment` slug you pass to `connect_drtc` matches one here.
-- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the hardware. (`interlatent gpus ls`)
-- **Nodes** - your paired robots, created by `interlatent-node pair`. The running daemon heartbeats and reports status. (`interlatent nodes ls`)
-- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
+- **Environments** - a robot setup and its task, the unit everything else hangs off. The
+  `environment` slug you pass to `connect_drtc` matches one here.
+- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the
+  hardware. (`interlatent gpus ls`)
+- **Nodes** - your paired robots, created by `interlatent-node pair`. The running daemon
+  heartbeats and reports status. (`interlatent nodes ls`)
+- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node
+  converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
 
 Create an environment, configure its policy, start a GPU box, pair and run your node, then
 start a session. The node picks it up and the arm starts moving under the policy.
