@@ -2,10 +2,10 @@
 
 Everything this SDK does to an arm goes through one contract: five methods on a robot object
 ([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)). The
-[README](README.md#robot-class) explains that idea and lists the
-[robot kinds that work today](README.md#what-actually-defines-a-robot). This document is the
-reference for the files underneath it: what each one is, what it decides, and what you would
-write to add an arm of your own.
+[README](README.md#robot-class) explains that idea, and
+[Supported robots](README.md#supported-robots) lists the arms that work today. This document
+is the reference for the files underneath: what each one is, what it decides, and what you
+would write to add an arm of your own.
 
 Four files define a robot:
 
@@ -98,9 +98,31 @@ to joint *order*, not names, so this alignment is a correctness property, not a 
 
 ## 2. The adapter: what talks to the motors
 
-One directory under [`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the
-five methods. `robot.py` is the only required file; see
-[the anatomy table](README.md#what-an-adapter-actually-is-today) for what the others do.
+[`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py) declares the contract as
+two pieces:
+
+- **`RobotAdapter`** - a `Protocol` (a duck type, not a base class you must subclass).
+  Lifecycle plus observe/act, plus the metadata the manual path needs (`action_features`,
+  `joint_specs`).
+- **`ManualActionInterface`** - a mixin carrying the *one* piece of shared behavior:
+  `action(shoulder_pan=30, gripper=80)`, a named-joint, block-then-settle move composed
+  entirely out of the adapter's own `send_action` + `get_observation`. Every adapter
+  inherits it; none of them implement it.
+
+An adapter is one directory under
+[`adapters/`](packages/sdk/src/interlatent/adapters/), implementing the five methods:
+
+| File | Role |
+|---|---|
+| `robot.py` | **The robot.** Implements the five methods. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. The only file that has to exist. |
+| `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
+| `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
+| `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
+
+A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
+the rest is plumbing that exists because a robot needs configuring and looking at. Two of
+those four exist only because the abstraction isn't closed yet, which is why folding them
+into the robot class is a [future direction](README.md#fold-the-adapters-into-the-robot-class).
 
 ```python
 class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py

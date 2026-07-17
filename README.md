@@ -15,7 +15,7 @@ robot once (an adapter + a profile) and every capability above it comes for free
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 [![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[The idea](#robot-class) · [The map](#what-actually-defines-a-robot) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Docs](docs/)
+[Robot class](#robot-class) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Defining a robot](ROBOT.md) · [Docs](docs/)
 
 </div>
 
@@ -31,135 +31,38 @@ just want to move an arm, skip to the [Quickstart](#quickstart).
 
 ## Robot Class
 
-Everything in this SDK rests on a single idea: **a robot is one object with five methods.**
+Everything in this SDK rests on one idea: **a robot is a single object with five methods.**
 
 ```python
 robot.connect()
-obs = robot.get_observation()   # {'shoulder_pan.pos': 12.4, 'observation.images.front': <HxWx3 uint8>, ...}
-robot.send_action(action)       # {'shoulder_pan.pos': 30.0, ...}  fire-and-forget, latest-wins
+obs = robot.get_observation()   # joint positions + camera frames
+robot.send_action(action)       # absolute joint targets
 robot.disconnect()
-robot.action_features           # ordered joint keys; defines what the action vector means
+robot.action_features           # the ordered joint names; defines what an action means
 ```
 
-That contract lives in [`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)
-and it is the only thing the layers above a robot are allowed to know about. Behaviors, VLA
-policies, teleop, and dataset recording are all written against those five methods, which is
-exactly why adding a robot gives you all of them at once.
+That is the whole contract, and it is the only thing the layers above a robot are allowed to
+know about. Behaviors, VLA policies, teleop, and dataset recording are all written against
+those five methods, so adding a robot gives you all of them at once.
 
-`base.py` defines two things:
+Four words carry the rest of the docs:
 
-- **`RobotAdapter`** - a `Protocol` (a duck type, not a base class you must subclass).
-  Lifecycle plus observe/act, plus the metadata the manual path needs (`action_features`,
-  `joint_specs`).
-- **`ManualActionInterface`** - a mixin carrying the *one* piece of shared behavior:
-  `action(shoulder_pan=30, gripper=80)`, a named-joint, block-then-settle move composed
-  entirely out of the adapter's own `send_action` + `get_observation`. Every adapter
-  inherits it; none of them implement it.
-
-Two invariants worth stating up front, because they shape everything else:
-
-- **All actions are joint-space.** A vector of absolute joint targets, one per
-  `action_feature`. There is no IK or Cartesian frame anywhere in the robot-side stack.
-- **Each action is a waypoint, not a destination.** `send_action` is non-blocking and
-  latest-wins; the control loop calls it once per tick.
-
-### What an adapter actually is today
-
-An adapter is a directory under [`adapters/`](packages/sdk/src/interlatent/adapters/):
-
-| File | Role |
+| Term | What it means |
 |---|---|
-| `robot.py` | **The robot.** Implements the five methods above. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. This is the only file that has to exist. |
-| `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
-| `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
-| `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
+| **contract** | the five methods above. Nothing above a robot knows anything else about it. |
+| **adapter** | the code that implements them for one robot: its motors, cameras, and units. |
+| **profile** | your arm's physical facts: joint names and their order, limits, speed caps, and the home pose. |
+| **kind** | the name you ask for (`--robot yam`, `il.Robot("so101")`). It selects the adapter and the profile. |
 
-A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
-the rest is plumbing that exists because a robot needs configuring and looking at.
+Two rules shape everything above:
 
-### Where this is going: fold the adapters into the robot class
+- **Actions are joint-space.** Absolute joint targets, one per joint. There is no IK and no
+  Cartesian frame anywhere in the robot-side stack.
+- **An action is a waypoint, not a destination.** Sending one never blocks, and the newest
+  one wins. The control loop sends one per tick.
 
-The contract above is real and it works. The layer around it is **not finished**, and we'd
-rather say so here than let you discover it in the source. Today:
-
-- **The robot is a clean abstraction.** `base.py` + `robot.py` genuinely is one interface
-  across arms. This part is done.
-- **Cameras are only partly abstracted.** The YAM adapter defines a proper `Camera` Protocol
-  (`connect` / `read() -> RGB` / `disconnect`) with RealSense, ZED, and UVC backends behind
-  it. That is the right shape. But it is *local to that adapter* - others open their cameras
-  inside `robot.py` instead, so there is no single camera seam across the SDK.
-- **The control loop is copy-pasted, not factored.** There are three of them
-  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots, plus
-  a `loop.py` per native adapter). They all have the same shape - observe, decide who is
-  driving, clamp, `send_action`, record - and they all reuse the same wire helpers. They
-  differ only in small ways: whether teleop is wired, which safety composition applies, which
-  calibration preset is active. Those differences are *configuration wearing the costume of
-  code*.
-
-**The direction:** collapse those seams into the robot class.
-
-1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
-   `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
-   template.
-2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
-   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
-   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
-3. **A smaller adapter.** Once cameras and the loop are shared, a new robot is `robot.py`
-   plus a `RobotProfile`. `config.py` shrinks to a schema; `loop.py` disappears.
-
-The test for whether we've done this right: **adding an arm should be one file and a
-profile.** Anything more is a seam we haven't closed yet. Tracked in
-[Future directions](#future-directions).
-
-## What actually defines a robot
-
-The section above says what a robot *does*. This one says what your robot **is**: the map,
-before you write a line of code. [ROBOT.md](ROBOT.md) is the file-by-file reference behind it.
-
-### Robot kinds that work today
-
-`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python:
-
-| `--robot` | Joints | Units | Control loop | Extra |
-|---|---|---|---|---|
-| `so101`, `so101_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
-| `koch`, `koch_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
-| `yam`, `yam_bimanual` | 14 (left block, then right) | radians; gripper 0-1 | native | `[yam]` |
-| `yam_left`, `yam_right` | 7 | radians; gripper 0-1 | native | `[yam]` |
-| any other LeRobot robot | its own | LeRobot's | bundled LeRobot | `[lerobot]` |
-| `--loop module:fn` | yours | yours | yours | - |
-
-The first four rows are the kinds with a **`RobotProfile`** (the full list lives in
-`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
-That distinction is the one rule worth internalizing:
-
-> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
-> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
-> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
-
-Koch is wired and has a profile, but its envelope is a conservative starting guess rather
-than hardware-measured. Treat it as unverified.
-
-### The four files
-
-| File | What it decides | Yours to write? |
-|---|---|---|
-| **The profile** - `node/teleop/robot_profile.py` | joint names and their order, software limits, velocity caps, and the rest pose that `home` moves to | yes |
-| **The adapter** - `adapters/<kind>/robot.py` | what talks to the motors and the cameras | yes |
-| **`--robot-arg` / `--camera`** | per-run configuration | declared by your adapter |
-| **`node.toml`** | which machine this is, and its credential | generated by `interlatent-node pair` |
-
-The profile is the one people don't expect, and it carries the most weight: the `SafetyGate`
-enforces it, `home` is generated from it, `action()` validates against it, and behaviors are
-checked against it at load. It exists because no vendor gives you all of it. A driver (or
-LeRobot) hands you joint names and live positions; a URDF hands you mechanical limits.
-Neither declares a *safe per-tick velocity cap* or a *home pose*, and those are exactly what
-you need to move an arm without breaking it.
-
-**→ [ROBOT.md](ROBOT.md) walks through all four**, using the real YAM profile: why its joint
-limits are the URDF's verbatim while its velocity caps are 5x below what that same URDF
-claims, how one adapter serves the `yam` / `yam_left` / `yam_right` topologies, and what
-adding your own arm actually costs.
+**Adding a robot is an adapter plus a profile.** [ROBOT.md](ROBOT.md) is the file-by-file
+reference; [Supported robots](#supported-robots) lists the arms that work today.
 
 ## How the SDK works
 
@@ -199,9 +102,9 @@ above the robot interface is just a different answer to "who is driving."
 - The **`SafetyGate`** adds workspace, velocity, and deadman limits on human-driven motion.
   Its velocity-limited stepping is also what makes the manual `action()` call
   block-then-settle rather than slam.
-- Limits come from a per-robot **`RobotProfile`** (joint names, order, limits, velocity caps,
-  rest pose). A robot kind with no profile **refuses** manual motion rather than run
-  unguarded.
+- Both read their limits from the robot's **`RobotProfile`** (joint names, order, limits,
+  velocity caps, rest pose), which is why a robot without one gets no human-driven motion at
+  all.
 
 **Running a policy** means talking to a GPU, and big VLA models are too slow for naive
 request/response - the arm would stutter. So the client and the pod speak **DRTC**
@@ -395,17 +298,28 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 
 ## Supported robots
 
-Each robot has its own config doc covering host requirements, `--robot-arg` knobs, camera
-declarations, joint names/units, and worked examples. For the joint counts, units, and
-which profile each kind binds to, see
-[What actually defines a robot](#what-actually-defines-a-robot).
+`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python. Each robot's config doc covers
+host requirements, `--robot-arg` knobs, camera declarations, and worked examples.
 
-| Robot | `--robot` | Extra | Config doc |
-|---|---|---|---|
-| **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
-| Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
-| Custom hardware | `--loop module:fn` | - | bring your own I/O loop |
+| Robot | `--robot` | Joints and units | Extra | Config doc |
+|---|---|---|---|---|
+| **SO-101** (reference) | `so101`, `so101_follower` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **Koch v1.1** (unverified) | `koch`, `koch_follower` | 6; degrees, gripper 0-100 | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
+| Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
+
+Those first four rows are the kinds that ship a **`RobotProfile`** (the full list lives in
+`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
+That distinction is the one rule worth internalizing:
+
+> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
+> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
+> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
+
+Koch is marked unverified because its envelope is a conservative starting guess rather than
+hardware-measured. It should work; nobody has confirmed it on a real arm.
 
 For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 [docs/robots-and-policies.md](docs/robots-and-policies.md).
@@ -419,10 +333,14 @@ one `robot.py` and a profile. [ROBOT.md](ROBOT.md#adding-a-new-robot) is the wal
 The [Interlatent dashboard](https://interlatent.com) owns the cloud side: the GPU pods, and
 which policy each robot is running. The core objects:
 
-- **Environments** - a robot setup and its task, the unit everything else hangs off. The `environment` slug you pass to `connect_drtc` matches one here.
-- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the hardware. (`interlatent gpus ls`)
-- **Nodes** - your paired robots, created by `interlatent-node pair`. The running daemon heartbeats and reports status. (`interlatent nodes ls`)
-- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
+- **Environments** - a robot setup and its task, the unit everything else hangs off. The
+  `environment` slug you pass to `connect_drtc` matches one here.
+- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the
+  hardware. (`interlatent gpus ls`)
+- **Nodes** - your paired robots, created by `interlatent-node pair`. The running daemon
+  heartbeats and reports status. (`interlatent nodes ls`)
+- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node
+  converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
 
 Create an environment, configure its policy, start a GPU box, pair and run your node, then
 start a session. The node picks it up and the arm starts moving under the policy.
@@ -487,20 +405,38 @@ Forward-looking work that isn't scheduled yet. Each item is a direction, not a s
 
 ### Fold the adapters into the robot class
 
-The [opening section](#robot-class) states the goal; this is the shape of
-the work. Today an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`,
-`loop.py`), and two of them exist only because we haven't finished the abstraction.
+The [robot contract](#robot-class) is real and it works. The adapter layer *around* it is
+not finished, and we would rather say so here than let you discover it in the source. Today
+an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`, `loop.py`), and two
+of them exist only because we haven't closed the abstraction.
+
+**Where it stands:**
+- **The robot is a clean abstraction.** `base.py` + `robot.py` genuinely is one interface
+  across arms. This part is done, and the work below sits entirely above it.
+- **Cameras are only partly abstracted.** The YAM adapter defines a proper `Camera` Protocol
+  (`connect` / `read() -> RGB` / `disconnect`) with lazily-imported RealSense, ZED, and UVC
+  backends behind it. That is the right shape, but it is *local to that adapter* - others
+  open their cameras inside `robot.py`, so there is no single camera seam across the SDK.
+- **The control loop is copy-pasted, not factored.** There are three
+  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots,
+  plus a `loop.py` per native adapter). They share the observe → decide → clamp →
+  `send_action` → record skeleton and the same wire helpers, and diverge only on whether
+  teleop is wired, which safety composition applies, and which calibration preset is
+  active. Those differences are *configuration wearing the costume of code*.
 
 **Direction:** a new robot should be one `robot.py` plus a `RobotProfile`.
 
-**What we know already:**
-- The robot contract (`adapters/base.py`) is settled and does not need to change. This work
-  sits entirely above it.
-- YAM's `cameras.py` already has the right shape - a `Camera` Protocol with lazily-imported
-  vendor backends behind it. Promoting it to a shared module is mostly a move, not a design.
-- The control loops are near-duplicates. They share the observe → decide → clamp →
-  `send_action` → record skeleton and the same wire helpers; they diverge on whether teleop
-  is wired, which safety composition applies, and which calibration preset is active.
+1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
+   `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
+   template, so promoting it to a shared module is mostly a move, not a design.
+2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
+   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
+   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
+3. **A smaller adapter.** Once cameras and the loop are shared, `config.py` shrinks to a
+   schema and `loop.py` disappears.
+
+The test for whether we've done this right: **adding an arm should be one file and a
+profile.** Anything more is a seam we haven't closed yet.
 
 **Open design questions (resolve before building):**
 - What is the unit of variation for the universal loop - capability flags the robot declares,
