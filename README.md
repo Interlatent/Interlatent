@@ -75,41 +75,9 @@ An adapter is a directory under [`adapters/`](packages/sdk/src/interlatent/adapt
 | `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
 
 A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
-the rest is plumbing that exists because a robot needs configuring and looking at.
-
-### Where this is going: fold the adapters into the robot class
-
-The contract above is real and it works. The layer around it is **not finished**, and we'd
-rather say so here than let you discover it in the source. Today:
-
-- **The robot is a clean abstraction.** `base.py` + `robot.py` genuinely is one interface
-  across arms. This part is done.
-- **Cameras are only partly abstracted.** The YAM adapter defines a proper `Camera` Protocol
-  (`connect` / `read() -> RGB` / `disconnect`) with RealSense, ZED, and UVC backends behind
-  it. That is the right shape. But it is *local to that adapter* - others open their cameras
-  inside `robot.py` instead, so there is no single camera seam across the SDK.
-- **The control loop is copy-pasted, not factored.** There are three of them
-  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots, plus
-  a `loop.py` per native adapter). They all have the same shape - observe, decide who is
-  driving, clamp, `send_action`, record - and they all reuse the same wire helpers. They
-  differ only in small ways: whether teleop is wired, which safety composition applies, which
-  calibration preset is active. Those differences are *configuration wearing the costume of
-  code*.
-
-**The direction:** collapse those seams into the robot class.
-
-1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
-   `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
-   template.
-2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
-   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
-   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
-3. **A smaller adapter.** Once cameras and the loop are shared, a new robot is `robot.py`
-   plus a `RobotProfile`. `config.py` shrinks to a schema; `loop.py` disappears.
-
-The test for whether we've done this right: **adding an arm should be one file and a
-profile.** Anything more is a seam we haven't closed yet. Tracked in
-[Future directions](#future-directions).
+the rest is plumbing that exists because a robot needs configuring and looking at. Two of
+those four files exist only because the abstraction isn't finished yet; folding them into
+the robot class is a [future direction](#fold-the-adapters-into-the-robot-class).
 
 ## What actually defines a robot
 
@@ -487,20 +455,38 @@ Forward-looking work that isn't scheduled yet. Each item is a direction, not a s
 
 ### Fold the adapters into the robot class
 
-The [opening section](#robot-class) states the goal; this is the shape of
-the work. Today an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`,
-`loop.py`), and two of them exist only because we haven't finished the abstraction.
+The [robot contract](#robot-class) is real and it works. The adapter layer *around* it is
+not finished, and we would rather say so here than let you discover it in the source. Today
+an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`, `loop.py`), and two
+of them exist only because we haven't closed the abstraction.
+
+**Where it stands:**
+- **The robot is a clean abstraction.** `base.py` + `robot.py` genuinely is one interface
+  across arms. This part is done, and the work below sits entirely above it.
+- **Cameras are only partly abstracted.** The YAM adapter defines a proper `Camera` Protocol
+  (`connect` / `read() -> RGB` / `disconnect`) with lazily-imported RealSense, ZED, and UVC
+  backends behind it. That is the right shape, but it is *local to that adapter* - others
+  open their cameras inside `robot.py`, so there is no single camera seam across the SDK.
+- **The control loop is copy-pasted, not factored.** There are three
+  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots,
+  plus a `loop.py` per native adapter). They share the observe → decide → clamp →
+  `send_action` → record skeleton and the same wire helpers, and diverge only on whether
+  teleop is wired, which safety composition applies, and which calibration preset is
+  active. Those differences are *configuration wearing the costume of code*.
 
 **Direction:** a new robot should be one `robot.py` plus a `RobotProfile`.
 
-**What we know already:**
-- The robot contract (`adapters/base.py`) is settled and does not need to change. This work
-  sits entirely above it.
-- YAM's `cameras.py` already has the right shape - a `Camera` Protocol with lazily-imported
-  vendor backends behind it. Promoting it to a shared module is mostly a move, not a design.
-- The control loops are near-duplicates. They share the observe → decide → clamp →
-  `send_action` → record skeleton and the same wire helpers; they diverge on whether teleop
-  is wired, which safety composition applies, and which calibration preset is active.
+1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
+   `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
+   template, so promoting it to a shared module is mostly a move, not a design.
+2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
+   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
+   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
+3. **A smaller adapter.** Once cameras and the loop are shared, `config.py` shrinks to a
+   schema and `loop.py` disappears.
+
+The test for whether we've done this right: **adding an arm should be one file and a
+profile.** Anything more is a seam we haven't closed yet.
 
 **Open design questions (resolve before building):**
 - What is the unit of variation for the universal loop - capability flags the robot declares,
