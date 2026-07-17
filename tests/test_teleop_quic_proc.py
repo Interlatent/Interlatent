@@ -10,6 +10,7 @@ network needed; the live relay path is signed off on-robot.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -574,7 +575,7 @@ def _send_request_spec(sim: ChildSim) -> None:
     )
 
 
-def test_request_spec_served_when_loaded(channel):
+def test_request_spec_served_when_loaded(channel, caplog):
     chan, sim, _ = channel
     wire = qc.frame_spec_wire({"version": 1, "chains": {}}, "nori")
     chan._spec_wire = wire
@@ -582,11 +583,15 @@ def test_request_spec_served_when_loaded(channel):
     sim.ctrl({"t": "connected"})
     _wait_for(lambda: chan.connected, what="connected")
 
-    _send_request_spec(sim)
-    raw = sim.sock.recvfrom(65536)[0]  # the answer, back to the child
-    kind, payload = _quic_ipc.parse(raw)
-    assert kind == _quic_ipc.TYPE_SPEC
-    assert payload == wire
+    with caplog.at_level(logging.INFO):
+        _send_request_spec(sim)
+        raw = sim.sock.recvfrom(65536)[0]  # the answer, back to the child
+        kind, payload = _quic_ipc.parse(raw)
+        assert kind == _quic_ipc.TYPE_SPEC
+        assert payload == wire
+        # The handshake is observable in the node log (once per session).
+        _wait_for(lambda: "served kinematic_spec" in caplog.text,
+                  what="serve log line")
     # A request must never be decoded as a target frame.
     assert chan.latest_frame() is None
 
@@ -609,19 +614,23 @@ def test_request_spec_throttled(channel):
         sim.sock.recvfrom(65536)
 
 
-def test_request_spec_ignored_without_local_spec(channel):
+def test_request_spec_ignored_without_local_spec(channel, caplog):
     chan, sim, _ = channel
     assert chan._spec_wire is None  # nothing loaded
     sim.hello()
     sim.ctrl({"t": "connected"})
     _wait_for(lambda: chan.connected, what="connected")
 
-    _send_request_spec(sim)
-    # No spec to serve → no answer (browser falls back to HTTP), and the
-    # request is not mistaken for a target frame.
-    sim.sock.settimeout(0.4)
-    with pytest.raises(socket.timeout):
-        sim.sock.recvfrom(65536)
+    with caplog.at_level(logging.INFO):
+        _send_request_spec(sim)
+        # No spec to serve → no answer (browser falls back to HTTP), and the
+        # request is not mistaken for a target frame.
+        sim.sock.settimeout(0.4)
+        with pytest.raises(socket.timeout):
+            sim.sock.recvfrom(65536)
+        # ...but the miss is logged once, so the fallback is diagnosable.
+        _wait_for(lambda: "browser requested kinematic_spec but this node has none"
+                  in caplog.text, what="miss log line")
     assert chan.latest_frame() is None
 
 

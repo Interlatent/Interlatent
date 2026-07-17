@@ -201,6 +201,10 @@ class QuicTeleopChannel:
         # when no local data exists (browser falls back to the HTTP endpoint).
         self._spec_wire: Optional[bytes] = None
         self._last_spec_sent_at = 0.0
+        # One-shot per session so the spec handshake logs once, not per retry
+        # (reset on each connect in _handle_datagram).
+        self._spec_served = False
+        self._spec_miss_warned = False
 
         self._lock = threading.Lock()
         self._latest: Optional[TeleopFrame] = None
@@ -455,6 +459,10 @@ class QuicTeleopChannel:
             if t == "connected":
                 self._dedup.reset()
                 self._connected = True
+                # New session (or reconnect) → let the spec handshake log once
+                # more, so each browser attach is observable in the node log.
+                self._spec_served = False
+                self._spec_miss_warned = False
                 _LOG.info("teleop(quic) connected session=%s", self._session_id)
             elif t == "disconnected":
                 # Drop the latest frame so a stale engaged target can't keep
@@ -491,11 +499,22 @@ class QuicTeleopChannel:
 
     def _maybe_send_spec(self, addr) -> None:
         """Hand the framed kinematic_spec to the child (TYPE_SPEC) to ship on a
-        uni stream to the browser. Throttled: the browser retries until it sees
-        the spec, so we cap how often a retry burst can open streams. Silent
-        no-op when we have no local spec (browser uses the HTTP fallback)."""
+        uni stream to the browser, answering its ``request_spec``. Throttled: the
+        browser retries until it sees the spec, so we cap how often a retry burst
+        can open streams. Logs the handshake once per session (both the serve and
+        the no-local-spec case), so on-hardware you can see whether the browser
+        built its solver from this node or fell back to the platform."""
+        if not self._connected:
+            return
         wire = self._spec_wire
-        if wire is None or not self._connected:
+        if wire is None:
+            if not self._spec_miss_warned:
+                self._spec_miss_warned = True
+                _LOG.info(
+                    "teleop(quic) browser requested kinematic_spec but this node "
+                    "has none (robot_kind=%r) — browser will use the platform "
+                    "fallback session=%s", self._robot_kind, self._session_id,
+                )
             return
         now = time.monotonic()
         if now - self._last_spec_sent_at < _SPEC_SEND_MIN_INTERVAL_S:
@@ -507,7 +526,14 @@ class QuicTeleopChannel:
         try:
             sock.sendto(_quic_ipc.encode_spec(wire), addr)
         except OSError:
-            pass
+            return
+        if not self._spec_served:
+            self._spec_served = True
+            _LOG.info(
+                "teleop(quic) served kinematic_spec/ik_hints to browser "
+                "(%d bytes) robot_kind=%r session=%s",
+                len(wire), self._robot_kind, self._session_id,
+            )
 
     # -- read API (control loop) --
     def latest_frame(self) -> Optional[TeleopFrame]:
