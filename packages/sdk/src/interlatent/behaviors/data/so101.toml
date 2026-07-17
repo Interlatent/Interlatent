@@ -1,0 +1,27 @@
+# Built-in behaviors shipped for the SO-101 (robot kind `so101` / `so101_follower`).
+#
+# Units follow the SO-101 adapter/profile: arm joints in DEGREES, gripper 0..100.
+# `home` is NOT listed here — it is generated from the profile's rest_pose so it can
+# never drift from the robot. Amplitudes below are deliberately conservative and sit
+# well inside the SO-101 joint limits and velocity caps (see robot_profile.py).
+#
+# Override or extend any of these by name in ~/.interlatent/behaviors.toml or a file
+# passed to Robot(behaviors=...). See docs/behaviors.md for the format.
+
+# A friendly wave: raise the forearm, oscillate the wrist a few times, then lower.
+# The wrist_roll swings (±35° over 0.6 s) peak at ~219°/s, inside the 240°/s cap;
+# the shoulder_lift raise (30° over 1.5 s) peaks at ~38°/s, inside its 50°/s cap.
+[hello]
+type = "trajectory"
+interpolation = "min_jerk"
+description = "Raise the arm and wave the wrist."
+keyframes = [
+    { t = 0.0, shoulder_lift = 0.0, elbow_flex = 0.0, wrist_flex = 0.0, wrist_roll = 0.0 },
+    { t = 1.5, shoulder_lift = -30.0, elbow_flex = -40.0 },
+    { t = 2.1, wrist_roll = 35.0 },
+    { t = 2.7, wrist_roll = -35.0 },
+    { t = 3.3, wrist_roll = 35.0 },
+    { t = 3.9, wrist_roll = -35.0 },
+    { t = 4.5, wrist_roll = 0.0 },
+    { t = 6.0, shoulder_lift = 0.0, elbow_flex = 0.0 },
+]

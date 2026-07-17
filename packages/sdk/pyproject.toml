@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interlatent"
 version = "1.1.0"
-description = "Interlatent SDK — run VLA policies on real robots and collect LeRobot datasets."
+description = "Interlatent SDK — one open interface to control robots: drive them, run policies, and collect data."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -89,11 +89,31 @@ yam = [
   "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git",
   # pyrealsense2 ships wheels ONLY (no sdist) and only for x86_64 Linux/Windows
   # across all Pythons; aarch64 wheels stop at cp310, and there are no macOS wheels
-  # at any version. Gating to x86_64 keeps `pip install interlatent[yam]` from hard-
-  # failing with "No matching distribution" on ARM/macOS. On those hosts install the
-  # RealSense binding out-of-band (apt python3-pyrealsense2, or build librealsense).
-  "pyrealsense2>=2.54; platform_machine == 'x86_64'",
+  # at any version. The marker must therefore exclude darwin as well as non-x86_64:
+  # `platform_machine == 'x86_64'` alone is TRUE on an Intel Mac and hard-fails there
+  # with "No matching distribution" — the exact failure the gate exists to prevent.
+  # On excluded hosts install the RealSense binding out-of-band (apt
+  # python3-pyrealsense2, or build librealsense). YAM itself needs Linux + SocketCAN;
+  # this only keeps `pip install interlatent[yam]` resolvable elsewhere for dev.
+  "pyrealsense2>=2.54; platform_machine == 'x86_64' and sys_platform != 'darwin'",
   # Generic UVC/V4L2 webcams (e.g. a Logitech on /dev/video2) capture via OpenCV.
+  "opencv-python-headless>=4.8",
+  "numpy",
+]
+
+# pip install 'interlatent[nori]'
+# Drives the Nori robot through its on-Pi daemon (NoriCoreAgent) over the
+# Nori-Protocol v1 NDJSON contract on TCP localhost:7777 (robot kind "nori";
+# see interlatent.adapters.nori), through a native control loop. Deliberately
+# NOT a dependency on the TypeScript @nori/sdk — the wire contract is the
+# dependency (vendored for tests at tests/fixtures/nori_protocol/). LAN/on-Pi
+# only: the node is expected to run on the robot's Pi next to the daemon.
+# All motion safety is enforced daemon-side; the adapter's keep-alive pump is
+# liveness-tied so it can never defeat the daemon watchdog (ADR 0015).
+nori = [
+  # Camera frames arrive on the daemon's companion ZeroMQ MJPEG channel.
+  "pyzmq>=25",
+  # JPEG decode for those frames (PIL fallback exists but cv2 is the fast path).
   "opencv-python-headless>=4.8",
   "numpy",
 ]
@@ -126,7 +146,21 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# Matches both `interlatent` and the `interlatent_robots` namespace. namespaces:
+# interlatent_robots/ deliberately has no __init__.py (PEP 420) so the SDK never
+# claims the namespace and a kind can be split into its own distribution later
+# without moving the import path.
 include = ["interlatent*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+# Built-in behavior definitions shipped per robot (interlatent.behaviors.data).
+"interlatent.behaviors" = ["data/*.toml"]
+# Robot embodiment data, one subpackage per kind (interlatent_robots.<kind>).
+# ~18 KB of JSON/XML per robot — small enough to ship for every kind rather than
+# gate behind the per-kind extras, which carry the *driver* deps, not the data.
+"interlatent_robots.yam" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.nori" = ["*.urdf", "*.json", "*.lock"]
 
 # ---------------------------------------------------------------------------
 # CPU-only torch wheels.

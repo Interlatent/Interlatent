@@ -10,6 +10,7 @@ network needed; the live relay path is signed off on-robot.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -332,16 +333,45 @@ def test_preview_due_gating(channel):
     _make_viewer_present(chan, sim)
     assert chan.preview_due()
 
-    # Sending consumes the period budget...
+    # Steady state: a send advances the credit deadline by exactly one
+    # period, so the next tick is not due until the period elapses.
+    now = time.monotonic()
+    chan._next_preview_due = now
     chan.send_preview({"cam": b"\xff\xd8jpeg"}, ts_ns=1_000_000_000)
+    assert chan._next_preview_due == pytest.approx(now + chan._preview_period_s)
     assert not chan.preview_due()
-    # ...until the period elapses.
-    chan._last_preview_at = 0.0
+    # ...until the deadline passes.
+    chan._next_preview_due = 0.0
     assert chan.preview_due()
 
     # No viewer (no recent target datagrams) → no encode cost.
     chan._last_rx_at = time.monotonic() - 60.0
     assert not chan.preview_due()
+
+
+def test_preview_deadline_credit_beats_tick_quantization():
+    # A 46 ms control tick sampling a 50 ms preview period: naive
+    # "now + period" anchoring sends every OTHER tick (~10.9 fps); the
+    # credit deadline must hold the configured 20 fps average.
+    period, tick = 0.05, 0.046
+    next_due, sends, t = 0.0, 0, 0.0
+    while t < 10.0:
+        if t >= next_due:
+            sends += 1
+            next_due = qc._advance_preview_deadline(next_due, t, period)
+        t += tick
+    assert 195 <= sends <= 202
+
+
+def test_preview_deadline_no_burst_after_gap():
+    period = 0.05
+    # Deadline long stale (viewer was absent): the send must not schedule
+    # the next deadline in the past (catch-up burst)...
+    nd = qc._advance_preview_deadline(0.0, now=500.0, period_s=period)
+    assert nd == 500.0
+    # ...and the following send resumes the normal cadence.
+    nd = qc._advance_preview_deadline(nd, now=500.001, period_s=period)
+    assert nd == pytest.approx(500.05)
 
 
 def test_preview_kill_switch(monkeypatch):
@@ -470,6 +500,137 @@ def test_parent_link_video_dispatch():
     link.set_video_sender(lambda cam, wire: got.append((cam, wire)))
     link.datagram_received(bytes((_quic_ipc.TYPE_VIDEO,)) + b"\x00", ("127.0.0.1", 1))
     assert got == [("cam0", b"WIREBYTES")]
+
+
+# ---------------------------------------------------------------------------
+# Node-sourced kinematic_spec: framing, request detection, dispatch, serving
+# ---------------------------------------------------------------------------
+
+def test_spec_ipc_roundtrip():
+    wire = b"\x00\x0f" + b'{"type":"spec"}' + b"specbody"
+    kind, payload = _quic_ipc.parse(_quic_ipc.encode_spec(wire))
+    assert kind == _quic_ipc.TYPE_SPEC
+    assert payload == wire
+    assert _quic_ipc.TYPE_SPEC not in (
+        _quic_ipc.TYPE_DATA, _quic_ipc.TYPE_CTRL, _quic_ipc.TYPE_VIDEO
+    )
+
+
+def test_frame_spec_wire_envelope():
+    spec = {"version": 1, "chains": {"left": {"damping": {"lam_pos": 0.05}}}}
+    wire = qc.frame_spec_wire(spec, "nori")
+    hlen = int.from_bytes(wire[:2], "big")
+    header = json.loads(wire[2:2 + hlen].decode("utf-8"))
+    body = json.loads(wire[2 + hlen:].decode("utf-8"))
+    assert header == {"type": "spec", "robot_kind": "nori"}
+    assert body == spec  # the browser rebuilds its solver from this verbatim
+
+
+def test_is_request_spec_discriminates():
+    assert qc.is_request_spec(b'{"type":"request_spec"}')
+    assert qc.is_request_spec(b'{"type":"request_spec","n":3}')
+    # A target frame must not be mistaken for a request.
+    assert not qc.is_request_spec(
+        b'{"mode":"targets","seq":5,"joint_targets":[1,2]}'
+    )
+    assert not qc.is_request_spec(b'{"mode":"pose","ee_pos":[0,0,0]}')
+    # Cheap substring guard: no marker → False, never a parse/raise.
+    assert not qc.is_request_spec(b"{bad json, no marker")
+    assert not qc.is_request_spec(b"\xff\xfe binary")
+
+
+def test_parent_link_spec_dispatch():
+    link = _quic_proc._ParentLink()
+    got: list = []
+    link.set_spec_sender(got.append)
+    link.datagram_received(_quic_ipc.encode_spec(b"SPECWIRE"), ("127.0.0.1", 1))
+    assert got == [b"SPECWIRE"]
+    # No sender (no session up) → dropped silently, exactly like video.
+    link.set_spec_sender(None)
+    link.datagram_received(_quic_ipc.encode_spec(b"MORE"), ("127.0.0.1", 1))
+    assert got == [b"SPECWIRE"]
+
+
+def test_load_spec_wire_none_without_kind():
+    chan = QuicTeleopChannel(
+        session_id="s", api_base="http://x", api_key="ilat_k"
+    )
+    assert chan._load_spec_wire() is None
+
+
+def test_load_spec_wire_none_for_uninstalled_kind():
+    # Best-effort: an uninstalled kind logs and returns None (browser then
+    # falls back to the platform HTTP spec endpoint) — never raises.
+    chan = QuicTeleopChannel(
+        session_id="s", api_base="http://x", api_key="ilat_k",
+        robot_kind="definitely-not-installed",
+    )
+    assert chan._load_spec_wire() is None
+
+
+def _send_request_spec(sim: ChildSim) -> None:
+    sim.sock.sendto(
+        _quic_ipc.encode_data(json.dumps({"type": "request_spec"}).encode()),
+        sim.parent_addr,
+    )
+
+
+def test_request_spec_served_when_loaded(channel, caplog):
+    chan, sim, _ = channel
+    wire = qc.frame_spec_wire({"version": 1, "chains": {}}, "nori")
+    chan._spec_wire = wire
+    sim.hello()
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="connected")
+
+    with caplog.at_level(logging.INFO):
+        _send_request_spec(sim)
+        raw = sim.sock.recvfrom(65536)[0]  # the answer, back to the child
+        kind, payload = _quic_ipc.parse(raw)
+        assert kind == _quic_ipc.TYPE_SPEC
+        assert payload == wire
+        # The handshake is observable in the node log (once per session).
+        _wait_for(lambda: "served kinematic_spec" in caplog.text,
+                  what="serve log line")
+    # A request must never be decoded as a target frame.
+    assert chan.latest_frame() is None
+
+
+def test_request_spec_throttled(channel):
+    chan, sim, _ = channel
+    chan._spec_wire = qc.frame_spec_wire({"version": 1}, "nori")
+    sim.hello()
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="connected")
+
+    _send_request_spec(sim)
+    first = _quic_ipc.parse(sim.sock.recvfrom(65536)[0])
+    assert first[0] == _quic_ipc.TYPE_SPEC
+
+    # A retry inside the throttle window opens no second stream.
+    _send_request_spec(sim)
+    sim.sock.settimeout(0.4)
+    with pytest.raises(socket.timeout):
+        sim.sock.recvfrom(65536)
+
+
+def test_request_spec_ignored_without_local_spec(channel, caplog):
+    chan, sim, _ = channel
+    assert chan._spec_wire is None  # nothing loaded
+    sim.hello()
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="connected")
+
+    with caplog.at_level(logging.INFO):
+        _send_request_spec(sim)
+        # No spec to serve → no answer, and the request is not mistaken for a
+        # target frame. There is no fallback source, so this is fatal for the
+        # browser — the node must say so loudly.
+        sim.sock.settimeout(0.4)
+        with pytest.raises(socket.timeout):
+            sim.sock.recvfrom(65536)
+        _wait_for(lambda: "WILL NOT START" in caplog.text, what="miss warning")
+    assert chan.latest_frame() is None
 
 
 # ---------------------------------------------------------------------------

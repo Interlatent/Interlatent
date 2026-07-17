@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nori.dev/protocol/perception.json",
+  "title": "perception",
+  "description": "PROPOSED (Phase F / G3). Robot -> client structured world-state, emitted at a LOW rate (~2-10 Hz, decoupled from the 50 Hz control loop) by an on-Pi detector running as a separate MEDIA-SIDE sidecar (never in the servo loop, never a :7777 control client) — the media bridge merges it onto the operator data channel alongside daemon telemetry. Gives a running script eyes to close a loop on (robot.perceive()), distinct from the human-facing video track and the laptop-side one-shot LLM vision. Additive (no protocol_version bump): older clients ignore an unknown type. See docs/phase_f_perception.md and daemon_followups.md §3.",
+  "type": "object",
+  "required": ["type", "ts_ns", "objects"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "perception" },
+    "ts_ns": { "type": "integer", "description": "Pi monotonic_ns when the frame was captured (same clock as telemetry.ts_ns), so a client can reject stale detections." },
+    "source": { "type": "string", "description": "Which camera / composite tile produced the detection, e.g. \"front\", \"wrist_right\". Lets a script disambiguate views (the same gap the operator-set camera_layout fills for LLM vision)." },
+    "objects": {
+      "type": "array",
+      "description": "Detected objects, possibly empty (an explicit \"nothing seen\" — distinct from no frame arriving).",
+      "items": {
+        "type": "object",
+        "required": ["label", "confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string", "description": "Detector class name, e.g. \"cup\", \"hand\"." },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "bbox": {
+            "type": "array",
+            "description": "Normalized [x, y, w, h] in the source frame, each in [0,1] (x,y = top-left). Present when the detector is 2D.",
+            "items": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "xyz": {
+            "type": "array",
+            "description": "Object centroid in ROBOT-BASE frame, meters [x, y, z]. Present only when the detector has depth/registration; absent for a monocular 2D detector.",
+            "items": { "type": "number" },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "id": { "type": "integer", "description": "Stable track id across frames when the detector tracks; absent for stateless per-frame detection." }
+        }
+      }
+    }
+  }
+}

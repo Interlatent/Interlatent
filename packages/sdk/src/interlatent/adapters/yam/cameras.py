@@ -19,6 +19,8 @@ or a generic webcam given by V4L2 path or index (``--camera front=/dev/video2`` 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -96,14 +98,128 @@ class Camera(Protocol):
 
 
 def build_camera(spec: CameraSpec) -> "Camera":
-    """Construct the concrete camera for a spec (no hardware touched yet)."""
+    """Construct the camera for a spec (no hardware touched yet).
+
+    Every backend is wrapped in :class:`ThreadedCamera`: a per-camera reader
+    thread drains the device continuously and ``read()`` is a non-blocking
+    latest-frame snapshot. A synchronous ``read()`` on the control thread
+    blocks up to a full frame period per camera (the driver hands out frames
+    at its own cadence) — three sequential 30 fps cameras cost ~30-45 ms per
+    tick, which alone drops a 30 Hz control loop to ~21 Hz.
+    """
+    inner: Camera
     if spec.kind == _REALSENSE:
-        return RealSenseCamera(spec)
-    if spec.kind == _ZED:
-        return ZedCamera(spec)
-    if spec.kind == _UVC:
-        return UVCCamera(spec)
-    raise ValueError(f"unknown camera kind {spec.kind!r}")  # pragma: no cover
+        inner = RealSenseCamera(spec)
+    elif spec.kind == _ZED:
+        inner = ZedCamera(spec)
+    elif spec.kind == _UVC:
+        inner = UVCCamera(spec)
+    else:
+        raise ValueError(f"unknown camera kind {spec.kind!r}")  # pragma: no cover
+    return ThreadedCamera(inner)
+
+
+class ThreadedCamera:
+    """Non-blocking latest-frame view of any :class:`Camera`.
+
+    ``connect()`` starts a daemon reader thread that calls the inner camera's
+    blocking ``read()`` in a loop and keeps only the newest frame. The heavy
+    work (driver wait + BGR→RGB conversion) happens in C code that releases
+    the GIL, so the readers run genuinely in parallel with the control loop.
+    ``read()`` returns the latest frame immediately — it only blocks while
+    waiting for the *first* frame after connect.
+
+    Failure semantics match the synchronous backends: if the reader thread
+    dies (device read raised) or the device stops producing frames
+    (``stale_after_s`` with no new frame), ``read()`` raises instead of
+    silently repeating the last image into the recording.
+
+    The inner camera's ``read()`` must return an *owned* array (no view into
+    driver memory that the next grab recycles) — all three backends here do.
+    """
+
+    # Overridable per-instance (tests patch these; RealSense's own
+    # wait_for_frames timeout is 5 s, so first-frame matches it).
+    first_frame_timeout_s = 5.0
+    stale_after_s = 1.0
+
+    def __init__(self, inner: "Camera") -> None:
+        self.inner = inner
+        self.spec = getattr(inner, "spec", None)
+        self._name = getattr(self.spec, "name", "?")
+        self._cond = threading.Condition()
+        self._frame: np.ndarray | None = None
+        self._frame_at = 0.0
+        self._error: Exception | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def connect(self) -> None:
+        self.inner.connect()
+        self._stop.clear()
+        self._frame = None
+        self._error = None
+        self._thread = threading.Thread(
+            target=self._pump, name=f"cam-{self._name}", daemon=True
+        )
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self.inner.read()
+            except Exception as exc:  # noqa: BLE001
+                if self._stop.is_set():
+                    return  # disconnect() racing a blocked read — not a fault
+                with self._cond:
+                    self._error = exc
+                    self._cond.notify_all()
+                return
+            with self._cond:
+                self._frame = frame
+                self._frame_at = time.monotonic()
+                self._cond.notify_all()
+
+    def read(self) -> np.ndarray:
+        with self._cond:
+            if self._frame is None and self._error is None:
+                self._cond.wait_for(
+                    lambda: self._frame is not None or self._error is not None,
+                    timeout=self.first_frame_timeout_s,
+                )
+            if self._error is not None:
+                raise RuntimeError(
+                    f"camera {self._name}: reader thread failed: {self._error}"
+                ) from self._error
+            frame = self._frame
+            frame_at = self._frame_at
+        if frame is None:
+            raise RuntimeError(
+                f"camera {self._name}: no frame within "
+                f"{self.first_frame_timeout_s:.1f}s of connect()"
+            )
+        age = time.monotonic() - frame_at
+        if age > self.stale_after_s:
+            raise RuntimeError(
+                f"camera {self._name}: newest frame is {age:.1f}s old "
+                f"(device stalled?)"
+            )
+        return frame
+
+    def disconnect(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            # A healthy reader unblocks within one frame period; RealSense's
+            # wait_for_frames can hold up to its own 5 s timeout.
+            thread.join(timeout=6.0)
+            if thread.is_alive():
+                _logger.warning(
+                    "camera %s reader thread did not exit; releasing the "
+                    "device anyway", self._name,
+                )
+            self._thread = None
+        self.inner.disconnect()
 
 
 class RealSenseCamera:
@@ -140,7 +256,9 @@ class RealSenseCamera:
         assert self._pipeline is not None, "RealSenseCamera.read before connect()"
         frames = self._pipeline.wait_for_frames()
         color = frames.get_color_frame()
-        return np.asanyarray(color.get_data())
+        # Copy: get_data() views SDK pool memory that the next grab recycles;
+        # frames outlive this call now that a reader thread hands them out.
+        return np.asanyarray(color.get_data()).copy()
 
     def disconnect(self) -> None:
         if self._pipeline is not None:
@@ -222,6 +340,15 @@ class UVCCamera:
         dev = self.spec.device
         target: Any = int(dev) if dev.isdigit() else dev
         cap = cv2.VideoCapture(target)
+        # V4L2 keeps a driver-side queue of captured frames (OpenCV default
+        # 4). A control loop that consumes slower than the camera produces
+        # (e.g. 27 Hz loop vs 30 fps camera) leaves that queue permanently
+        # full, so every read() returns the OLDEST buffered frame — a
+        # standing ~130 ms of staleness added BEFORE the capture timestamp,
+        # invisible to every downstream latency metric. One buffer = read()
+        # always dequeues the freshest frame. Best-effort: backends that
+        # don't support the property ignore the set.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.spec.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.spec.height)
         cap.set(cv2.CAP_PROP_FPS, self.spec.fps)
@@ -239,10 +366,14 @@ class UVCCamera:
 
     def read(self) -> np.ndarray:
         assert self._cap is not None, "UVCCamera.read before connect()"
+        import cv2  # cached module lookup after connect()'s import
+
         ok, bgr = self._cap.read()
         if not ok or bgr is None:
             raise RuntimeError(f"UVC {self.spec.name} (device={self.spec.device}) read failed")
-        return np.ascontiguousarray(bgr[:, :, ::-1], dtype=np.uint8)  # BGR->RGB
+        # cvtColor over a numpy fancy-index flip: releases the GIL and hands
+        # back an owned contiguous array (no view into the capture buffer).
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     def disconnect(self) -> None:
         if self._cap is not None:
@@ -255,5 +386,5 @@ class UVCCamera:
 
 __all__ = [
     "CameraSpec", "Camera", "RealSenseCamera", "ZedCamera", "UVCCamera",
-    "build_camera", "parse_camera_device",
+    "ThreadedCamera", "build_camera", "parse_camera_device",
 ]

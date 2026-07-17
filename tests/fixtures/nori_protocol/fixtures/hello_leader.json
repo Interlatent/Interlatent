@@ -1,0 +1,7 @@
+{
+  "type": "hello",
+  "protocol_version": 1,
+  "mode": "lan",
+  "input_mode": "leader",
+  "bus_choice": "3"
+}

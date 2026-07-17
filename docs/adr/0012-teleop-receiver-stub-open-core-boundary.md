@@ -1,7 +1,12 @@
 # 0012 — Teleop: a thin client receiver stub, engine on the platform
 
-- Status: Accepted
+- Status: Accepted (amended by [0017](0017-robot-data-ships-in-the-sdk.md))
 - Date: 2026-06-24
+
+> **Amendment (0017, 2026-07-16):** the boundary here is now read as "the SDK
+> ships no IK *solver* / retargeting," not "no kinematic *data*." Robot
+> embodiment data (URDF, `ik_config.json`, `kinematic_spec.json`) ships in the SDK
+> wheel as `interlatent_robots/<kind>/`; the solver stays on the platform.
 
 ## Context
 

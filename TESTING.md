@@ -37,6 +37,13 @@ real GPU pod — that path lives in the cloud and is validated separately.
   `interlatent session ls|start|stop` build correct requests and parse responses.
 - [ ] **Session lifecycle** — `session start` → node converges → `session stop`
   closes the DRTC link and triggers any recorded dataset to build/publish.
+- [x] **Nori adapter conformance + session client** — outbound frames validate
+  against the vendored Nori-Protocol schemas, golden fixtures replay through
+  the inbound parser, and the liveness-tied keep-alive pump / fail-closed
+  handshake / reconnect paths run against a fake in-process NDJSON daemon.
+  CI-safe: loopback sockets only, no hardware, no network
+  (`test_nori_protocol_conformance.py`, `test_nori_client.py`,
+  `test_nori_adapter.py`, `test_nori_cameras.py`, `test_teleop_estop_frame.py`).
 
 ## Tier 3 — Local dataset collection + storage
 

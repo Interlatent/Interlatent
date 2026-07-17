@@ -1,0 +1,14 @@
+{
+  "type": "control",
+  "seq": 1237,
+  "leader_action_deg": {
+    "left_arm_shoulder_pan.pos": 4.2,
+    "left_arm_wrist_roll.pos": -18.0,
+    "right_arm_gripper.pos": 62.0
+  },
+  "jog": {
+    "base": { "linear": 0.0, "angular": 0.0 },
+    "left_lift": 0.0,
+    "right_lift": 0.0
+  }
+}

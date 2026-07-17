@@ -1,0 +1,186 @@
+{
+  "chains": {
+    "left": {
+      "anchor_body": "link3",
+      "anchor_offset_xyz": [
+        0.0600003,
+        -0.244999,
+        -0.00205
+      ],
+      "damping": {
+        "lam0_rot": 0.2,
+        "w0_rot": 0.25
+      },
+      "ee_body": "gripper",
+      "gripper_action_index": 6,
+      "gripper_range": [
+        1.0,
+        0.0
+      ],
+      "ik_joint_action_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "max_dq_per_joint": [
+        0.05,
+        0.05,
+        0.05,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pos_reach_limit": 0.25,
+      "q_rest": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "robot_units_to_rad": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "rot_reach_limit": 0.9,
+      "scale_rotation": 1.0,
+      "scale_translation": 1.0,
+      "solver_type": "decoupled_6dof",
+      "tool0_offset_rpy": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tool0_offset_xyz": [
+        0.0,
+        0.0,
+        -0.0546
+      ],
+      "urdf": "yam_pro_urdf_with_linear_gripper.urdf",
+      "urdf_joint_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6"
+      ],
+      "webxr_to_base_R": [
+        [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ]
+    },
+    "right": {
+      "anchor_body": "link3",
+      "anchor_offset_xyz": [
+        0.0600003,
+        -0.244999,
+        -0.00205
+      ],
+      "damping": {
+        "lam0_rot": 0.2,
+        "w0_rot": 0.25
+      },
+      "ee_body": "gripper",
+      "gripper_action_index": 13,
+      "gripper_range": [
+        1.0,
+        0.0
+      ],
+      "ik_joint_action_indices": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "max_dq_per_joint": [
+        0.05,
+        0.05,
+        0.05,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pos_reach_limit": 0.25,
+      "q_rest": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "robot_units_to_rad": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "rot_reach_limit": 0.9,
+      "scale_rotation": 1.0,
+      "scale_translation": 1.0,
+      "solver_type": "decoupled_6dof",
+      "tool0_offset_rpy": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tool0_offset_xyz": [
+        0.0,
+        0.0,
+        -0.0546
+      ],
+      "urdf": "yam_pro_urdf_with_linear_gripper.urdf",
+      "urdf_joint_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6"
+      ],
+      "webxr_to_base_R": [
+        [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ]
+    }
+  }
+}

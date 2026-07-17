@@ -382,6 +382,7 @@ class NodeDaemon:
     _NATIVE_LOOPS: dict[str, str] = {
         "axol": "interlatent.adapters.axol:control_loop",
         "yam": "interlatent.adapters.yam:control_loop",
+        "nori": "interlatent.adapters.nori:control_loop",
     }
 
     def _resolve_loop_fn(self) -> Callable[..., None]:
@@ -569,6 +570,9 @@ class NodeDaemon:
                     if is_recording else None
                 ),
                 bypass_key=self.cfg.bypass_key,
+                # Lets the quic channel serve this robot's kinematic_spec to the
+                # browser from the installed interlatent[<kind>] data.
+                robot_kind=self.cfg.robot_kind,
             )
             teleop_channel.start()
 

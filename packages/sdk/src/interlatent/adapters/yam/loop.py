@@ -49,6 +49,7 @@ def control_loop(
     closes it in its own finally-block — we must not close it here).
     """
     from interlatent.node import control as _ctrl
+    from interlatent.node.teleop_profiler import NodeTeleopProfiler
 
     from .config import build_adapter_config
     from .robot import YAMNativeRobot
@@ -125,9 +126,27 @@ def control_loop(
     # (or obs has no camera arrays) — the headset video then silently rides
     # the seconds-stale recording uplink. Say so once. (Mirrors control.py.)
     _pv_empty_warned = False
+
+    # Local (node-side) per-second profiler — see node/teleop_profiler.py.
+    # Logs a TELEOP-PROFILE line every second (grep-able wherever this
+    # node's other logs already go) plus a best-effort CSV copy; never
+    # raises into the loop. Purely additive: clock reads placed strictly
+    # AFTER work this loop is already doing, nothing in the command path
+    # below is touched.
+    node_profiler = NodeTeleopProfiler(
+        session_id=session_id, robot_kind=robot_kind or "yam", fps=fps,
+        teleop_configured=teleop_gate is not None,
+    )
+
     try:
         while not should_stop():
             loop_start = time.perf_counter()
+            # Set only if this tick actually reaches that stage (the
+            # policy path skips both when client.step() returns no
+            # action yet) — record_tick() treats a None as "no sample".
+            _cmd_at: Optional[float] = None
+            _capture_at: Optional[float] = None
+            _frame_age_ms: Optional[float] = None
             obs = robot.get_observation()
 
             # Feed the pod-side retarget stage's staleness gate directly over
@@ -193,11 +212,24 @@ def control_loop(
                 )
                 action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                 robot.send_action(action_dict)
+                _cmd_at = time.perf_counter()
+
+                # How old was the frame we just executed? Same metric
+                # node/control.py's "teleop exec latency" window computes;
+                # this loop has no such window, so just feed it straight
+                # into the profiler. getattr-guarded in case this frame
+                # type predates the field.
+                _received_at_ns = getattr(frame, "received_at_ns", None)
+                if _received_at_ns is not None:
+                    _frame_age_ms = (time.monotonic_ns() - _received_at_ns) / 1e6
 
                 # Drop policy chunks queued or landing during teleop so they
-                # don't apply when the human releases.
+                # don't apply when the human releases. (schedule.flush() — a
+                # long-standing `client.flush_buffer()` call here named a
+                # method DRTCClient never had, so the drop silently never
+                # happened. Mirrors node/control.py.)
                 try:
-                    client.flush_buffer()
+                    client.schedule.flush()
                 except Exception:  # noqa: BLE001
                     pass
                 # Discontinuity: drop the smoother's state so the first
@@ -208,6 +240,7 @@ def control_loop(
                 state_keys = _ctrl._capture_tick(
                     client, obs, action_arr, step_counter, control_source="teleop"
                 )
+                _capture_at = time.perf_counter()
                 step_counter += 1
             elif not policy_enabled:
                 # --- HOLD PATH (teleop recording, disengaged) ---
@@ -219,6 +252,7 @@ def control_loop(
                 state_keys = _ctrl._capture_tick(
                     client, obs, actual_joints, step_counter, control_source="hold"
                 )
+                _capture_at = time.perf_counter()
                 step_counter += 1
             else:
                 # Reset the gate so the next engage starts from the live pose.
@@ -242,9 +276,11 @@ def control_loop(
                         action_arr = action_filter.filter(action_arr)
                     action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                     robot.send_action(action_dict)
+                    _cmd_at = time.perf_counter()
                     state_keys = _ctrl._capture_tick(
                         client, obs, action_arr, step_counter, control_source="policy"
                     )
+                    _capture_at = time.perf_counter()
                     step_counter += 1
 
             # Live-preview tee (headset video): small downscaled JPEGs pushed
@@ -290,6 +326,18 @@ def control_loop(
                     features_reported = True
 
             elapsed = time.perf_counter() - loop_start
+            node_profiler.record_tick(
+                loop_dt_s=elapsed,
+                cmd_dt_s=(_cmd_at - loop_start) if _cmd_at is not None else None,
+                capture_dt_s=(
+                    (_capture_at - _cmd_at)
+                    if (_capture_at is not None and _cmd_at is not None) else None
+                ),
+                frame_age_ms=_frame_age_ms,
+                engaged=engaged,
+                teleop_ok=teleop_ok,
+                over_period=elapsed >= period,
+            )
             if elapsed < period:
                 time.sleep(period - elapsed)
     finally:
@@ -297,6 +345,7 @@ def control_loop(
             robot.disconnect()
         except Exception:  # noqa: BLE001
             _logger.warning("YAMNativeRobot disconnect failed", exc_info=True)
+        node_profiler.close()
         _logger.info(
             "Native YAM loop exiting for session %s; daemon's client.close() flushes "
             "the recorder queue and triggers server-side upload.",

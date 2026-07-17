@@ -852,8 +852,16 @@ class DRTCClient:
     def _stats_loop(self) -> None:
         while not self._stop.wait(self.cfg.stats_interval_s):
             s = self.stats()
-            if s["control_hz"] == 0.0:
-                continue  # loop not running yet — nothing to report
+            # Teleop-recording sessions never call step(), so control_hz stays
+            # 0 while the recorder is hard at work — gate on recorder activity
+            # too, or the one line showing rec_qdepth growth is muted in
+            # exactly the mode where the recording uplink is the bottleneck.
+            if (
+                s["control_hz"] == 0.0
+                and s["rec_hz"] == 0.0
+                and s["rec_qdepth"] == 0
+            ):
+                continue  # nothing running yet — nothing to report
             log.info(
                 "DRTC | %.1f Hz (actions %.1f Hz, starvation %.1f%%, "
                 "sync-wait %.1f%%) | "

@@ -29,12 +29,22 @@ from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated, QuicEv
 
 _LOG = logging.getLogger(__name__)
 
+# Drop-don't-queue bound for outbound datagrams. aioquic parks datagrams in an
+# unbounded pending deque with no expiry, so during a congestion-window stall
+# a backlog of state heartbeats would drain seconds late — the browser then
+# FKs stale joint state and its applied_seq RTT measure reports queue depth,
+# not network latency. Outbound datagrams are latest-wins (each ~15 Hz state
+# snapshot supersedes the previous), so beyond this backlog we drop at the
+# source. Sized to a few send_state calls (2 dups each) of headroom.
+_DATAGRAM_PENDING_MAX = 8
+
 
 class _WTClientProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._http: Optional[H3Connection] = None
         self._session_stream_id: Optional[int] = None
+        self.datagrams_dropped = 0  # drop-don't-queue counter (stats line)
         # NOT `_connected`: the aioquic base class uses `self._connected` as an
         # internal handshake boolean, and shadowing it with a (truthy) Future
         # makes wait_connected() return instantly — the client then aborts the
@@ -76,6 +86,17 @@ class _WTClientProtocol(QuicConnectionProtocol):
         if self._http is None or self._session_stream_id is None:
             return
         try:
+            # Drop-don't-queue (see _DATAGRAM_PENDING_MAX): a standing
+            # backlog means the congestion window is stalled — queueing more
+            # latest-wins state on top only delivers it stale. Private attr,
+            # same pinned-aioquic caveat as uni_stream_finished; on attr
+            # error degrade to always-send.
+            try:
+                if len(self._quic._datagrams_pending) >= _DATAGRAM_PENDING_MAX:
+                    self.datagrams_dropped += 1
+                    return
+            except AttributeError:
+                pass
             self._http.send_datagram(self._session_stream_id, data)
             self.transmit()
         except Exception:
@@ -130,10 +151,6 @@ class _WTClientProtocol(QuicConnectionProtocol):
             return True
 
     def quic_event_received(self, event: QuicEvent) -> None:
-        # TEMP diagnostic: log every event so we can see whether the handshake
-        # progresses (ProtocolNegotiated/HandshakeCompleted) or dies early
-        # (ConnectionTerminated) — e.g. GIL starvation by the robot control loop.
-        _LOG.info("teleop(quic) event: %s", type(event).__name__)
         if isinstance(event, ConnectionTerminated):
             _LOG.warning(
                 "teleop(quic) terminated: error_code=%s frame_type=%s reason=%r",
@@ -184,6 +201,10 @@ class WebTransportSession:
 
     def uni_stream_finished(self, sid: int) -> bool:
         return self._proto.uni_stream_finished(sid)
+
+    def datagrams_dropped(self) -> int:
+        """Cumulative outbound datagrams shed by drop-don't-queue."""
+        return self._proto.datagrams_dropped
 
 
 @asynccontextmanager
