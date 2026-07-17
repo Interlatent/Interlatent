@@ -341,122 +341,126 @@ def lerobot_control_loop(
             # feature/teleop-profile report after the branch.
             state_keys = None
 
+            # Teleop readiness + latch state, computed once per tick: they
+            # feed the e-stop gate below and the CSV profiler at the bottom
+            # of the loop. readiness() exposes the same booleans the old
+            # inline teleop_ok cascade computed.
+            _ready = command_bus.readiness(frame, action_keys)
+            engaged = _ready.engaged
+            teleop_ok = _ready.teleop_available
+            estop_latched = (
+                teleop_gate is not None and teleop_gate.config.estop_latched
+            )
+
             # One point of access: the bus arbitrates who drives this tick.
             # Identical semantics to the old teleop_ok / policy_enabled cascade
             # (TELEOP iff engaged + gated + schema-matched, else HOLD iff no
-            # policy, else POLICY). See node/movement.py.
+            # policy, else POLICY). See node/movement.py. The e-stop latch sits
+            # ABOVE every movement source (a Phase-2 ESTOP arbiter rung will
+            # fold it into the bus): while latched, no motion and no capture,
+            # whatever the arbiter would have picked.
             source = command_bus.arbitrate(frame, action_keys)
-            if source is MovementSource.TELEOP:
-                teleop_ok = (
-                    engaged
-                    and teleop_gate is not None
-                    and action_keys
-                    and len(action_keys) == len(teleop_profile.joint_names)
+            if estop_latched:
+                # --- E-STOP LATCHED PATH (ADR 0016) ---
+                # No motion, no capture. Queued policy chunks are dropped so
+                # nothing stale fires on reset; the smoother is reset so a
+                # post-reset resume warm-starts from the live pose. The gate
+                # stays latched until an explicit human reset outside this loop.
+                try:
+                    client.schedule.flush()
+                except Exception:
+                    pass
+                if action_filter is not None:
+                    action_filter.reset()
+            elif source is MovementSource.TELEOP:
+                # --- TELEOP PATH (mode="targets" only) ---
+                # The hosted teleop engine already resolved an absolute joint
+                # target; we route it through the SafetyGate (workspace +
+                # velocity clamp — the single safety authority for human-driven
+                # motion) and the delta clamp, then record the *commanded*
+                # (post-gate) action so the dataset reflects what the robot was
+                # actually told to do. Non-"targets" modes can't be computed on
+                # the node (engine is on the platform) — hold the current pose.
+                actual_joints = _extract_joint_state(obs, action_keys)
+                if (
+                    frame.mode == "targets"
+                    and frame.joint_targets is not None
+                    and len(frame.joint_targets) == len(action_keys)
+                ):
+                    target = np.asarray(frame.joint_targets, dtype=np.float32)
+                else:
+                    # Malformed/length-mismatched, or a keys/pose frame the node
+                    # can't compute locally: hold pose (gate idles toward it).
+                    if frame.mode == "pose" and not teleop_warned:
+                        _LOG.warning(
+                            "Teleop frame mode='pose' reached the node — the "
+                            "pod-side retarget stage should have converted it "
+                            "to 'targets' (is the relay running without a "
+                            "teleop_view hook?); holding pose. See ADR 0009, "
+                            "second amendment.",
+                        )
+                        teleop_warned = True
+                    target = actual_joints.copy()
+
+                teleop_gate.submit(TargetSample(
+                    joints=target.reshape(-1),
+                    deadman_active=frame.deadman,
+                    confidence=frame.confidence,
+                    received_at=loop_start,
+                    producer_timestamp_ns=time.monotonic_ns(),
+                ))
+                commanded, _gate_status = teleop_gate.step(actual_joints, now=loop_start)
+                action_arr = np.asarray(commanded, dtype=np.float32).reshape(-1)
+                # Uniform final guard. SafetyGate already velocity-clamped, so
+                # this is typically a no-op, but keeps one execution-safety
+                # invariant across all action sources.
+                action_arr = _clamp_action_delta(
+                    action_arr, actual_joints, _max_step, action_keys,
+                    step_counter, source="teleop",
                 )
-                estop_latched = (
-                    teleop_gate is not None and teleop_gate.config.estop_latched
-                )
-                if estop_latched:
-                    # --- E-STOP LATCHED PATH (ADR 0016) ---
-                    # No motion, no capture. Queued policy chunks are dropped so
-                    # nothing stale fires on reset; the smoother is reset so a
-                    # post-reset resume warm-starts from the live pose. The gate
-                    # stays latched until an explicit human reset outside this loop.
+                robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
+                _cmd_at = time.perf_counter()
+
+                # Echo the executed target's seq back to the producer so it can
+                # compute command round-trip latency against its own clock.
+                # Getattr-guarded — only the QUIC channel defines note_applied.
+                _note_applied = getattr(teleop_channel, "note_applied", None)
+                if _note_applied is not None:
                     try:
-                        client.schedule.flush()
-                    except Exception:
-                        pass
-                    if action_filter is not None:
-                        action_filter.reset()
-                elif teleop_ok:
-                    # --- TELEOP PATH (mode="targets" only) ---
-                    # The hosted teleop engine already resolved an absolute joint
-                    # target; we route it through the SafetyGate (workspace +
-                    # velocity clamp — the single safety authority for human-driven
-                    # motion) and the delta clamp, then record the *commanded*
-                    # (post-gate) action so the dataset reflects what the robot was
-                    # actually told to do. Non-"targets" modes can't be computed on
-                    # the node (engine is on the platform) — hold the current pose.
-                    actual_joints = _extract_joint_state(obs, action_keys)
-                    if (
-                        frame.mode == "targets"
-                        and frame.joint_targets is not None
-                        and len(frame.joint_targets) == len(action_keys)
-                    ):
-                        target = np.asarray(frame.joint_targets, dtype=np.float32)
-                    else:
-                        # Malformed/length-mismatched, or a keys/pose frame the node
-                        # can't compute locally: hold pose (gate idles toward it).
-                        if frame.mode == "pose" and not teleop_warned:
-                            _LOG.warning(
-                                "Teleop frame mode='pose' reached the node — the "
-                                "pod-side retarget stage should have converted it "
-                                "to 'targets' (is the relay running without a "
-                                "teleop_view hook?); holding pose. See ADR 0009, "
-                                "second amendment.",
-                            )
-                            teleop_warned = True
-                        target = actual_joints.copy()
-
-                    teleop_gate.submit(TargetSample(
-                        joints=target.reshape(-1),
-                        deadman_active=frame.deadman,
-                        confidence=frame.confidence,
-                        received_at=loop_start,
-                        producer_timestamp_ns=time.monotonic_ns(),
-                    ))
-                    commanded, _gate_status = teleop_gate.step(actual_joints, now=loop_start)
-                    action_arr = np.asarray(commanded, dtype=np.float32).reshape(-1)
-                    # Uniform final guard. SafetyGate already velocity-clamped, so
-                    # this is typically a no-op, but keeps one execution-safety
-                    # invariant across all action sources.
-                    action_arr = _clamp_action_delta(
-                        action_arr, actual_joints, _max_step, action_keys,
-                        step_counter, source="teleop",
-                    )
-                    robot.send_action(_coerce_action_for_robot(action_arr, action_keys))
-                    _cmd_at = time.perf_counter()
-
-                    # Echo the executed target's seq back to the producer so it can
-                    # compute command round-trip latency against its own clock.
-                    # Getattr-guarded — only the QUIC channel defines note_applied.
-                    _note_applied = getattr(teleop_channel, "note_applied", None)
-                    if _note_applied is not None:
-                        try:
-                            _note_applied(int(frame.seq))
-                        except Exception:
-                            pass
-
-                    # Latency accounting: how old was the frame we just executed?
-                    _tl_age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1e6
-                    _tl_n += 1
-                    _tl_age_sum_ms += _tl_age_ms
-                    if _tl_age_ms > _tl_age_max_ms:
-                        _tl_age_max_ms = _tl_age_ms
-                    _frame_age_ms = _tl_age_ms  # also feed the CSV profiler below
-
-                    # Drop policy chunks queued or landing during teleop so they
-                    # don't apply when the human releases. (schedule.flush() — a
-                    # long-standing `client.flush_buffer()` call here named a
-                    # method DRTCClient never had, so the drop silently never
-                    # happened.)
-                    try:
-                        client.schedule.flush()
+                        _note_applied(int(frame.seq))
                     except Exception:
                         pass
 
-                    # Discontinuity: the policy stream is interrupted, so drop the
-                    # smoother's state. The first action after release warm-starts
-                    # from the live pose instead of carrying stale pre-teleop state.
-                    if action_filter is not None:
-                        action_filter.reset()
+                # Latency accounting: how old was the frame we just executed?
+                _tl_age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1e6
+                _tl_n += 1
+                _tl_age_sum_ms += _tl_age_ms
+                if _tl_age_ms > _tl_age_max_ms:
+                    _tl_age_max_ms = _tl_age_ms
+                _frame_age_ms = _tl_age_ms  # also feed the CSV profiler below
 
-                    state_keys = _capture_tick(
-                        client, obs, action_arr, step_counter,
-                        control_source="teleop",
-                    )
-                    _capture_at = time.perf_counter()
-                    step_counter += 1
+                # Drop policy chunks queued or landing during teleop so they
+                # don't apply when the human releases. (schedule.flush() — a
+                # long-standing `client.flush_buffer()` call here named a
+                # method DRTCClient never had, so the drop silently never
+                # happened.)
+                try:
+                    client.schedule.flush()
+                except Exception:
+                    pass
+
+                # Discontinuity: the policy stream is interrupted, so drop the
+                # smoother's state. The first action after release warm-starts
+                # from the live pose instead of carrying stale pre-teleop state.
+                if action_filter is not None:
+                    action_filter.reset()
+
+                state_keys = _capture_tick(
+                    client, obs, action_arr, step_counter,
+                    control_source="teleop",
+                )
+                _capture_at = time.perf_counter()
+                step_counter += 1
             elif source is MovementSource.HOLD:
                 # --- HOLD PATH (teleop recording, disengaged) ---
                 # No policy to fall back to: send nothing (servos hold),
