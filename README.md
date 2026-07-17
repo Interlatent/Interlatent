@@ -82,31 +82,9 @@ the robot class is a [future direction](#fold-the-adapters-into-the-robot-class)
 ## What actually defines a robot
 
 The section above says what a robot *does*. This one says what your robot **is**: the map,
-before you write a line of code. [ROBOT.md](ROBOT.md) is the file-by-file reference behind it.
-
-### Robot kinds that work today
-
-`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python:
-
-| `--robot` | Joints | Units | Control loop | Extra |
-|---|---|---|---|---|
-| `so101`, `so101_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
-| `koch`, `koch_follower` | 6 | degrees; gripper 0-100 | bundled LeRobot | `[lerobot]` |
-| `yam`, `yam_bimanual` | 14 (left block, then right) | radians; gripper 0-1 | native | `[yam]` |
-| `yam_left`, `yam_right` | 7 | radians; gripper 0-1 | native | `[yam]` |
-| any other LeRobot robot | its own | LeRobot's | bundled LeRobot | `[lerobot]` |
-| `--loop module:fn` | yours | yours | yours | - |
-
-The first four rows are the kinds with a **`RobotProfile`** (the full list lives in
-`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
-That distinction is the one rule worth internalizing:
-
-> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
-> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
-> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
-
-Koch is wired and has a profile, but its envelope is a conservative starting guess rather
-than hardware-measured. Treat it as unverified.
+before you write a line of code. For the list of arms that work today, see
+[Supported robots](#supported-robots); [ROBOT.md](ROBOT.md) is the file-by-file reference
+behind both.
 
 ### The four files
 
@@ -363,19 +341,29 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 
 ## Supported robots
 
-Each robot has its own config doc covering host requirements, `--robot-arg` knobs, camera
-declarations, joint names/units, and worked examples. For the joint counts, units, and
-which profile each kind binds to, see
-[What actually defines a robot](#what-actually-defines-a-robot).
+`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python. Each robot's config doc covers
+host requirements, `--robot-arg` knobs, camera declarations, and worked examples.
 
-| Robot | `--robot` | Extra | Config doc |
-|---|---|---|---|
-| **SO-101** (reference) | `so101` | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| I2RT YAM (bimanual) | `yam` | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
-| Any LeRobot robot | `<type>` | `[lerobot]` | cameras attach as `observation.images.<name>` |
-| Custom hardware | `--loop module:fn` | - | bring your own I/O loop |
+| Robot | `--robot` | Joints and units | Extra | Config doc |
+|---|---|---|---|---|
+| **SO-101** (reference) | `so101`, `so101_follower` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **Koch v1.1** (unverified) | `koch`, `koch_follower` | 6; degrees, gripper 0-100 | `[lerobot]` | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
+| Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
 
-For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
+Those first four rows are the kinds that ship a **`RobotProfile`** (the full list lives in
+`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py)).
+That distinction is the one rule worth internalizing:
+
+> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
+> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
+> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
+
+Koch is wired and has a profile, but its envelope is a conservative starting guess rather
+than hardware-measured, so treat it as unverified until you have checked it on real
+hardware. For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
 [docs/robots-and-policies.md](docs/robots-and-policies.md).
 
 **Missing your arm?** Adding robots is the contribution we most want, and it should cost you
