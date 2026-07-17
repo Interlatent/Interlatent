@@ -161,26 +161,6 @@ limits are the URDF's verbatim while its velocity caps are 5x below what that sa
 claims, how one adapter serves the `yam` / `yam_left` / `yam_right` topologies, and what
 adding your own arm actually costs.
 
-### Where everything lives
-
-```
-~/.interlatent/
-  node.toml            # this machine's identity + node token (written by `pair`, 0600)
-  behaviors.toml       # your named behaviors (optional; overrides built-ins by name)
-
-packages/sdk/src/interlatent/
-  adapters/base.py                    # THE CONTRACT: RobotAdapter + ManualActionInterface
-  adapters/lerobot/robot.py           # SO-101 / Koch / any LeRobot robot
-  adapters/yam/{robot,cameras,config,loop}.py   # a native vendor adapter, in full
-  node/teleop/robot_profile.py        # every RobotProfile: limits, velocity, rest pose
-  node/teleop/safety.py               # SafetyGate: workspace / velocity / deadman
-  node/control.py                     # the bundled LeRobot control loop
-  behaviors/data/so101.toml           # built-in behaviors (`hello`)
-```
-
-If you read only two files to understand this SDK, read `adapters/base.py` (what a robot is)
-and `node/teleop/robot_profile.py` (what your robot is).
-
 ## How the SDK works
 
 Four layers, bottom to top. Each only knows about the layer directly beneath it.
