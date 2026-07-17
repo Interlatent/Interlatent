@@ -96,6 +96,10 @@ yam = [
   # Generic UVC/V4L2 webcams (e.g. a Logitech on /dev/video2) capture via OpenCV.
   "opencv-python-headless>=4.8",
   "numpy",
+  # Embodiment data (URDF, ik_config, kinematic_spec) read via interlatent.robots;
+  # see the nori extra and packaging/build_robot_wheel.py for why it is a separate
+  # distribution rather than data inside `interlatent`.
+  "interlatent-robot-yam>=0.1",
 ]
 
 # pip install 'interlatent[nori]'

@@ -623,14 +623,13 @@ def test_request_spec_ignored_without_local_spec(channel, caplog):
 
     with caplog.at_level(logging.INFO):
         _send_request_spec(sim)
-        # No spec to serve → no answer (browser falls back to HTTP), and the
-        # request is not mistaken for a target frame.
+        # No spec to serve → no answer, and the request is not mistaken for a
+        # target frame. There is no fallback source, so this is fatal for the
+        # browser — the node must say so loudly.
         sim.sock.settimeout(0.4)
         with pytest.raises(socket.timeout):
             sim.sock.recvfrom(65536)
-        # ...but the miss is logged once, so the fallback is diagnosable.
-        _wait_for(lambda: "browser requested kinematic_spec but this node has none"
-                  in caplog.text, what="miss log line")
+        _wait_for(lambda: "WILL NOT START" in caplog.text, what="miss warning")
     assert chan.latest_frame() is None
 
 

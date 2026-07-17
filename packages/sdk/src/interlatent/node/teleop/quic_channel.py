@@ -266,9 +266,10 @@ class QuicTeleopChannel:
             from interlatent import robots
             spec = robots.load_kinematic_spec(kind)
         except Exception as exc:
-            _LOG.info(
-                "teleop(quic) no local kinematic_spec for robot_kind=%r (%s); "
-                "browser will fetch it from the platform instead", kind, exc,
+            _LOG.warning(
+                "teleop(quic) no local kinematic_spec for robot_kind=%r (%s) — "
+                "QUIC teleop will not start for this node (no fallback source). "
+                "Install it: pip install 'interlatent[%s]'", kind, exc, kind,
             )
             return None
         try:
@@ -510,10 +511,12 @@ class QuicTeleopChannel:
         if wire is None:
             if not self._spec_miss_warned:
                 self._spec_miss_warned = True
-                _LOG.info(
+                _LOG.warning(
                     "teleop(quic) browser requested kinematic_spec but this node "
-                    "has none (robot_kind=%r) — browser will use the platform "
-                    "fallback session=%s", self._robot_kind, self._session_id,
+                    "has none for robot_kind=%r — QUIC teleop WILL NOT START "
+                    "(there is no fallback source). Install this robot's data: "
+                    "pip install 'interlatent[%s]'  session=%s",
+                    self._robot_kind, self._robot_kind or "<kind>", self._session_id,
                 )
             return
         now = time.monotonic()

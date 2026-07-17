@@ -78,11 +78,13 @@ walks, exported from URDF + **IK config** by the engine's MuJoCo step. A kind wh
 data is missing it makes the arms do nothing (the browser can't build a solver).
 On the **QUIC** teleop path the **Node** serves this spec to the browser directly
 over the relay (from its installed **Robot data**), and the browser reads *both*
-the solver parameters and the mapper hints from it — so it is the single source of
-browser kinematics there, and no platform backend is needed (the hosted HTTP
-`kinematic-spec` endpoint is only a fallback). On the WS path the pod owns IK and
-the browser needs only the mapper hints, which ride in the teleop token. _Avoid_:
-hand-editing — it is derived, and any edit is overwritten on regen.
+the solver parameters and the mapper hints from it — so it is the single and *only*
+source of browser kinematics there: no platform backend is involved and there is no
+fallback, by design. A node that cannot serve its spec fails QUIC teleop loudly
+rather than letting the browser solve against a hosted copy of kinematics it isn't
+driving. On the WS path the pod owns IK and the browser needs only the mapper
+hints, which ride in the teleop token. _Avoid_: hand-editing — it is derived, and
+any edit is overwritten on regen.
 
 **Adapter**:
 A **robot adapter** — a subpackage under `interlatent.adapters.<vendor>` that maps
