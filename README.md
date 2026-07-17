@@ -43,8 +43,8 @@ robot.action_features           # ordered joint keys; defines what the action ve
 
 That contract lives in [`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)
 and it is the only thing the layers above a robot are allowed to know about. Behaviors, VLA
-policies, teleop, and dataset recording are all written against those five methods, which is
-exactly why adding a robot gives you all of them at once.
+policies, teleop, and dataset recording are all written against those five methods, so
+adding a robot gives you all of them at once.
 
 `base.py` defines two things:
 
