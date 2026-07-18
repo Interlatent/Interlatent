@@ -200,6 +200,44 @@ api_base = "https://interlatent.com"
 name     = "my-arm"
 ```
 
+## Special case: the dimos adapter (the robot is a running stack)
+
+`--robot dimos` ([`adapters/dimos/`](packages/sdk/src/interlatent/adapters/dimos/),
+`interlatent[dimos]`, python 3.11–3.12) inverts the usual shape: there is no motor
+driver, because the "vendor SDK" is a **running dimos process**. The adapter joins
+dimos's LCM/Zenoh bus as a peer — `coordinator_joint_state` + camera `Image`
+topics in, `joint_command` out (consumed by a dimos **servo task** that claims
+every joint *including the gripper* — dimos stomps unclaimed grippers back to
+their startup value while streaming). The four files still exist, but two get
+reinterpreted:
+
+- **The profile** works exactly as above (`dimos_xarm7` in `robot_profile.py`,
+  radians) — and matters *more* here: dimos applies **no limits** to streamed
+  joint commands, so the profile + the adapter's `max_step_rad` clamp are the
+  only safety envelope in the entire path.
+- **The adapter** declares an embodiment per *kind* (`--robot-arg kind=xarm7`),
+  and `connect()` **verifies the declaration against the live stack** —
+  coordinator present, joints, a servo task claiming exactly the kind's joints
+  with a non-zero timeout and no competing claimant, joint-state order — failing
+  closed with every mismatch listed. The trap this exists for: a stock dimos
+  coordinator blueprint has no servo task and *silently ignores* streamed
+  commands.
+- `--camera <name>=<topic>` maps observation keys to bus topics instead of
+  devices.
+- The dimos side needs a **session blueprint** satisfying that contract; this
+  SDK ships one per kind via dimos's entry-point registry:
+
+```bash
+dimos run interlatent.xarm7          # terminal 1: the dimos session stack
+interlatent-node run --robot dimos \
+  --robot-arg kind=xarm7 \
+  --camera wrist=/color_image        # terminal 2: the node
+```
+
+See [`adapters/dimos/CONFIG.md`](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md)
+for the full knob table and blueprint contract, and
+[docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md) for the design.
+
 ## Adding a new robot
 
 Putting the four files together, the whole job for a new arm is:

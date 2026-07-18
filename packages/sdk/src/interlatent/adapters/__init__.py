@@ -56,6 +56,17 @@ def resolve_adapter(
 
         return YAMNativeRobot(build_adapter_config(extra, cameras))
 
+    if k == "dimos" or k.startswith("dimos_"):
+        # `--robot dimos --robot-arg kind=xarm7`, or the `dimos_<kind>` sugar
+        # (`--robot dimos_xarm7`). Binds to a RUNNING dimos stack as a bus
+        # peer; connect() runs the fail-closed declare-then-verify check.
+        if k.startswith("dimos_"):
+            extra.setdefault("kind", k[len("dimos_"):])
+        from .dimos.config import build_adapter_config as build_dimos_config
+        from .dimos.robot import DimosNativeRobot
+
+        return DimosNativeRobot(build_dimos_config(extra, cameras))
+
     from .lerobot.robot import LeRobotAdapter
 
     return LeRobotAdapter(kind, port=port, extra=extra, cameras=cameras)

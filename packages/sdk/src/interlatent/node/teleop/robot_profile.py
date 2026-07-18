@@ -344,6 +344,71 @@ def _nori_profile() -> RobotProfile:
 NORI_PROFILE = _nori_profile()
 
 
+# ---------------------------------------------------------------------------
+# UFACTORY xArm7 behind a dimos ControlCoordinator (see interlatent.adapters.dimos)
+# ---------------------------------------------------------------------------
+#
+# The dimos adapter binds to a running dimos stack as an external bus peer and
+# streams `joint_command` to a dimos servo task. dimos applies NO limits to that
+# stream (its coordinator writes commands straight to hardware), so this profile
+# is the ONLY safety envelope anywhere in the path — unlike nori, nothing
+# re-clamps robot-side.
+#
+# Joint names are the dimos names (`arm/joint1`..`arm/joint7`, gripper last)
+# mapped `/`->`_` per interlatent.adapters.dimos.kinds; the order equals
+# `DimosNativeRobot.action_features` (dimos hardware order) — `base.py` raises
+# if they diverge. Units are RADIANS (dimos JointState convention; dimos's xarm
+# adapter converts deg<->rad internally).
+#
+# Limits are the UFACTORY xArm7 datasheet joint ranges (matching the
+# xarm_description URDF's <limit> tags; dimos ships that URDF as an LFS asset —
+# re-verify against it on first sim/hardware run). NOT dimos's
+# `XArmAdapter.get_limits()` +-2pi placeholder, which is wrong for J2/J4/J6.
+_DIMOS_XARM7_JOINT_NAMES: tuple[str, ...] = tuple(
+    f"arm_joint{i}" for i in range(1, 8)
+) + ("arm_gripper",)
+
+_2PI = 6.283185307179586
+
+# Radians (gripper in dimos gripper units, see below).
+_DIMOS_XARM7_LIMITS: tuple[tuple[float, float], ...] = (
+    (-_2PI, _2PI),          # arm_joint1  (J1, full rotation)
+    (-2.059, 2.0944),       # arm_joint2  (J2: -118 deg .. 120 deg)
+    (-_2PI, _2PI),          # arm_joint3  (J3, full rotation)
+    (-0.19198, 3.927),      # arm_joint4  (J4: -11 deg .. 225 deg)
+    (-_2PI, _2PI),          # arm_joint5  (J5, full rotation)
+    (-1.69297, 3.14159),    # arm_joint6  (J6: -97 deg .. 180 deg)
+    (-_2PI, _2PI),          # arm_joint7  (J7, full rotation)
+    # Gripper: dimos maps the xArm SDK's 0-850 pulse scale (~85 mm stroke)
+    # x0.001 into its "meters" convention, so the dimos-side range is [0, 0.85].
+    # 0 closed, 0.85 open. Verify on hardware.
+    (0.0, 0.85),            # arm_gripper
+)
+
+# rad/sec. The URDF declares 3.14 rad/s (motor max) on every joint; that is far
+# too fast for a per-tick clamp that is the only limit in the path, so we cap
+# well below (heavier proximal joints tighter) and widen only after reading the
+# `DRTC-DEBUG joints` log on real hardware.
+_DIMOS_XARM7_MAX_VELOCITY: tuple[float, ...] = (
+    1.0, 1.0, 1.0, 1.0,   # J1-J4
+    1.5, 1.5, 1.5,        # J5-J7 (lighter distal joints)
+    2.0,                  # gripper (dimos gripper units/s)
+)
+
+# dimos's own xarm7 initial pose (`_XARM7_INITIAL_JOINTS_DEG` in
+# dimos/hardware/manipulators/xarm/adapter.py): zeros with J6 = -0.7 rad, which
+# keeps the elbow-up configuration off the J4 lower stop. Gripper open.
+_DIMOS_XARM7_REST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, -0.7, 0.0, 0.85)
+
+DIMOS_XARM7_PROFILE = RobotProfile(
+    name="dimos_xarm7",
+    joint_names=_DIMOS_XARM7_JOINT_NAMES,
+    joint_limits=_DIMOS_XARM7_LIMITS,
+    max_velocity=_DIMOS_XARM7_MAX_VELOCITY,
+    rest_pose=_DIMOS_XARM7_REST,
+)
+
+
 # Registry keyed by robot kind. Keys match the `--robot` kinds resolved in
 # `control.py._make_lerobot_robot` (and their aliases). Each new teleop-capable
 # robot adds an entry here.
@@ -357,6 +422,7 @@ _PROFILES: dict[str, RobotProfile] = {
     "yam_left": YAM_LEFT_PROFILE,
     "yam_right": YAM_RIGHT_PROFILE,
     "nori": NORI_PROFILE,
+    "dimos_xarm7": DIMOS_XARM7_PROFILE,
 }
 
 
@@ -378,5 +444,6 @@ __all__ = [
     "YAM_LEFT_PROFILE",
     "YAM_RIGHT_PROFILE",
     "NORI_PROFILE",
+    "DIMOS_XARM7_PROFILE",
     "get_profile",
 ]

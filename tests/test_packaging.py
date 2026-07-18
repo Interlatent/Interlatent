@@ -25,5 +25,42 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent.adapters.yam",            # --robot yam native loop
         "interlatent.behaviors",               # interlatent.Robot / behavior ls|run
         "interlatent.adapters.nori",           # --robot nori native loop
+        "interlatent.adapters.dimos",          # --robot dimos native loop
     ):
         assert needed in pkgs, f"{needed} missing from sdk wheel (no __init__.py?)"
+
+
+def test_dimos_blueprint_entry_point_declared():
+    """The dimos.blueprints entry point must stay in pyproject — dimos resolves
+    `dimos run interlatent.xarm7` through it (namespace = distribution name)."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    eps = data["project"]["entry-points"]["dimos.blueprints"]
+    assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
+
+
+def test_dimos_native_loop_registered():
+    from interlatent.node.daemon import NodeDaemon
+
+    assert (
+        NodeDaemon._NATIVE_LOOPS["dimos"]
+        == "interlatent.adapters.dimos:control_loop"
+    )
+
+
+def test_dimos_config_imports_without_dimos_installed():
+    """config/kinds (and the adapter package itself) must never require the
+    [dimos] extra at import time — the daemon imports lazily, and base
+    installs list the loop in _NATIVE_LOOPS unconditionally."""
+    import importlib
+
+    for mod in (
+        "interlatent.adapters.dimos",
+        "interlatent.adapters.dimos.config",
+        "interlatent.adapters.dimos.kinds",
+        "interlatent.adapters.dimos.episode",
+    ):
+        importlib.import_module(mod)

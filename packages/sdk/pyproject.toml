@@ -118,6 +118,22 @@ nori = [
   "numpy",
 ]
 
+# pip install 'interlatent[dimos]'
+# Binds to a RUNNING dimos stack as an external LCM/Zenoh bus peer (robot kind
+# "dimos", --robot-arg kind=<embodiment>; see interlatent.adapters.dimos and
+# ADR 0018). No motor driver here — the dimos process is the "vendor SDK": the
+# adapter streams joint_command to a dimos servo task and reads
+# coordinator_joint_state + camera Image topics. Same host (or same bus) as the
+# dimos stack; both processes must agree on DIMOS_TRANSPORT (lcm|zenoh).
+# PYTHON VERSION: dimos pins <3.13 while the SDK allows >=3.11 — this extra
+# resolves only on 3.11/3.12 (axol-precedent: the sharper floor/ceiling is
+# documented on the extra, not imposed on the base package).
+# HEAVY: dimos unconditionally pulls open3d, rerun-sdk, opencv-contrib,
+# numba, and pinocchio. Expect a multi-GB environment.
+dimos = [
+  "dimos>=0.0.14b1; python_version < '3.13'",
+]
+
 [project.scripts]
 # Connectivity check: opens a real DRTC session against a managed GPU pod
 # with synthetic observations and reports a latency verdict — no robot needed.
@@ -134,6 +150,13 @@ interlatent = "interlatent.cli.main:main"
 # Drop-in replacement for `lerobot-record` that captures policy activations
 # during recording and uploads them for interpretability. Needs `interlatent[lerobot]`.
 interlatent-sync-rollout = "interlatent.adapters.lerobot.sync_inference.sync_rollout:main"
+
+# Reference dimos session blueprints, discovered by dimos's external-blueprint
+# registry (namespace = this distribution's name): `dimos run interlatent.xarm7`.
+# Metadata-only for base installs — dimos imports the target lazily, and the
+# module's import guard turns a missing [dimos] extra into one actionable error.
+[project.entry-points."dimos.blueprints"]
+xarm7 = "interlatent.adapters.dimos.blueprints:xarm7"
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"

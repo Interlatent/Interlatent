@@ -97,8 +97,9 @@ Vendor-specific and dependency-heavy, so it is optional (`interlatent[axol]`,
 `interlatent[yam]`) and imported lazily — the base install never loads it. _Avoid_:
 overloading "adapter" for a server-side policy backend, a collection `--loop`
 adapter, or a LoRA adapter. Vendor adapters today: **axol** (Almond Axol, native
-async SDK) and **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
-directly — not raiden — joint-space only, configurable left/right/both followers).
+async SDK), **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
+directly — not raiden — joint-space only, configurable left/right/both followers),
+**nori** (see **Nori adapter**), and **dimos** (see **Dimos adapter**).
 See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md).
 
 **Action interface**:
@@ -155,10 +156,15 @@ Needs a static **robot profile** (limits / velocity cap / rest pose).
 **Delta clamp**:
 A source-agnostic execution-safety guard that caps the per-tick joint jump for
 *every* action — policy and teleop alike — to a per-robot limit (`--robot-arg max_step=…`,
-or `max_step_rad` for axol). Configured as part of the **adapter**. Together with
+or `max_step_rad` for axol/dimos). Configured as part of the **adapter**. Together with
 the SafetyGate this is the **layered client-side safety model**: the delta clamp
 bounds single-tick slams from any source; the SafetyGate adds workspace/velocity/
-deadman limits on the teleop path. Both run next to the motors.
+deadman limits on the teleop path. Both run client-side as the last hand that
+touches a command before the motor path — what that means varies per adapter:
+for yam it is literal (same process as the CAN driver); for nori the daemon
+re-clamps robot-side regardless; for **dimos** the adapter's clamp is the ONLY
+clamp anywhere in the path (dimos applies no limits to streamed joint commands),
+one process hop from the motors on the same host.
 
 **Nori adapter**:
 Vendor adapter `interlatent.adapters.nori` (`--robot nori`, `interlatent[nori]`)
@@ -210,6 +216,31 @@ Per-tick provenance recorded into the LeRobot dataset: `"policy"` for
 policy-driven steps, `"teleop"` for human-driven (VR demonstration) ticks,
 `"hold"` for disengaged hold ticks. Carried on the `RecordTick` wire message and
 rebuilt into `annotation.interlatent.control_source`.
+
+**Dimos adapter**:
+Vendor adapter `interlatent.adapters.dimos` (`--robot dimos`,
+`interlatent[dimos]`, python 3.11–3.12) for robots managed by a **running
+[dimos](https://github.com/dimensionalOS/dimos) stack**. Unlike every other
+adapter there is no motor driver: the adapter joins dimos's LCM/Zenoh bus as an
+**external peer** — `coordinator_joint_state` + camera topics in,
+`joint_command` out (consumed by a dimos servo task), the **gripper riding
+the same stream as a claimed joint** (dimos re-sends its last-commanded
+gripper value every tick while streaming, so out-of-band gripper RPCs are
+stomped; the RPC is read-only here). Identity is **declare-then-verify**: the operator
+states `--robot-arg kind=<embodiment>` (per-embodiment kinds — `xarm7` →
+profile `dimos_xarm7`) and `connect()` fail-closes against live evidence,
+accumulating every mismatch (Nori pattern) — including the trap that a stock
+dimos blueprint has **no servo task and silently ignores** streamed commands,
+and **strict exclusivity** (v1): no other dimos task may claim the session's
+joints. The dimos side runs a **session blueprint** satisfying that contract;
+the SDK ships references via dimos's entry-point registry (`dimos run
+interlatent.xarm7`) and documents the contract for custom stacks. Recording is
+role-partitioned: the node records the episode of record as usual, and the
+adapter publishes **episode markers** on the bus so an optional dimos-side
+recorder can segment local low-level data — never recorder-to-recorder
+forwarding. _Avoid_: calling dimos's RPC "gRPC" — dimos RPC is request/reply
+over its own LCM/Zenoh bus; gRPC in this stack is only ever the robot↔pod DRTC
+link. See [docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md).
 
 ## Relationships
 

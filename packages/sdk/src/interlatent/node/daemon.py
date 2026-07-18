@@ -383,6 +383,7 @@ class NodeDaemon:
         "axol": "interlatent.adapters.axol:control_loop",
         "yam": "interlatent.adapters.yam:control_loop",
         "nori": "interlatent.adapters.nori:control_loop",
+        "dimos": "interlatent.adapters.dimos:control_loop",
     }
 
     def _resolve_loop_fn(self) -> Callable[..., None]:
