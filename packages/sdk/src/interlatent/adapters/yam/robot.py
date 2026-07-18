@@ -144,31 +144,64 @@ class YAMNativeRobot(ManualActionInterface):
         )
 
     def _check_can_interfaces(self) -> None:
-        """Raise an actionable error if a required CAN bus is missing or down."""
+        """Ensure every required CAN bus is up, bringing it up ourselves if we can.
+
+        A down (but present) interface gets one non-interactive
+        ``sudo ip link set <iface> up type can bitrate 1000000`` attempt —
+        ``sudo -n`` so a password prompt can never hang connect(). Only if the
+        interface is still not up afterwards do we raise.
+        """
         missing: list[str] = []
         for side in self._sides:
             channel = self._channels[side]
-            try:
-                result = subprocess.run(
-                    ["ip", "link", "show", channel],
-                    capture_output=True, text=True, check=False,
-                )
-            except FileNotFoundError:  # no `ip` (non-Linux host)
-                missing.append(f"{channel} (could not run `ip`; YAM needs Linux + SocketCAN)")
+            up, detail = self._can_interface_up(channel)
+            if detail is not None:  # no `ip` at all (non-Linux host)
+                missing.append(detail)
                 continue
-            up = result.returncode == 0 and (
-                "state UP" in result.stdout or "state UNKNOWN" in result.stdout
+            if up:
+                continue
+
+            _logger.warning(
+                "YAM CAN interface %s is not up; attempting "
+                "`sudo ip link set %s up type can bitrate 1000000`",
+                channel, channel,
             )
-            if not up:
-                missing.append(channel)
+            result = subprocess.run(
+                ["sudo", "-n", "ip", "link", "set", channel,
+                 "up", "type", "can", "bitrate", "1000000"],
+                capture_output=True, text=True, check=False,
+            )
+            up, _ = self._can_interface_up(channel)
+            if up:
+                _logger.info("YAM CAN interface %s brought up successfully.", channel)
+                continue
+            err = (result.stderr or result.stdout).strip()
+            missing.append(f"{channel} ({err})" if err else channel)
+
         if missing:
             raise RuntimeError(
-                "YAM CAN interface(s) not ready: "
+                "YAM CAN adapter(s) are not currently set up, and bringing them "
+                "up automatically failed: "
                 + ", ".join(missing)
-                + ". Bring them up first (persistent udev names + "
-                "`ip link set <iface> up type can bitrate 1000000`, e.g. via raiden's "
-                "`rd reset_can` or the i2rt udev setup)."
+                + ". Bring them up manually (persistent udev names + "
+                "`sudo ip link set <iface> up type can bitrate 1000000`, e.g. via "
+                "raiden's `rd reset_can` or the i2rt udev setup)."
             )
+
+    @staticmethod
+    def _can_interface_up(channel: str) -> tuple[bool, str | None]:
+        """(is_up, error) for one interface; error is set only when `ip` is missing."""
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show", channel],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:  # no `ip` (non-Linux host)
+            return False, f"{channel} (could not run `ip`; YAM needs Linux + SocketCAN)"
+        up = result.returncode == 0 and (
+            "state UP" in result.stdout or "state UNKNOWN" in result.stdout
+        )
+        return up, None
 
     def _open_cameras(self) -> None:
         for name, spec in self.config.cameras.items():
