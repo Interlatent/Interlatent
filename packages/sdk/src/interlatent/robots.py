@@ -1,10 +1,17 @@
 """Resolve installed robot embodiment data by ``robot_kind``.
 
-Robot data (URDF, ``ik_config.json``, ``kinematic_spec.json``, ``meshes.lock``)
-ships in the SDK wheel as ``interlatent_robots/<kind>/``, one data-only subpackage
-per kind. This module is the read side: given a kind, find its installed data and
-hand back paths or parsed JSON, uniformly, whether or not the wheel happens to be
-unpacked on disk.
+Robot data (URDF, ``kinematic_spec.json``, optional ``meshes.lock``) ships in the
+SDK wheel as ``interlatent_robots/<kind>/``, one data-only subpackage per kind.
+This module is the read side: given a kind, find its installed data and hand back
+paths or parsed JSON, uniformly, whether or not the wheel happens to be unpacked
+on disk.
+
+``ik_config.json`` — the hand-authored curation source the MuJoCo exporter turns
+into ``kinematic_spec.json`` — lives only in the source repo/sdist and is *not*
+packaged into wheels (ADR 0017, amended 2026-07-18): no runtime path consumes it.
+So :func:`load_ik_config` works in a source/editable checkout and raises
+:class:`RobotDataError` on a wheel install, and :attr:`RobotData.ik_config` is
+``None`` there.
 
 Why the distinct top-level ``interlatent_robots`` rather than data inside
 ``interlatent``: the SDK and the internal ``interlatent-engine`` are both the
@@ -126,8 +133,16 @@ def _load_json(kind: str, name: str) -> dict:
 
 
 def load_ik_config(kind: str) -> dict:
-    """Parsed ``ik_config.json`` (raw dict — the hand-authored tuning surface)."""
-    return _load_json(kind, IK_CONFIG_FILENAME)
+    """Parsed ``ik_config.json`` — repo-only curation source (not in wheels)."""
+    root = _require(kind)
+    res = root / IK_CONFIG_FILENAME
+    if not res.is_file():
+        raise RobotDataError(
+            f"robot data for {kind!r} has no {IK_CONFIG_FILENAME}: it is a "
+            "repo-only curation source and is not packaged into wheels "
+            "(ADR 0017) — read it from a source checkout of the SDK repo"
+        )
+    return json.loads(res.read_text(encoding="utf-8"))
 
 
 def load_kinematic_spec(kind: str) -> dict:
@@ -139,17 +154,29 @@ def load_kinematic_spec(kind: str) -> dict:
 class RobotData:
     kind: str
     urdf_path: Path
-    ik_config: dict
     kinematic_spec: dict
+    ik_config: Optional[dict] = None
+
+
+def _load_json_optional(kind: str, name: str) -> Optional[dict]:
+    root = _require(kind)
+    res = root / name
+    if not res.is_file():
+        return None
+    return json.loads(res.read_text(encoding="utf-8"))
 
 
 def load(kind: str) -> RobotData:
-    """Everything but the meshes, in one call."""
+    """Everything but the meshes, in one call.
+
+    ``ik_config`` is ``None`` on wheel installs (the file is repo/sdist-only);
+    it is populated in a source or editable checkout.
+    """
     return RobotData(
         kind=kind,
         urdf_path=urdf_path(kind),
-        ik_config=load_ik_config(kind),
         kinematic_spec=load_kinematic_spec(kind),
+        ik_config=_load_json_optional(kind, IK_CONFIG_FILENAME),
     )
 
 
@@ -237,7 +264,7 @@ def ensure_bundle(kind: str, dest: Optional[Path] = None) -> Path:
     directory a MuJoCo loader can open directly:
 
         <dest>/<robot>.urdf
-        <dest>/ik_config.json
+        <dest>/ik_config.json   (source checkouts only — not in wheels)
         <dest>/kinematic_spec.json
         <dest>/assets/*.stl
 

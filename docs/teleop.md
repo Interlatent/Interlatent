@@ -117,7 +117,7 @@ Each kind ships a small data bundle under
 packages/sdk/src/interlatent_robots/<kind>/
     __init__.py           # data-only marker; copy an existing kind's
     <robot>.urdf          # KINEMATICS-ONLY: links + joints + inertials
-    ik_config.json        # hand-authored IK/tuning
+    ik_config.json        # hand-authored IK/tuning (repo-only; not in the wheel)
     kinematic_spec.json   # GENERATED from the URDF + ik_config
 ```
 

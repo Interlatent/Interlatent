@@ -17,7 +17,8 @@ packages/sdk/src/interlatent_robots/<kind>/
     <robot>.urdf          # KINEMATICS-ONLY: links + joints + inertials, no
                           #   <visual>/<collision> geometry. Joint <limit>/<origin>/
                           #   <axis> are authoritative; there are no mesh refs.
-    ik_config.json        # hand-authored IK/tuning — the retarget-stage config.
+    ik_config.json        # hand-authored IK/tuning — REPO-ONLY curation source,
+                          #   excluded from the wheel (ADR 0017 amendment).
     kinematic_spec.json    # GENERATED from urdf+ik_config by the MuJoCo exporter.
     meshes.lock           # OPTIONAL: {name,url,sha256} per mesh. Omit it (default)
                           #   — IK needs no geometry. Add only if a kind ships meshes.
@@ -31,7 +32,8 @@ incomplete, mis-named, or missing from the tree.
 
 - **`ik_config.json`** — hand-authored. The tuning surface (damping, reach limits,
   scales, `webxr_to_base_R`). Read pod-side by the retarget stage and by the backend
-  to build the browser's `ik_hints`.
+  to build the browser's `ik_hints`. Repo/sdist-only: no runtime path reads the
+  installed copy, so it is excluded from wheels (ADR 0017 amendment 2026-07-18).
 - **`kinematic_spec.json`** — **generated**, do not hand-edit. The compact serial-chain
   descriptor the in-browser solver walks. Produced from the URDF + `ik_config.json` by
   `interlatent.inference.server.retarget.kinematic_spec` (an engine/pod-side

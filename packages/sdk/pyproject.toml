@@ -159,8 +159,17 @@ namespaces = true
 # Robot embodiment data, one subpackage per kind (interlatent_robots.<kind>).
 # ~18 KB of JSON/XML per robot — small enough to ship for every kind rather than
 # gate behind the per-kind extras, which carry the *driver* deps, not the data.
+# Note ik_config.json is carved back out below — see exclude-package-data.
 "interlatent_robots.yam" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.nori" = ["*.urdf", "*.json", "*.lock"]
+
+[tool.setuptools.exclude-package-data]
+# ik_config.json is the hand-authored curation source for the MuJoCo
+# kinematic-spec exporter, not a runtime file: the node consumes only
+# kinematic_spec.json (node/teleop/quic_channel.py). It stays in the repo
+# (and sdist, via MANIFEST.in) but is excluded from wheels/installs.
+# ADR 0017, amendment 2026-07-18. Keyed "*" so a new kind can't ship it.
+"*" = ["ik_config.json"]
 
 # ---------------------------------------------------------------------------
 # CPU-only torch wheels.

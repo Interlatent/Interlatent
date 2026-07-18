@@ -57,6 +57,12 @@ jobs:
           assert kinds, f"no robot kinds found under {src}"
           for kind in kinds:
               for f in src.glob(f"{kind}/*"):
+                  if f.name == "ik_config.json":
+                      # Repo-only curation source (ADR 0017 amendment 2026-07-18):
+                      # excluded from wheels via exclude-package-data.
+                      assert f"interlatent_robots/{kind}/{f.name}" not in names, \
+                          f"ik_config.json must NOT ship in the wheel (ADR 0017 amendment)"
+                      continue
                   if f.suffix in (".urdf", ".json", ".lock", ".py"):
                       assert f"interlatent_robots/{kind}/{f.name}" in names, \
                           (f"interlatent_robots/{kind}/{f.name} missing from {wheel} — "

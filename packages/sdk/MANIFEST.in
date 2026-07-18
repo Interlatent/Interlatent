@@ -1,0 +1,4 @@
+# ik_config.json is repo-only curation data (ADR 0017, amended 2026-07-18):
+# kept in the sdist (a source dist is a source checkout) but excluded from
+# wheels/installs via [tool.setuptools.exclude-package-data].
+recursive-include src/interlatent_robots ik_config.json

@@ -55,9 +55,10 @@ hatch, not a kind.
 
 **Robot data**:
 A robot kind's teleop embodiment files — a kinematics-only URDF, `ik_config.json`,
-and `kinematic_spec.json` — shipped **in the `interlatent` wheel** under the
-top-level namespace `interlatent_robots` (one subpackage per kind, read via
-`interlatent.robots`). Under `interlatent_robots`, not `interlatent`, on purpose:
+and `kinematic_spec.json` — living in the SDK repo under the top-level namespace
+`interlatent_robots` (one subpackage per kind, read via `interlatent.robots`).
+The wheel ships the URDF + `kinematic_spec.json`; `ik_config.json` is a repo-only
+curation source, excluded from wheels (ADR 0017, amended 2026-07-18). Under `interlatent_robots`, not `interlatent`, on purpose:
 the SDK and the internal engine are both the `interlatent` import package and would
 collide on install. Every kind ships with every install (~18 KB each); the per-kind
 extras carry that robot's **driver** deps, not its data. Meshes are **not** part of
@@ -68,7 +69,8 @@ artifact, a path being retired; robot data in the SDK is the operator-installabl
 source of the same files.
 
 **IK config** (`ik_config.json`):
-The hand-authored half of **Robot data**: the robot-specific tuning the
+The hand-authored half of **Robot data**, kept in the repo but not in the wheel:
+the robot-specific tuning the
 retarget/IK stage reads — solver damping, per-joint `max_dq`, reach limits,
 translation/rotation scales, `webxr_to_base_R`, gripper range, unit affines. The
 five browser-mapper fields are surfaced to the headset as `ik_hints`. Editing it
