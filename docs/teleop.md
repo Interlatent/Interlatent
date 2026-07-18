@@ -48,6 +48,12 @@ to install on the operator's machine beyond a headset's browser.
    [Adding a teleop-capable robot](#adding-a-teleop-capable-robot). Without a
    profile, teleop is disabled for the session (the node reports
    `teleop_configured=false`).
+
+   Recordings run over the **QUIC transport only** (there is no WebSocket
+   fallback for them): the node must have `aioquic` installed (the
+   `interlatent[teleop-quic]` extra) and the robot kind's data shipped with
+   its `interlatent` version — the node is the sole source of the kinematic
+   spec the browser solves against.
 2. **Start a teleop recording** from the dashboard. The node picks it up
    through its normal assignment poll.
 3. **Enter VR:** open the session page in the headset's browser (Meta Quest)

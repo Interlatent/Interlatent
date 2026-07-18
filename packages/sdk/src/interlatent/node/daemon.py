@@ -561,10 +561,11 @@ class NodeDaemon:
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
                 api_key=teleop_api_key,
-                # Recordings mint against their own route (the relay lives
-                # in the Modal container behind a TLS tunnel, not on a
-                # tailnet box). 409s while the pod provisions are absorbed
-                # by the channel's retry loop.
+                # Recordings mint against their own route. Recording tokens
+                # are QUIC-only (ADR 0020): the factory reads transport
+                # "quic" off the token and builds the QUIC channel. 409s
+                # while the pod provisions are absorbed by the channel's
+                # retry loop.
                 token_path=(
                     f"/api/v1/teleop-recordings/{session['id']}/teleop-token"
                     if is_recording else None
