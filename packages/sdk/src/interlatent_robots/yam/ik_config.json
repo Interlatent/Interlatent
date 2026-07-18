@@ -48,11 +48,11 @@
         1.0,
         1.0,
         1.0,
-        1.0
+        -1.0
       ],
       "rot_reach_limit": 0.9,
-      "scale_rotation": 1.0,
-      "scale_translation": 1.0,
+      "scale_rotation": 1.5,
+      "scale_translation": 2.0,
       "solver_type": "decoupled_6dof",
       "tool0_offset_rpy": [
         0.0,
@@ -139,11 +139,11 @@
         1.0,
         1.0,
         1.0,
-        1.0
+        -1.0
       ],
       "rot_reach_limit": 0.9,
-      "scale_rotation": 1.0,
-      "scale_translation": 1.0,
+      "scale_rotation": 1.5,
+      "scale_translation": 2.0,
       "solver_type": "decoupled_6dof",
       "tool0_offset_rpy": [
         0.0,
