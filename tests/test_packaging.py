@@ -20,7 +20,6 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent",
         "interlatent.node",                    # interlatent-node
         "interlatent.inference.integration",   # interlatent-rollout
-        "interlatent.storage",
         "interlatent.cli",                     # interlatent
         "interlatent.adapters.yam",            # --robot yam native loop
         "interlatent.behaviors",               # interlatent.Robot / behavior ls|run

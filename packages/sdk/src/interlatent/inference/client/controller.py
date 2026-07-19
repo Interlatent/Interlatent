@@ -53,18 +53,17 @@ from .latency import JacobsonKarels
 from .merge import ActionSchedule
 from .receiver import ActionReceiver
 from .sender import ObservationSender, PendingObservation
+from .spool import TickSpool
 
 log = logging.getLogger(__name__)
 
 
-# The per-tick recorder queue is unbounded: recording is training data
-# and must be complete, so under an uplink deficit the backlog grows in
-# RAM (~123 KB/tick on a 3-cam rig — ~7 MB per minute of deficit-second)
-# and ships during the close drain. Live-video freshness is NOT this
-# queue's job — the preview tee over the teleop WS owns that — so a deep
-# backlog costs memory, never teleop feel. The old bounded drop-oldest
-# queue (256 ticks) traded completeness for a freshness this feed no
-# longer provides.
+# The recorder queue carries WAKEUP TOKENS, not tick data (ADR 0023):
+# ticks are journaled to the disk spool on capture and the sender reads
+# batches from the spool, deleting only on the server's ack. Under an
+# uplink deficit the backlog therefore grows on DISK (bounded by the
+# spool cap, which hard-stops capture at the limit), not in RAM, and
+# survives a process crash. Unbounded is fine for tokens.
 _RECORDER_QUEUE_MAXSIZE = 0
 
 
@@ -203,28 +202,38 @@ class DRTCClient:
         self._stat_rec_sent = 0       # RecordTicks shipped this window
         self._stat_rec_bytes = 0      # JPEG bytes shipped this window
 
-        # --- per-tick recorder pipeline ---------------------------------
-        # The hot path (step()) only does a non-blocking put_nowait into
-        # ``_rec_q``. A dedicated background thread drains the queue and
-        # makes gRPC RecordTick calls so inference latency is unaffected.
-        # Unbounded (see _RECORDER_QUEUE_MAXSIZE): no in-session drops.
-        self._rec_q: "queue.Queue[Optional[dict]]" = queue.Queue(
+        # --- per-tick recorder pipeline (ADR 0023) ----------------------
+        # Write-through spool: the hot path journals each tick to disk
+        # (TickSpool, created at open() once the session id is known) and
+        # drops a wakeup token into ``_rec_q``. The background sender
+        # reads batches FROM THE SPOOL and deletes a tick only after the
+        # server's honest accepted-prefix ack — delete-after-ack. The
+        # queue therefore carries signals, not data: ``1`` = new tick
+        # journaled, ``None`` = close sentinel.
+        self._rec_q: "queue.Queue[Optional[int]]" = queue.Queue(
             maxsize=_RECORDER_QUEUE_MAXSIZE,
         )
         self._rec_thread: Optional[threading.Thread] = None
-        # Loss accounting:
-        #   _rec_dropped_full  — always 0 now (kept so the summary/stats
-        #                        lines keep their shape across versions)
-        #   _rec_dropped_close — backlog abandoned at close (dead link or
-        #                        drain ceiling — the only remaining loss)
-        #   _rec_captured      — every record_tick() call (intended count)
-        #   _rec_sent          — RecordTicks the server actually accepted
-        # Invariant when the session ends cleanly:
-        #   captured == sent + dropped_full + dropped_close
+        self._spool: Optional[TickSpool] = None
+        # Set by _drain_recorder when it gives up on a dead link: the
+        # sender exits and the un-acked tail STAYS ON DISK (retained, not
+        # lost — see _log_recording_summary / spool.gc_orphans).
+        self._rec_abandon = threading.Event()
+        # Consecutive-failure backoff for the sender (reset on success).
+        self._rec_backoff_s = 0.0
+        # Accounting:
+        #   _rec_captured        — ticks journaled to the spool
+        #   _rec_refused         — ticks refused at capture (spool full /
+        #                          disk error) — the hard-stop counter
+        #   _rec_sent            — ticks the server durably accepted
+        #   _rec_unsent_retained — un-acked ticks left on disk at close
+        # Invariant on a clean close:
+        #   captured == sent + unsent_retained
         self._rec_captured = 0
-        self._rec_dropped_full = 0
-        self._rec_dropped_close = 0
+        self._rec_refused = 0
+        self._rec_unsent_retained = 0
         self._rec_sent = 0
+        self._rec_refused_logged = False
         # Set once if the server 404s RecordTicks (an older node that only
         # speaks unary RecordTick); after that the drain ships tick-by-tick.
         self._rec_batch_unsupported = False
@@ -301,6 +310,13 @@ class DRTCClient:
         self.action_dim = resp.action_dim
         log.info("DRTC session opened session_id=%s action_dim=%d",
                  self.session_id, self.action_dim)
+
+        # Write-through tick spool (ADR 0023). Keyed by session id, so a
+        # crashed process that reopens the SAME session resumes its
+        # un-acked backlog from disk automatically.
+        self._spool = TickSpool(
+            self.session_id, server_address=self.cfg.server_address,
+        )
 
         self._receiver = ActionReceiver(
             schedule=self.schedule,
@@ -398,21 +414,27 @@ class DRTCClient:
         self._log_recording_summary()
 
     def _drain_recorder(self) -> None:
-        """Flush the RecordTick backlog before CloseSession.
+        """Drain the spool before CloseSession — this IS drain-done.
 
-        Sends an ordered poison-pill, then waits while the sender is still
-        shipping ticks. Bails only if the sender stops making progress for
-        _REC_DRAIN_STALL_S (link down) or the hard ceiling elapses; whatever
-        is still queued at that point is counted as tail loss
-        (``_rec_dropped_close``).
+        Sends the close sentinel, then waits while the sender is still
+        getting ticks acked. Bails only if the sender stops making
+        progress for _REC_DRAIN_STALL_S (link down) or the hard ceiling
+        elapses — and on a bail the un-acked tail is RETAINED ON DISK
+        (``_rec_unsent_retained``), never lost: an orphaned spool is
+        surfaced at the next daemon startup (spool.orphan_sessions). Only
+        a fully-drained spool is disposed.
         """
+        spool = self._spool
+
+        def _pending() -> int:
+            return spool.pending_count if spool is not None else 0
+
         thread = self._rec_thread
-        if thread is None:
-            self._rec_dropped_close = self._rec_q.qsize()
+        if thread is None or not thread.is_alive():
+            self._rec_thread = None
+            self._rec_unsent_retained = _pending()
             return
-        # Ordered sentinel: lands after the current backlog, so the sender
-        # ships everything queued before exiting. (Unbounded queue — the
-        # put can never block or fail.)
+        # Close sentinel: the sender flushes the whole spool, then exits.
         self._rec_q.put(None)
         deadline = time.monotonic() + _REC_DRAIN_CEILING_S
         last_sent = self._rec_sent
@@ -420,43 +442,47 @@ class DRTCClient:
         while thread.is_alive():
             thread.join(timeout=0.5)
             now = time.monotonic()
-            # Progress = the server accepted another tick. Using _rec_sent
-            # (not qsize) means a dead link — which still *consumes* items as
-            # each RPC fails — is correctly seen as "no progress".
+            # Progress = the server ACKED another tick (not "an RPC was
+            # attempted") — a dead link is correctly seen as no progress.
             if self._rec_sent > last_sent:
                 last_sent = self._rec_sent
                 last_progress = now
             if now - last_progress > _REC_DRAIN_STALL_S:
                 log.warning(
-                    "DRTC recorder drain stalled (%d ticks queued, sender not "
-                    "shipping — link down?); abandoning tail",
-                    self._rec_q.qsize(),
+                    "DRTC recorder drain stalled (%d ticks unsent — link "
+                    "down?); retaining them on disk for later recovery",
+                    _pending(),
                 )
+                self._rec_abandon.set()
                 break
             if now > deadline:
                 log.warning(
-                    "DRTC recorder drain hit %.0fs ceiling (%d ticks queued); "
-                    "abandoning tail",
-                    _REC_DRAIN_CEILING_S, self._rec_q.qsize(),
+                    "DRTC recorder drain hit %.0fs ceiling (%d ticks "
+                    "unsent); retaining them on disk for later recovery",
+                    _REC_DRAIN_CEILING_S, _pending(),
                 )
+                self._rec_abandon.set()
                 break
+        thread.join(timeout=5.0)
         self._rec_thread = None
-        # Whatever is still queued is tail loss (± the sentinel if we bailed
-        # before it was consumed — immaterial for accounting).
-        self._rec_dropped_close = self._rec_q.qsize()
+        self._rec_unsent_retained = _pending()
+        if spool is not None and self._rec_unsent_retained == 0:
+            # Fully drained and acked — nothing left to protect.
+            spool.dispose()
 
     def _log_recording_summary(self) -> None:
         """One authoritative line on how complete the recording was."""
         captured = self._rec_captured
-        if captured == 0:
+        if captured == 0 and self._rec_refused == 0:
             return
-        dropped = self._rec_dropped_full + self._rec_dropped_close
-        if dropped:
+        retained = self._rec_unsent_retained
+        if retained or self._rec_refused:
             log.warning(
-                "DRTC recording finished: captured=%d sent=%d dropped_full=%d "
-                "dropped_close=%d (%.1f%% lost) — episode is lossy",
-                captured, self._rec_sent, self._rec_dropped_full,
-                self._rec_dropped_close, 100.0 * dropped / captured,
+                "DRTC recording finished: captured=%d sent=%d "
+                "retained_on_disk=%d refused_at_capture=%d — %s",
+                captured, self._rec_sent, retained, self._rec_refused,
+                ("un-acked ticks kept in the spool for recovery"
+                 if retained else "capture was hard-stopped part of the time"),
             )
         else:
             log.info(
@@ -468,6 +494,16 @@ class DRTCClient:
     # Recorder (per-tick capture → background RecordTick RPC)
     # ------------------------------------------------------------------
 
+    @property
+    def recording_blocked(self) -> bool:
+        """True while the spool is hard-stopped (full disk backlog).
+
+        The node loop/daemon must refuse to start new episodes while this
+        is set; it clears automatically once the sender drains the spool
+        below the resume threshold (hysteresis in TickSpool.blocked).
+        """
+        return self._spool is not None and self._spool.blocked
+
     def record_tick(
         self,
         *,
@@ -477,24 +513,36 @@ class DRTCClient:
         jpegs: dict[str, bytes],
         control_timestamp_ns: int,
         control_source: Optional[str] = None,
-    ) -> None:
-        """Non-blocking enqueue of one captured tick.
+    ) -> bool:
+        """Journal one captured tick to the spool; wake the sender.
 
-        Called from the control loop after each successful step(). The hot
-        path pays only a queue put (microseconds); JPEG bytes are passed
-        by reference. The background ``_rec_loop`` thread does the actual
-        gRPC call. The queue is unbounded, so every captured tick is
-        eventually shipped (or counted as tail loss at close) — never
-        silently thinned mid-session.
+        Called from the control loop after each successful step(). The
+        hot path pays one protobuf serialize + one small file write
+        (write-through spool, ADR 0023); the background ``_rec_loop``
+        thread ships spooled ticks and deletes them only on the server's
+        ack. Returns False when the tick was REFUSED — spool hard-stopped
+        (full) or disk error — so the caller knows this tick is NOT part
+        of the episode. Never silently thinned.
 
         ``control_source`` is recorded as
         ``annotation.interlatent.control_source``. ``None`` means
         "policy" on the server side.
         """
-        if self.session_id is None or self._stub is None:
-            return
-        self._rec_captured += 1
-        self._rec_q.put_nowait({
+        if self.session_id is None or self._stub is None or self._spool is None:
+            return False
+        if self._spool.blocked:
+            self._rec_refused += 1
+            if not self._rec_refused_logged:
+                log.error(
+                    "record_tick refused: tick spool is full — capture is "
+                    "hard-stopped until the uplink drains the backlog "
+                    "(spool=%d ticks / %.0f MB)",
+                    self._spool.pending_count,
+                    self._spool.pending_bytes / 1e6,
+                )
+                self._rec_refused_logged = True
+            return False
+        req = self._build_tick_req({
             "step": int(step),
             "observation_state": observation_state,
             "action": action,
@@ -502,85 +550,88 @@ class DRTCClient:
             "control_timestamp_ns": int(control_timestamp_ns),
             "control_source": control_source,
         })
+        if self._spool.append(req.SerializeToString()) is None:
+            self._rec_refused += 1
+            return False
+        self._rec_refused_logged = False
+        self._rec_captured += 1
+        self._rec_q.put_nowait(1)
+        return True
 
     def _rec_loop(self) -> None:
-        """Drain the recorder queue, shipping ticks in coalesced batches.
+        """Ship spooled ticks in coalesced batches; delete only on ack.
 
-        A remote RecordTick link is round-trip-bound: one unary RPC per
-        tick tops out well below the 30 Hz capture rate, so under load the
-        (unbounded) queue backs up. Here we pop the first item blocking,
-        then greedily pull whatever
-        else is already queued into one batch and ship it via RecordTicks.
-        Batching amortizes the RTT across the whole batch, so the drain
-        keeps up and the queue stays shallow.
+        The queue carries wakeup tokens, not data — the spool is the
+        single source of truth for what remains to be sent, so a failed
+        RPC needs no re-queueing: the un-acked ticks are simply still
+        there on the next attempt. Batching amortizes the RTT (a unary
+        RPC per tick can't keep up with a 30 Hz capture rate).
 
         This is the sole writer of ``_rec_sent`` and the ``_stat_rec_*``
         window counters, so those stay lock-free.
         """
         while True:
             try:
-                first = self._rec_q.get(timeout=0.25)
+                tok = self._rec_q.get(timeout=0.25)
             except queue.Empty:
                 if self._stop.is_set():
                     return
+                # Idle tick: retry any backlog a failed send left behind.
+                if self._spool is not None and self._spool.pending_count:
+                    self._ship_available()
                 continue
-            if first is None:
-                # poison pill — flush remaining backlog in batches, then exit
-                self._flush_backlog()
-                return
-            batch, saw_pill = self._collect_batch(first)
-            self._send_batch(batch)
+            saw_pill = tok is None or self._drain_wake_tokens()
+            self._ship_available()
             if saw_pill:
                 self._flush_backlog()
                 return
 
-    def _flush_backlog(self) -> None:
-        """Ship everything still queued (at close) in batches, then return."""
+    def _drain_wake_tokens(self) -> bool:
+        """Swallow queued wake tokens (they carry no data); True if the
+        close sentinel was among them."""
+        saw_pill = False
         while True:
             try:
-                first = self._rec_q.get_nowait()
+                tok = self._rec_q.get_nowait()
             except queue.Empty:
+                return saw_pill
+            if tok is None:
+                saw_pill = True
+
+    def _ship_available(self) -> None:
+        """Ship spooled batches until the spool is empty or a send fails
+        (failure leaves the backlog on disk; backoff, then the outer loop
+        retries)."""
+        if self._spool is None:
+            return
+        while not self._rec_abandon.is_set():
+            batch = self._spool.peek_batch(
+                max(1, int(self.cfg.rec_batch_max_ticks)),
+                _REC_BATCH_MAX_BYTES,
+            )
+            if not batch:
                 return
-            if first is None:
-                continue  # stray sentinel — ignore
-            batch, _ = self._collect_batch(first)
-            self._send_batch(batch)
-
-    def _collect_batch(self, first: dict) -> tuple[list, bool]:
-        """Greedily pull already-queued ticks onto ``first`` into one batch.
-
-        Stops at the tick-count cap, when the queue drains, or when adding
-        the next tick would cross the wire-size cap. Returns the batch and
-        whether the close sentinel was pulled (so the caller can finish
-        draining and exit).
-        """
-        max_ticks = max(1, int(self.cfg.rec_batch_max_ticks))
-        batch = [first]
-        batch_bytes = self._item_bytes(first)
-        while len(batch) < max_ticks:
-            try:
-                nxt = self._rec_q.get_nowait()
-            except queue.Empty:
-                break
-            if nxt is None:
-                return batch, True
-            nb = self._item_bytes(nxt)
-            if batch_bytes + nb > _REC_BATCH_MAX_BYTES:
-                # Ship what we have; ``nxt`` seeds the next batch so it is
-                # never dropped. A lone oversized tick still goes out solo.
-                self._send_batch(batch)
-                batch = [nxt]
-                batch_bytes = nb
+            if self._send_batch(batch):
+                self._rec_backoff_s = 0.0
                 continue
-            batch.append(nxt)
-            batch_bytes += nb
-        return batch, False
+            # Failure or partial accept: back off (interruptible), leave
+            # the rest spooled. Progress made this attempt still counted.
+            self._rec_backoff_s = min(5.0, (self._rec_backoff_s or 0.5) * 2)
+            self._stop.wait(self._rec_backoff_s)
+            return
 
-    @staticmethod
-    def _item_bytes(item: dict) -> int:
-        """Approximate wire size of a tick — dominated by JPEG payloads."""
-        jpegs = item.get("jpegs") or {}
-        return sum(len(data) for data in jpegs.values() if data)
+    def _flush_backlog(self) -> None:
+        """Close path: keep retrying until the spool drains or
+        _drain_recorder abandons the link (tail stays on disk)."""
+        if self._spool is None:
+            return
+        while self._spool.pending_count and not self._rec_abandon.is_set():
+            before = self._rec_sent
+            self._ship_available()
+            if self._spool.pending_count and self._rec_sent == before:
+                # No progress this round; brief pause, then retry until
+                # _drain_recorder's stall detector calls it.
+                time.sleep(0.5)
 
     def _build_tick_req(self, item: dict) -> "pb.RecordTickRequest":
         req = pb.RecordTickRequest(
@@ -601,49 +652,58 @@ class DRTCClient:
             req.control_source = str(cs)
         return req
 
-    def _send_batch(self, batch: list) -> None:
-        """Ship a batch via RecordTicks, falling back to unary RecordTick.
+    def _send_batch(self, batch: list[tuple[int, bytes]]) -> bool:
+        """Ship one spooled batch via RecordTicks; ack the accepted prefix.
 
-        Recording failures must never break inference — every path logs at
-        debug and returns; the control loop keeps running regardless.
+        ``batch`` is [(seq, serialized RecordTickRequest), ...] straight
+        from the spool. On success the server's ``accepted`` is a PREFIX
+        count (honest acks, ADR 0023): exactly that many ticks are
+        deleted from the spool; the rest stay for retry. Returns True iff
+        the whole batch was accepted. Recording failures must never break
+        inference — every path logs and returns; the control loop keeps
+        running regardless.
         """
         if not batch or self._stub is None or self.session_id is None:
-            return
+            return False
         if self._rec_batch_unsupported:
-            for item in batch:
-                self._send_record_tick(item)
-            return
+            return self._send_unary(batch)
         import grpc
 
-        batch_bytes = sum(self._item_bytes(item) for item in batch)
+        batch_bytes = sum(len(data) for _, data in batch)
         _pace_t0 = time.monotonic()
         try:
             req = pb.RecordTicksRequest(
-                ticks=[self._build_tick_req(item) for item in batch],
+                ticks=[pb.RecordTickRequest.FromString(data) for _, data in batch],
             )
             resp = self._stub.RecordTicks(
                 req, metadata=self._auth_metadata, timeout=_REC_BATCH_TIMEOUT_S,
             )
-            accepted = int(getattr(resp, "accepted", 0))
-            self._rec_sent += accepted
-            # Window telemetry — count only successfully-shipped ticks/bytes,
-            # so rec_hz / rec_bytes_s measure the drain capacity (post-drop).
-            self._stat_rec_sent += accepted
-            self._stat_rec_bytes += batch_bytes
+            accepted = max(0, min(int(getattr(resp, "accepted", 0)), len(batch)))
+            if accepted and self._spool is not None:
+                # Delete-after-ack: only the accepted prefix leaves disk.
+                self._spool.ack(batch[accepted - 1][0])
+                self._rec_sent += accepted
+                # Window telemetry — successfully-shipped ticks/bytes only,
+                # so rec_hz / rec_bytes_s measure the drain capacity.
+                self._stat_rec_sent += accepted
+                self._stat_rec_bytes += sum(
+                    len(data) for _, data in batch[:accepted]
+                )
+            return accepted == len(batch)
         except grpc.RpcError as exc:
             if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
-                # Older node without RecordTicks; ship the batch tick-by-tick
-                # and stay on the unary path for the rest of the session.
+                # Older server without RecordTicks; ship tick-by-tick and
+                # stay on the unary path for the rest of the session.
                 log.info(
                     "server has no RecordTicks; falling back to unary RecordTick"
                 )
                 self._rec_batch_unsupported = True
-                for item in batch:
-                    self._send_record_tick(item)
-            else:
-                log.debug("RecordTicks failed", exc_info=True)
+                return self._send_unary(batch)
+            log.debug("RecordTicks failed (backlog stays spooled)", exc_info=True)
+            return False
         except Exception:
-            log.debug("RecordTicks failed", exc_info=True)
+            log.debug("RecordTicks failed (backlog stays spooled)", exc_info=True)
+            return False
         finally:
             # Uplink pacing: hold the drain until this batch's bytes fit
             # the configured budget. The RPC's own upload time counts
@@ -657,19 +717,32 @@ class DRTCClient:
                 if quota_s > spent_s:
                     time.sleep(min(quota_s - spent_s, 5.0))
 
-    def _send_record_tick(self, item: dict) -> None:
+    def _send_unary(self, batch: list[tuple[int, bytes]]) -> bool:
+        """Unary fallback: ship + ack tick-by-tick, stop at first failure
+        (the rest stays spooled for retry). ``ok`` is honest on new
+        servers; an old server that over-acks is no worse than before."""
         if self._stub is None or self.session_id is None:
-            return
-        try:
-            req = self._build_tick_req(item)
-            self._stub.RecordTick(req, metadata=self._auth_metadata, timeout=10)
-            self._rec_sent += 1
-            self._stat_rec_sent += 1
-            self._stat_rec_bytes += self._item_bytes(item)
-        except Exception:
-            # Recording failures must never break inference. Log once at
-            # debug; the control loop keeps going.
-            log.debug("RecordTick failed", exc_info=True)
+            return False
+        for seq, data in batch:
+            try:
+                req = pb.RecordTickRequest.FromString(data)
+                resp = self._stub.RecordTick(
+                    req, metadata=self._auth_metadata, timeout=10,
+                )
+                if not bool(getattr(resp, "ok", True)):
+                    return False
+                if self._spool is not None:
+                    self._spool.ack(seq)
+                self._rec_sent += 1
+                self._stat_rec_sent += 1
+                self._stat_rec_bytes += len(data)
+            except Exception:
+                # Recording failures must never break inference; the
+                # un-acked remainder stays on disk.
+                log.debug("RecordTick failed (backlog stays spooled)",
+                          exc_info=True)
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # Per-control-step entry point
@@ -836,8 +909,10 @@ class DRTCClient:
             "action_delta": round(jitter, 4),
             "rec_hz": round(self._stat_rec_sent / dt, 1),
             "rec_bytes_s": round(self._stat_rec_bytes / dt, 0),
-            "rec_qdepth": self._rec_q.qsize(),
-            "rec_dropped": self._rec_dropped_full + self._rec_dropped_close,
+            # Backlog now lives in the disk spool, not RAM (ADR 0023).
+            "rec_qdepth": (self._spool.pending_count if self._spool else 0),
+            "rec_spool_bytes": (self._spool.pending_bytes if self._spool else 0),
+            "rec_refused": self._rec_refused,
         }
         self._stat_t0 = now
         self._stat_steps = self._stat_none = self._stat_wait = 0
@@ -867,12 +942,12 @@ class DRTCClient:
                 "sync-wait %.1f%%) | "
                 "queue %d (min %d) | infer %.0fms = compute %.0fms + net %.0fms "
                 "(est %.0fms) | sent %d recv %d | action Δ %.4f | "
-                "rec %.1f Hz (%.0f KB/s, q %d, dropped %d)",
+                "rec %.1f Hz (%.0f KB/s, spool %d/%0.f MB, refused %d)",
                 s["control_hz"], s["action_hz"], s["starvation_pct"],
                 s["sync_wait_pct"],
                 s["queue_depth"], s["queue_min"], s["infer_ms"],
                 s["compute_ms"], s["net_ms"], s["infer_est_ms"],
                 s["infer_sent"], s["chunks_recv"], s["action_delta"],
                 s["rec_hz"], s["rec_bytes_s"] / 1024.0, s["rec_qdepth"],
-                s["rec_dropped"],
+                s["rec_spool_bytes"] / 1e6, s["rec_refused"],
             )

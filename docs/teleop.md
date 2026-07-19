@@ -188,14 +188,17 @@ headroom, not throttling**. Both failure directions are real:
 - **Unpaced** at full uplink utilization: recording keeps up, but poses, the
   state heartbeat, and headset video queue behind saturated buffers — control
   latency runs hundreds of ms with multi-second spikes.
-- **Paced below the offered recording bitrate**: the drop-oldest queue pins
-  full, the recorded dataset *thins* (measured fps collapses), and the
-  surviving frames are seconds old.
+- **Paced below the offered recording bitrate**: the backlog grows in the
+  node's disk spool (ticks journal locally and are deleted only on server
+  ack), so the dataset can no longer *thin* — instead the spool fills toward
+  its cap (`INTERLATENT_SPOOL_MAX_MB`, default 6 GiB) and capture
+  **hard-stops** with a loud error, auto-resuming once the backlog drains.
 
 **Rule: set the cap to ~80% of your measured uplink, and never below the
 offered recording bitrate.** On a ~30 Mbit/s uplink with three cameras, `3000`
 is a confirmed operating point. Adding a camera or raising resolution moves the
-offered bitrate — redo the arithmetic.
+offered bitrate — redo the arithmetic (≈ cameras × pixels × fps × 1.2 bits/px
+at q85; three 720p cameras ≈ 50–90 Mbit/s, wired-ethernet territory).
 
 ## What lands in the dataset
 

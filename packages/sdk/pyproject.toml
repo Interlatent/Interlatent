@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interlatent"
-version = "1.1.0"
+version = "2.0.0"
 description = "Interlatent SDK — one open interface to control robots: drive them, run policies, and collect data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,14 +36,25 @@ dependencies = [
 
 [project.optional-dependencies]
 # pip install 'interlatent[lerobot]'
-# Required for LeRobotDataset upload format and HuggingFace repo-based checkpoint
-# naming in the lerobot integration. lerobot >= 0.4.0 ships the v3.0 dataset writer
-# that powers the SDK's upload-time rebuild path.
+# The LeRobot-native robot/teleop stack used by the node's generic control
+# loop and `interlatent-act`. (Datasets are built server-side by the hosted
+# recorder — ADR 0022 — so this extra no longer powers any on-device build.)
 lerobot = [
   "huggingface_hub>=0.20",
   "lerobot>=0.4.0",
   "pyarrow>=14",
   "Pillow>=9",
+]
+
+# pip install 'interlatent[turbo]'
+# Fast CPU JPEG encoding for the node capture path (node/jpeg.py): libjpeg-turbo
+# via PyTurboJPEG is several times faster than PIL — the difference between the
+# capture thread keeping up or not at 3 cameras x 720p x 30fps (ADR 0023).
+# Host requirement NOT installed here: the libturbojpeg shared library
+# (apt install libturbojpeg0-dev / brew install jpeg-turbo); without it the
+# encoder resolver silently falls back to cv2/PIL.
+turbo = [
+  "PyTurboJPEG>=1.7",
 ]
 
 # pip install 'interlatent[teleop-quic]'
@@ -131,9 +142,8 @@ interlatent-act = "interlatent.node.act_cli:main"
 # Thin CLI client for the Interlatent dashboard: list pods/nodes and
 # start/stop cloud inference sessions. `interlatent gpus ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"
-# Drop-in replacement for `lerobot-record` that captures policy activations
-# during recording and uploads them for interpretability. Needs `interlatent[lerobot]`.
-interlatent-sync-rollout = "interlatent.adapters.lerobot.sync_inference.sync_rollout:main"
+# (interlatent-sync-rollout was removed with client-side collection —
+# ADR 0022: recording is streaming-first through a hosted session.)
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"

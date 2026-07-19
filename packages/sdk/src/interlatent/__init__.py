@@ -17,16 +17,14 @@ __all__ = [
 
 
 def __getattr__(name):
-    """Lazy-load collection + behavior types on first access.
+    """Lazy-load behavior types on first access.
 
     Behaviors live behind this lazy seam so ``import interlatent`` stays cheap and
     never pulls in a robot adapter until you actually construct a :class:`Robot`.
+    (The collection types — ActivationEvent, RunInfo, Watcher, auto_metrics —
+    were removed with client-side collection; see ADR 0022.)
     """
     _lazy = {
-        "ActivationEvent": "._schema",
-        "RunInfo": "._schema",
-        "auto_metrics": "._metrics",
-        "Watcher": "._watcher",
         "Robot": ".robot",
         "behavior": ".behaviors",
         "BehaviorValidationError": ".behaviors",

@@ -72,8 +72,8 @@ reference; [Supported robots](#supported-robots) lists the arms that work today.
 Four layers, bottom to top. Each only knows about the layer directly beneath it.
 
 ```
-   behaviors        VLA policy (cloud)        teleop            collection
-   act("home")      DRTC action chunks        joint targets     watch()/tick()
+   behaviors        VLA policy (cloud)        teleop            recording
+   act("home")      DRTC action chunks        joint targets     RecordTicks
         │                    │                     │                  │
         └────────────────────┴──────────┬──────────┴──────────────────┘
                                         │
@@ -122,10 +122,12 @@ schedule. The result is smooth 30 Hz control on top of a multi-second model. Det
 polls the dashboard and converges to whatever inference session is assigned to it. It
 resolves the control loop for your `--robot` kind, opens the DRTC client, and runs.
 
-**Collection is local-first.** `watch()` / `tick()` / `collect()` stage per-step
-observations, actions, and rewards into local SQLite plus JPEGs. Building a LeRobot v3.0
-dataset from that works fully offline with no account; uploading it is a separate, optional
-step.
+**Collection is streaming-first.** The control loop JPEG-encodes each camera frame per
+tick and streams `RecordTick`s to the hosted recorder, which builds and uploads the
+LeRobot v3.0 dataset server-side. A node-side disk spool with delete-after-ack keeps the
+uplink lossless — a link drop never silently thins an episode. (The old on-device
+`watch()`/`tick()`/`upload()` build was removed in 2.0.0; existing datasets enter via
+the dashboard's HF import.)
 
 ## Quickstart
 
