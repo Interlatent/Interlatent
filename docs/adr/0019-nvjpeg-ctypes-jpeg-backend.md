@@ -1,6 +1,38 @@
-# 0019 — CUDA JPEG encode via a ctypes nvJPEG binding
+# 0019 — CUDA JPEG encode via ctypes bindings (nvJPEG + GPUJPEG)
 
-Status: accepted (2026-07-21)
+Status: accepted (2026-07-21); amended same day — see Amendment
+
+## Amendment (2026-07-21): nvJPEG does not exist on Jetson
+
+Field-verified on the Orin Nano fleet the same day this was accepted:
+**JetPack ships no CUDA nvJPEG** (no `nvjpeg.h`, no CUDA `libnvjpeg` —
+the Tegra `/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so` is an
+unrelated libjpeg-API library with the same soname), and **the Orin
+Nano has no NVJPG hardware block** (Orin NX/AGX do). So the nvJPEG
+backend below is effectively x86-CUDA-only, and the GPU path on the
+actual target board is the originally-rejected **CESNET GPUJPEG**
+(CUDA-SM encode, no fixed-function hardware needed), built from source
+by the operator and bound in `node/gpujpeg.py`:
+
+- Resolver order: `nvjpeg → gpujpeg → turbojpeg → cv2 → pil`; env
+  choices gain `gpujpeg`; the GPU routing threshold is shared
+  (`INTERLATENT_GPU_JPEG_MIN_PIXELS`, old name accepted as alias).
+- **ABI pin**: GPUJPEG passes parameter structs by pointer and their
+  layout moves between releases; the binding pins the v0.25+ layout
+  (validated against v0.27.13), refuses older versions via
+  `gpujpeg_version()`, fills all defaults through the library's own
+  initializers, and the probe round-trips a color-asymmetric frame
+  through PIL so a layout/channel-order mismatch fails at resolve
+  time.
+- Build recipe (Jetson): install the CUDA toolkit (`sudo apt install
+  cuda-toolkit` / `nvidia-jetpack`), then
+  `git clone --branch v0.27.13 --depth 1 https://github.com/CESNET/GPUJPEG.git
+  && cd GPUJPEG && cmake -B build -DCMAKE_BUILD_TYPE=Release
+  && cmake --build build -j$(nproc) && sudo cmake --install build && sudo ldconfig`.
+
+The "rejected: CESNET GPUJPEG (out-of-tree build)" reasoning below
+stands for platforms where nvJPEG exists; on Tegra the out-of-tree
+build is the only GPU option, which outweighs it.
 
 ## Context
 

@@ -48,17 +48,19 @@ def _available_backends() -> list[str]:
         out.append("turbojpeg")
     except Exception:
         pass
-    try:
-        # Real GPU only — probe() is exception-safe and returns None on
-        # GPU-less CI, which auto-skips the nvjpeg parity case.
-        from interlatent.node import nvjpeg as nvjpeg_mod
+    # Real GPU only — probe() is exception-safe and returns None on
+    # GPU-less CI, which auto-skips the GPU parity cases.
+    for gpu_name in ("nvjpeg", "gpujpeg"):
+        try:
+            import importlib
 
-        enc = nvjpeg_mod.probe()
-        if enc is not None:
-            enc.close()
-            out.append("nvjpeg")
-    except Exception:
-        pass
+            mod = importlib.import_module(f"interlatent.node.{gpu_name}")
+            enc = mod.probe()
+            if enc is not None:
+                enc.close()
+                out.append(gpu_name)
+        except Exception:
+            pass
     return out
 
 
@@ -88,14 +90,14 @@ def test_color_order_parity(backend, monkeypatch):
         import cv2
 
         jpeg_mod._BACKEND = ("cv2", cv2)
-    elif backend == "nvjpeg":
-        from interlatent.node import nvjpeg as nvjpeg_mod
+    elif backend in ("nvjpeg", "gpujpeg"):
+        import importlib
 
-        enc = nvjpeg_mod.probe()
+        enc = importlib.import_module(f"interlatent.node.{backend}").probe()
         assert enc is not None  # listed only when the probe succeeded
-        jpeg_mod._BACKEND = ("nvjpeg", enc)
+        jpeg_mod._BACKEND = (backend, enc)
         # The parity frame is 48x64 — route it to the GPU regardless of
-        # the size threshold so an RGBI/BGRI swap fails this test.
+        # the size threshold so a channel-order swap fails this test.
         monkeypatch.setattr(jpeg_mod, "_NVJPEG_MIN_PIXELS", 0)
     src = _test_frame()
     data = encode_jpeg(src, quality=95)

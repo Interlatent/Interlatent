@@ -1,28 +1,33 @@
 """Capability-adaptive JPEG encoding for the node capture path (ADR 0023).
 
-One resolver, four backends, fastest available wins:
+One resolver, five backends, fastest available wins:
 
-1. **nvJPEG** (CUDA, via the ctypes binding in ``node/nvjpeg.py`` — no
-   pip dependency; used automatically when a CUDA device + libnvjpeg are
-   present, for RGB frames at or above ``_NVJPEG_MIN_PIXELS``. Mono and
-   small frames stay on the CPU chain, where the fixed per-call GPU cost
-   would dominate. SDK ADR 0019.)
-2. **PyTurboJPEG** (libjpeg-turbo — SIMD/NEON, several times faster than
+1. **nvJPEG** (CUDA toolkit's libnvjpeg via ``node/nvjpeg.py`` — x86
+   CUDA boxes only; JetPack ships no CUDA nvJPEG. SDK ADR 0019.)
+2. **GPUJPEG** (CESNET, CUDA-SM encode via ``node/gpujpeg.py`` — the
+   GPU path on Jetson, where the operator builds libgpujpeg from
+   source; probed only when nvJPEG is absent.)
+3. **PyTurboJPEG** (libjpeg-turbo — SIMD/NEON, several times faster than
    PIL; install via ``interlatent[turbo]`` plus the system libturbojpeg).
-3. **OpenCV** ``imencode`` (releases the GIL during encode).
-4. **PIL** (always-works fallback).
+4. **OpenCV** ``imencode`` (releases the GIL during encode).
+5. **PIL** (always-works fallback).
+
+A GPU backend takes RGB frames at or above the routing threshold; mono
+and small frames stay on the CPU chain, where the fixed per-call GPU
+cost would dominate.
 
 The backend is resolved once per process and logged, so a node operator
 can see from the log which encoder their hardware ended up with. The
 same interface runs on an RPi, a Jetson, or an x86 box — only the
 throughput changes.
 
-``INTERLATENT_JPEG_BACKEND`` (``auto`` | ``nvjpeg`` | ``turbojpeg`` |
-``cv2`` | ``pil``) starts the chain at the named backend — an ops
-kill-switch for a misbehaving encoder in the field. A forced backend
-that fails to probe logs a WARNING and falls through to the rest of the
-chain: the node must never end up encoder-less over a typo.
-``INTERLATENT_NVJPEG_MIN_PIXELS`` tunes the GPU routing threshold.
+``INTERLATENT_JPEG_BACKEND`` (``auto`` | ``nvjpeg`` | ``gpujpeg`` |
+``turbojpeg`` | ``cv2`` | ``pil``) starts the chain at the named
+backend — an ops kill-switch for a misbehaving encoder in the field. A
+forced backend that fails to probe logs a WARNING and falls through to
+the rest of the chain: the node must never end up encoder-less over a
+typo. ``INTERLATENT_GPU_JPEG_MIN_PIXELS`` tunes the GPU routing
+threshold (``INTERLATENT_NVJPEG_MIN_PIXELS`` accepted as an alias).
 
 All inputs are uint8 arrays, HW (mono) or HWC with C in {1, 3}, **RGB**
 channel order (the capture path's native order). Color-order is the
@@ -48,20 +53,22 @@ _BACKEND: Optional[Tuple[str, Any]] = None
 # per-call nvjpeg failures still want turbojpeg, not PIL.
 _CPU_BACKEND: Optional[Tuple[str, Any]] = None
 
+_GPU_BACKENDS = ("nvjpeg", "gpujpeg")
 _CPU_CHAIN = ("turbojpeg", "cv2", "pil")
-_BACKEND_CHOICES = ("auto", "nvjpeg") + _CPU_CHAIN
+_BACKEND_CHOICES = ("auto",) + _GPU_BACKENDS + _CPU_CHAIN
 
 # Frames below this pixel area (post-resize) stay on the CPU chain even
-# when nvjpeg is resolved: the per-call GPU cost (H2D copy + launch +
-# sync + bitstream retrieve) is ~fixed while CPU encode cost scales with
-# area. 150k pixels splits the real frame classes with ~2x margin each
-# side — preview tee 320x240 ≈ 77k and inference uplink 256² ≈ 65k stay
-# CPU; recording frames ≥ 640x480 = 307k go GPU.
+# when a GPU backend is resolved: the per-call GPU cost (H2D copy +
+# launch + sync + bitstream retrieve) is ~fixed while CPU encode cost
+# scales with area. 150k pixels splits the real frame classes with ~2x
+# margin each side — preview tee 320x240 ≈ 77k and inference uplink
+# 256² ≈ 65k stay CPU; recording frames ≥ 640x480 = 307k go GPU.
 _NVJPEG_MIN_PIXELS_DEFAULT = 150_000
 _NVJPEG_MIN_PIXELS: Optional[int] = None
 
-# One-shot: the first per-call nvjpeg failure is field-visible (WARNING),
-# the rest are debug — mirrors _FRAMELESS_WARNED in node/control.py.
+# One-shot: the first per-call GPU-encode failure is field-visible
+# (WARNING), the rest are debug — mirrors _FRAMELESS_WARNED in
+# node/control.py.
 _NVJPEG_WARNED = False
 
 
@@ -72,7 +79,8 @@ def _nvjpeg_min_pixels() -> int:
 
         try:
             _NVJPEG_MIN_PIXELS = int(
-                os.environ.get("INTERLATENT_NVJPEG_MIN_PIXELS", "")
+                os.environ.get("INTERLATENT_GPU_JPEG_MIN_PIXELS", "")
+                or os.environ.get("INTERLATENT_NVJPEG_MIN_PIXELS", "")
                 or _NVJPEG_MIN_PIXELS_DEFAULT
             )
         except (TypeError, ValueError):
@@ -131,38 +139,50 @@ def _resolve_cpu_backend(start: str = "turbojpeg") -> Tuple[str, Any]:
     return _CPU_BACKEND
 
 
+def _probe_gpu(name: str) -> Optional[Any]:
+    """Probe one GPU backend module by name; None when unusable."""
+    if name == "nvjpeg":
+        from . import nvjpeg as mod  # lazy: keep import cost off module load
+    else:
+        from . import gpujpeg as mod
+    return mod.probe()
+
+
 def _resolve_backend() -> Tuple[str, Any]:
     global _BACKEND
     if _BACKEND is not None:
         return _BACKEND
     choice = _env_backend()
-    if choice in ("auto", "nvjpeg"):
-        from . import nvjpeg as _nvjpeg  # lazy: pure stdlib, but keep import cost off module load
-
-        enc = _nvjpeg.probe()
+    gpu_order = _GPU_BACKENDS if choice == "auto" else (
+        (choice,) if choice in _GPU_BACKENDS else ()
+    )
+    for gpu_name in gpu_order:
+        enc = _probe_gpu(gpu_name)
         if enc is not None:
-            _BACKEND = ("nvjpeg", enc)
+            _BACKEND = (gpu_name, enc)
             # Resolve the CPU sidecar eagerly so the one-shot log names
             # the real fallback the session will use for small frames.
             cpu_name, _ = _resolve_cpu_backend()
             _LOG.info(
-                "node JPEG encoder backend: nvjpeg (cpu fallback: %s)", cpu_name
+                "node JPEG encoder backend: %s (cpu fallback: %s)",
+                gpu_name, cpu_name,
             )
             return _BACKEND
-        if choice == "nvjpeg":
-            _LOG.warning(
-                "INTERLATENT_JPEG_BACKEND=nvjpeg but no usable CUDA nvJPEG "
-                "(no GPU, missing libnvjpeg, or probe failure); falling back "
-                "to the CPU encoder chain"
-            )
-        choice = "turbojpeg"
-    _BACKEND = _resolve_cpu_backend(start=choice)
+    if choice in _GPU_BACKENDS:
+        _LOG.warning(
+            "INTERLATENT_JPEG_BACKEND=%s but no usable GPU JPEG encoder "
+            "(no GPU, missing library, or probe failure); falling back to "
+            "the CPU encoder chain", choice,
+        )
+    start = choice if choice in _CPU_CHAIN else "turbojpeg"
+    _BACKEND = _resolve_cpu_backend(start=start)
     _LOG.info("node JPEG encoder backend: %s", _BACKEND[0])
     return _BACKEND
 
 
 def backend_name() -> str:
-    """The resolved backend ("nvjpeg" | "turbojpeg" | "cv2" | "pil" | "none")."""
+    """The resolved backend name (one of ``_BACKEND_CHOICES`` sans "auto",
+    or "none")."""
     return _resolve_backend()[0]
 
 
@@ -234,7 +254,7 @@ def encode_jpeg(
             arr = _normalize(_resize(arr, new_w, new_h))
 
         name, handle = _resolve_backend()
-        if name == "nvjpeg":
+        if name in _GPU_BACKENDS:
             if arr.ndim == 3 and arr.shape[0] * arr.shape[1] >= _nvjpeg_min_pixels():
                 try:
                     return handle.encode(arr, int(quality))
@@ -243,14 +263,15 @@ def encode_jpeg(
                     if not _NVJPEG_WARNED:
                         _NVJPEG_WARNED = True
                         _LOG.warning(
-                            "nvjpeg encode failed; using the CPU fallback "
-                            "(further nvjpeg errors logged at debug)",
-                            exc_info=True,
+                            "%s encode failed; using the CPU fallback "
+                            "(further %s errors logged at debug)",
+                            name, name, exc_info=True,
                         )
                     else:
-                        _LOG.debug("nvjpeg encode failed; falling back", exc_info=True)
-            # Mono frames, sub-threshold frames, and nvjpeg failures all
-            # take the best CPU encoder resolved alongside nvjpeg.
+                        _LOG.debug("%s encode failed; falling back", name, exc_info=True)
+            # Mono frames, sub-threshold frames, and GPU-encode failures
+            # all take the best CPU encoder resolved alongside the GPU
+            # backend.
             name, handle = _resolve_cpu_backend()
         if name == "turbojpeg":
             try:

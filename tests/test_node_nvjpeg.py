@@ -85,13 +85,19 @@ def test_env_cv2_excludes_nvjpeg_entirely(monkeypatch):
 def test_env_forced_nvjpeg_with_failed_probe_warns_and_falls_back(
     monkeypatch, caplog
 ):
+    import interlatent.node.gpujpeg as gpujpeg_mod
+
     monkeypatch.setenv("INTERLATENT_JPEG_BACKEND", "nvjpeg")
     monkeypatch.setattr(nvjpeg_mod, "probe", lambda: None)
+    # Forcing nvjpeg must not consult the other GPU backend either.
+    monkeypatch.setattr(
+        gpujpeg_mod, "probe", lambda: pytest.fail("gpujpeg probe must not run")
+    )
     with caplog.at_level(logging.WARNING, logger="interlatent.node.jpeg"):
         name, _ = jpeg_mod._resolve_backend()
     assert name in ("turbojpeg", "cv2", "pil")
     assert any(
-        "no usable CUDA nvJPEG" in r.getMessage() for r in caplog.records
+        "no usable GPU JPEG encoder" in r.getMessage() for r in caplog.records
     )
 
 
