@@ -200,6 +200,21 @@ is a confirmed operating point. Adding a camera or raising resolution moves the
 offered bitrate — redo the arithmetic (≈ cameras × pixels × fps × 1.2 bits/px
 at q85; three 720p cameras ≈ 50–90 Mbit/s, wired-ethernet territory).
 
+**Low-bandwidth recipe** (uplink below the offered bitrate): set a low cap
+(e.g. `INTERLATENT_REC_MAX_KBPS=300`) and `INTERLATENT_PREVIEW_HZ=10`. The
+session trickles; the backlog banks in the disk spool; the close-time drain
+runs **unpaced** at line rate and blocks session close until the spool is
+acked. The drain's hard ceiling scales with the banked bytes (assuming a
+≥250 KiB/s link; `INTERLATENT_REC_DRAIN_CEILING_S` forces a fixed value), so
+a long session's tail is never guillotined mid-drain. If a drain does give up
+(dead link), the un-acked tail is retained on disk and the close log names
+the spool path — but a *completed* session's tail resumes only if that
+session is re-assigned, and spool GC deletes it after ~7 days, so treat that
+warning as a call to action, not bookkeeping. Live preview competes with the
+recording stream for the same uplink; on the QUIC transport the preview rate
+now backs off automatically under congestion (see
+[node-encoding.md](node-encoding.md)).
+
 ## What lands in the dataset
 
 Every recorded step carries its provenance in

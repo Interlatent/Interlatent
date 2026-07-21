@@ -224,12 +224,45 @@ class _ParentLink(asyncio.DatagramProtocol):
             self._transport.sendto(_quic_ipc.encode_ctrl(obj))
 
 
+def _vstats_payload(
+    gov: Optional[_VideoGovernor], wt: Optional[object]
+) -> Optional[dict]:
+    """Cumulative video-path counters for the parent's preview backoff.
+
+    CUMULATIVE, not per-window deltas: a lost loopback datagram then
+    costs nothing — the parent diffs against its last sample (and clamps
+    negative deltas after a reconnect restarts these counters). None
+    while no video governor exists (no relay session): nothing to say.
+    The child only OBSERVES here; the rate policy stays in the parent,
+    per this module's no-policy contract.
+    """
+    if gov is None:
+        return None
+    try:
+        dg_drop = wt.datagrams_dropped() if wt is not None else 0  # type: ignore[attr-defined]
+    except Exception:
+        dg_drop = 0
+    return {
+        "t": "vstats",
+        "open": gov.opened,
+        "fin": gov.finished,
+        "drop_cap": gov.dropped_cap,
+        "reset_ttl": gov.reset_ttl,
+        "dg_drop": int(dg_drop),
+    }
+
+
 async def _hello_loop(link: _ParentLink, cfg: _Cfg) -> None:
     """1s hello heartbeat: makes a lost first hello a non-event and proves to
-    the parent that the child imported and is running (its backoff reset)."""
+    the parent that the child imported and is running (its backoff reset).
+    Rides a vstats message alongside each hello while video is flowing —
+    the parent's preview backoff consumes it; an old parent ignores it."""
     hello = {"t": "hello", "cookie": cfg.cookie, "pid": os.getpid()}
     while True:
         link.send_control(hello)
+        vstats = _vstats_payload(link.video_governor, link.wt_session)
+        if vstats is not None:
+            link.send_control(vstats)
         await asyncio.sleep(_HELLO_PERIOD_S)
 
 

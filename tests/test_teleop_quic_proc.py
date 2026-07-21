@@ -677,3 +677,163 @@ def test_quic_proc_hello_and_stdin_eof_exit():
         else:
             proc.stderr.read()  # drain
         proc.stderr.close()
+
+
+# ---------------------------------------------------------------------------
+# Congestion-adaptive preview: PreviewBackoff + vstats wiring
+# ---------------------------------------------------------------------------
+
+def test_preview_backoff_pure():
+    b = qc.PreviewBackoff()
+    base = 0.1  # 10 Hz configured
+    assert b.period(base) == pytest.approx(base)
+
+    # >= 3 drops doubles the period; 1-2 is a dead band; 0 decays /1.25.
+    b.on_window(3, base)
+    assert b.period(base) == pytest.approx(0.2)
+    b.on_window(2, base)
+    assert b.period(base) == pytest.approx(0.2)  # dead band holds
+    b.on_window(1, base)
+    assert b.period(base) == pytest.approx(0.2)
+    b.on_window(0, base)
+    assert b.period(base) == pytest.approx(0.2 / 1.25)
+
+    # Backoff clamps exactly at the 1s period ceiling (1 Hz floor rate),
+    # never overshooting past it (overshoot would only slow recovery).
+    for _ in range(10):
+        b.on_window(50, base)
+    assert b.period(base) == pytest.approx(1.0)
+    assert b.mult == pytest.approx(10.0)  # 1.0s / 0.1s, not 2**n
+
+    # Recovery decays back to the configured rate with no undershoot,
+    # in ~10-11 clean windows from the floor (log1.25(10) ~= 10.3).
+    clean = 0
+    while b.mult > 1.0:
+        b.on_window(0, base)
+        clean += 1
+    assert 10 <= clean <= 12
+    assert b.period(base) == pytest.approx(base)
+
+
+def test_preview_backoff_base_slower_than_floor():
+    # A configured rate at/below 1 Hz never gets slowed further.
+    b = qc.PreviewBackoff()
+    b.on_window(100, 1.0)
+    assert b.period(1.0) == pytest.approx(1.0)
+
+
+def _vstats(drop_cap: int, reset_ttl: int = 0) -> dict:
+    return {"t": "vstats", "open": 0, "fin": 0, "drop_cap": drop_cap,
+            "reset_ttl": reset_ttl, "dg_drop": 0}
+
+
+def test_vstats_backoff_and_deadline(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    base = chan._preview_period_s
+
+    sim.ctrl(_vstats(0))  # baseline sample
+    sim.ctrl(_vstats(5))  # +5 drops in one window -> back off
+    _wait_for(lambda: chan._effective_preview_period_s()
+              == pytest.approx(2 * base), what="backoff engaged")
+
+    # The credit deadline advances by the EFFECTIVE period, not the base.
+    now = time.monotonic()
+    chan._next_preview_due = now
+    chan.send_preview({"cam": b"\xff\xd8jpeg"}, ts_ns=1_000_000_000)
+    assert chan._next_preview_due == pytest.approx(now + 2 * base)
+
+
+def test_vstats_recovery_logs_once(channel, caplog):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl(_vstats(4))
+    _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
+    with caplog.at_level(logging.INFO, logger="interlatent.node.teleop.quic_channel"):
+        # Repeated clean windows (cumulative counters unchanged) decay back.
+        for _ in range(12):
+            sim.ctrl(_vstats(4))
+        _wait_for(lambda: chan._preview_backoff.mult == 1.0, what="recovery")
+    recovered = [r for r in caplog.records if "recovered" in r.getMessage()]
+    assert len(recovered) == 1
+
+
+def test_vstats_malformed_and_stray_ignored(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl({"t": "vstats", "drop_cap": "many"})  # malformed -> ignored
+    sim.ctrl({"t": "bogus", "x": 1})  # unknown type -> ignored
+    stray = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        stray.sendto(_quic_ipc.encode_ctrl(_vstats(999)), sim.parent_addr)
+        time.sleep(0.2)
+        assert chan._preview_backoff.mult == 1.0
+    finally:
+        stray.close()
+
+
+def test_vstats_reconnect_resets_baseline(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl(_vstats(100))
+    _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
+    mult = chan._preview_backoff.mult
+
+    # Reconnect: the child's governor counters restart from zero. The
+    # first vstats after "connected" must be treated as a baseline (a
+    # negative delta), not a spurious extra backoff.
+    sim.ctrl({"t": "disconnected", "reason": "test"})
+    _wait_for(lambda: not chan.connected, what="disconnected")
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="reconnected")
+    sim.ctrl(_vstats(2))
+    time.sleep(0.2)
+    assert chan._preview_backoff.mult == pytest.approx(mult)
+
+
+def test_vstats_adaptive_kill_switch(monkeypatch):
+    monkeypatch.setenv("INTERLATENT_PREVIEW_ADAPTIVE", "0")
+    spawned: list[FakePopen] = []
+    monkeypatch.setattr(
+        qc.subprocess, "Popen",
+        lambda argv, **kw: spawned.append(FakePopen(argv, **kw)) or spawned[-1],
+    )
+    chan = QuicTeleopChannel(
+        session_id="sess-noadapt", api_base="http://api.example",
+        api_key="ilat_test",
+    )
+    chan.start()
+    sim = ChildSim(spawned[0].env)
+    try:
+        _make_viewer_present(chan, sim)
+        sim.ctrl(_vstats(0))
+        sim.ctrl(_vstats(500))
+        time.sleep(0.2)
+        assert chan._effective_preview_period_s() == chan._preview_period_s
+        assert chan._preview_backoff.mult == 1.0
+    finally:
+        sim.close()
+        chan.stop()
+
+
+def test_vstats_payload_pure():
+    assert _quic_proc._vstats_payload(None, None) is None
+
+    class _Gov:
+        opened, finished, dropped_cap, reset_ttl = 7, 6, 3, 1
+
+    class _WT:
+        def datagrams_dropped(self):
+            return 9
+
+    msg = _quic_proc._vstats_payload(_Gov(), _WT())
+    assert msg == {"t": "vstats", "open": 7, "fin": 6, "drop_cap": 3,
+                   "reset_ttl": 1, "dg_drop": 9}
+    # No live WT session (or a broken counter) degrades to 0, never raises.
+    assert _quic_proc._vstats_payload(_Gov(), None)["dg_drop"] == 0
+    kind, payload = _quic_ipc.parse(_quic_ipc.encode_ctrl(msg))
+    assert kind == _quic_ipc.TYPE_CTRL
+    assert _quic_ipc.parse_ctrl(payload) == msg

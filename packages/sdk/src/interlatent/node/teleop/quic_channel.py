@@ -138,6 +138,54 @@ def _advance_preview_deadline(next_due: float, now: float, period_s: float) -> f
     return max(next_due + period_s, now)
 
 
+class PreviewBackoff:
+    """Multiplicative preview-rate backoff driven by the child's vstats.
+
+    The parent cannot observe video stream completion (the hand-off to
+    the child is a fire-and-forget loopback sendto), so the child
+    reports cumulative drop counters (``vstats``) and this class turns
+    per-window drop deltas into a period multiplier. AIMD-shaped
+    asymmetry: double the period the moment a window shows sustained
+    drops (>= _BACKOFF_DROPS — on a 3-cam 10 Hz rig 1-2 denials happen
+    on a single congestion-window stall, three-plus in one second means
+    the uplink persistently can't finish streams), recover slowly
+    (/1.25 per clean window, ~10 clean seconds from the floor back to
+    10 Hz) so a marginal link re-probes instead of flapping. The floor
+    rate is 1 Hz (period ceiling 1 s): the operator's quad stays alive
+    at negligible bandwidth while the configured INTERLATENT_PREVIEW_HZ
+    becomes a ceiling, not a promise. Pure + unit-tested.
+    """
+
+    _BACKOFF_DROPS = 3
+    _BACKOFF_FACTOR = 2.0
+    _RECOVER_FACTOR = 1.25
+    _MAX_PERIOD_S = 1.0
+
+    def __init__(self) -> None:
+        self._mult = 1.0
+
+    @property
+    def mult(self) -> float:
+        return self._mult
+
+    def on_window(self, drops: int, base_period_s: float) -> None:
+        """Feed one ~1s window's drop count (drop_cap + reset_ttl delta).
+
+        The multiplier is capped exactly where the effective period hits
+        the 1 s ceiling for this base period — overshooting past the
+        floor would only lengthen recovery. 1-2 drops is a dead band.
+        """
+        cap = max(1.0, self._MAX_PERIOD_S / max(base_period_s, 1e-6))
+        if drops >= self._BACKOFF_DROPS:
+            self._mult = min(self._mult * self._BACKOFF_FACTOR, cap)
+        elif drops == 0:
+            self._mult = max(self._mult / self._RECOVER_FACTOR, 1.0)
+
+    def period(self, base_period_s: float) -> float:
+        return min(max(base_period_s * self._mult, base_period_s),
+                   max(self._MAX_PERIOD_S, base_period_s))
+
+
 def encode_state_datagram(qpos, seq: int, applied_seq: int = -1) -> bytes:
     """Node→browser joint-state datagram (JSON). ``qpos`` is action-order,
     robot-native units — same convention as RecordTick's observation_state.
@@ -232,6 +280,14 @@ class QuicTeleopChannel:
         # INTERLATENT_QUIC_VIDEO=0 is the kill switch (control unaffected).
         self._video_enabled = os.environ.get("INTERLATENT_QUIC_VIDEO", "1") != "0"
         self._preview_period_s = _preview_period_s()
+        # Congestion-adaptive preview rate (INTERLATENT_PREVIEW_HZ is the
+        # ceiling): the child's 1s vstats messages feed PreviewBackoff.
+        # INTERLATENT_PREVIEW_ADAPTIVE=0 pins today's fixed behavior.
+        self._preview_adaptive = (
+            os.environ.get("INTERLATENT_PREVIEW_ADAPTIVE", "1") != "0"
+        )
+        self._preview_backoff = PreviewBackoff()
+        self._vstats_last: Optional[tuple] = None  # (drop_cap, reset_ttl)
         self._last_rx_at = 0.0  # viewer presence: any decoded target frame
         self._next_preview_due = 0.0  # credit deadline; see preview_due()
         self._preview_seq = 0
@@ -468,13 +524,19 @@ class QuicTeleopChannel:
                 # more, so each browser attach is observable in the node log.
                 self._spec_served = False
                 self._spec_miss_warned = False
+                # A fresh connection means a fresh child governor: its
+                # cumulative vstats counters restarted; re-baseline.
+                self._vstats_last = None
                 _LOG.info("teleop(quic) connected session=%s", self._session_id)
             elif t == "disconnected":
                 # Drop the latest frame so a stale engaged target can't keep
                 # driving the arm across a reconnect.
                 self._connected = False
+                self._vstats_last = None
                 with self._lock:
                     self._latest = None
+            elif t == "vstats":
+                self._on_vstats(msg)
             return
         if kind != _quic_ipc.TYPE_DATA or addr != self._child_addr:
             return
@@ -595,6 +657,51 @@ class QuicTeleopChannel:
         write is fine under the GIL."""
         self._last_applied_seq = int(seq)
 
+    def _on_vstats(self, msg: dict) -> None:
+        """One ~1s vstats window from the child → preview backoff policy.
+
+        Counters are cumulative per child QUIC connection; diff against
+        the last sample and clamp negative deltas (a reconnect restarts
+        the child's governor; connected/disconnected also re-baseline).
+        Runs on the supervisor thread; the multiplier is a plain float
+        read by the control-loop thread under the GIL (same precedent
+        as _last_applied_seq). Backoff steps log at INFO; recovery logs
+        once on reaching the configured rate; decay steps are silent.
+        """
+        if not self._preview_adaptive or not self._video_enabled:
+            return
+        try:
+            drop_cap = int(msg.get("drop_cap", 0))
+            reset_ttl = int(msg.get("reset_ttl", 0))
+        except (TypeError, ValueError):
+            return
+        last = self._vstats_last
+        self._vstats_last = (drop_cap, reset_ttl)
+        if last is None:
+            return  # first sample of this connection — baseline only
+        drops = max(0, drop_cap - last[0]) + max(0, reset_ttl - last[1])
+        before = self._preview_backoff.mult
+        self._preview_backoff.on_window(drops, self._preview_period_s)
+        after = self._preview_backoff.mult
+        if after > before:
+            _LOG.info(
+                "teleop(quic) preview backing off to %.1f Hz "
+                "(video drops %d/1s) session=%s",
+                1.0 / self._effective_preview_period_s(), drops,
+                self._session_id,
+            )
+        elif after < before and after == 1.0:
+            _LOG.info(
+                "teleop(quic) preview recovered to %.1f Hz session=%s",
+                1.0 / self._preview_period_s, self._session_id,
+            )
+
+    def _effective_preview_period_s(self) -> float:
+        """The configured period scaled by the congestion backoff."""
+        if not self._preview_adaptive:
+            return self._preview_period_s
+        return self._preview_backoff.period(self._preview_period_s)
+
     def preview_due(self) -> bool:
         """True when the control loop should encode + hand over a preview set.
 
@@ -634,7 +741,8 @@ class QuicTeleopChannel:
         if sock is None or addr is None or not self._connected:
             return
         self._next_preview_due = _advance_preview_deadline(
-            self._next_preview_due, time.monotonic(), self._preview_period_s
+            self._next_preview_due, time.monotonic(),
+            self._effective_preview_period_s(),
         )
         self._preview_seq += 1
         ts_ms = int(ts_ns) // 1_000_000
@@ -688,10 +796,12 @@ class QuicTeleopChannel:
         seq_span = self._arr_seq_last - self._arr_seq_first
         _LOG.info(
             "teleop(quic) target datagrams (%.0fs): n=%d rate=%.1fHz "
-            "gap mean/max=%.0f/%.0fms seq_span=%d pv=%d session=%s",
+            "gap mean/max=%.0f/%.0fms seq_span=%d pv=%d pv_hz=%.1f "
+            "session=%s",
             elapsed, n, n / elapsed if elapsed > 0 else 0.0,
             (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
-            self._arr_gap_max_ms, seq_span, self._pv_window, self._session_id,
+            self._arr_gap_max_ms, seq_span, self._pv_window,
+            1.0 / self._effective_preview_period_s(), self._session_id,
         )
         self._arr_count = 0
         self._arr_gap_sum_ms = 0.0
@@ -703,6 +813,7 @@ class QuicTeleopChannel:
 __all__ = [
     "QuicTeleopChannel",
     "LatestSeqBuffer",
+    "PreviewBackoff",
     "encode_state_datagram",
     "decode_target_datagram",
     "frame_spec_wire",

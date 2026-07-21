@@ -81,7 +81,9 @@ python -c "import logging; logging.basicConfig(level=logging.DEBUG); \
 |---|---|
 | `INTERLATENT_JPEG_BACKEND` | `auto` (default) \| `nvjpeg` \| `gpujpeg` \| `turbojpeg` \| `cv2` \| `pil`. Starts the chain at the named backend — the kill-switch when an encoder misbehaves in the field. A forced backend that fails to probe warns and falls through. |
 | `INTERLATENT_GPU_JPEG_MIN_PIXELS` | Pixel area (post-resize) below which frames stay on the CPU chain even when a GPU backend resolved. Default `150000`. |
-| `INTERLATENT_PREVIEW_HZ` | Live teleop preview push rate, clamped [1, 30], default 10. Read once at node start — set it in the environment the node process actually inherits. |
+| `INTERLATENT_PREVIEW_HZ` | Live teleop preview rate **ceiling**, clamped [1, 30], default 10. Read once at node start — set it in the environment the node process actually inherits. On the QUIC transport the effective rate backs off (down to 1 Hz) when the uplink drops video streams and recovers automatically when it clears. |
+| `INTERLATENT_PREVIEW_ADAPTIVE` | `0` disables the QUIC congestion backoff — the preview runs at the fixed configured rate. Default on. |
+| `INTERLATENT_REC_DRAIN_CEILING_S` | Force a fixed close-drain hard ceiling (seconds). Default: scales with the banked spool bytes at an assumed ≥250 KiB/s link, floor 600 s. |
 
 ## Know what encode does — and does not — buy you
 

@@ -76,8 +76,9 @@ def _rec_pace_bytes_per_s() -> float:
     protecting the teleop path (state heartbeat, pose targets, live
     previews) that shares the same physical link from bufferbloat behind
     recording bursts. If the budget is below the capture bitrate the
-    backlog accumulates in the (unbounded) recorder queue and ships
-    during the close drain — recording stays complete; RAM is the cost.
+    backlog banks in the DISK spool (ADR 0023) and ships during the
+    close drain, which runs unpaced — recording stays complete; disk
+    and close-drain time are the cost.
     """
     import os
 
@@ -86,6 +87,41 @@ def _rec_pace_bytes_per_s() -> float:
     except (TypeError, ValueError):
         kbps = 8000.0
     return max(0.0, kbps) * 1024.0
+
+
+# Conservative floor for sizing the close-drain ceiling: just under the
+# ~300 KiB/s session cap the low-bandwidth recipe recommends, so any
+# link that sustained the session at all drains faster than this and the
+# computed ceiling only ever over-budgets. The 12s ack-progress stall
+# detector (not this ceiling) remains the dead-link escape.
+_REC_DRAIN_ASSUMED_MIN_BPS = 250 * 1024
+
+
+def _rec_drain_ceiling_s(pending_bytes: int) -> float:
+    """Close-drain hard ceiling, scaled to the backlog actually banked.
+
+    A paced session on a deficit uplink can bank GBs in the spool; a
+    fixed ceiling would guillotine the drain mid-flight and retain a
+    tail that — for a completed session — is never re-drained and is
+    GC'd after retention. Scale the ceiling by the pending bytes at an
+    assumed worst-case drain rate instead; ``max(base, ...)`` preserves
+    the historical 600s floor. INTERLATENT_REC_DRAIN_CEILING_S (float
+    seconds > 0) forces a fixed value. A 3 GB backlog yields a ~3.4h
+    ceiling — long, but the alternative is deleting recorded data, and
+    close is off the control-critical path.
+    """
+    import os
+
+    try:
+        forced = float(os.environ.get("INTERLATENT_REC_DRAIN_CEILING_S", "") or 0.0)
+    except (TypeError, ValueError):
+        forced = 0.0
+    if forced > 0.0:
+        return forced
+    return max(
+        _REC_DRAIN_CEILING_S,
+        float(max(0, pending_bytes)) / _REC_DRAIN_ASSUMED_MIN_BPS,
+    )
 
 # Cap the wire size of one batched RecordTicks RPC. Two constraints:
 # the server's default gRPC receive limit is 4 MiB (hard ceiling), and —
@@ -109,10 +145,10 @@ _REC_BATCH_TIMEOUT_S = 30.0
 # rather than dropping the tail. We only give up if the sender stops
 # shipping for _REC_DRAIN_STALL_S (a dead link — set above the 10s per-RPC
 # RecordTick timeout so a merely-slow link is not mistaken for a dead one),
-# or a hard ceiling elapses as an ultimate backstop. The ceiling is sized
-# for the unbounded queue: a paced session on a deficit uplink can bank
-# minutes of backlog, and the close drain (which runs unpaced, at line
-# rate) is the one chance to ship it — 10 min covers ~2 GB at 3.5 MB/s.
+# or a hard ceiling elapses as an ultimate backstop. The ceiling base
+# covers ~2 GB at 3.5 MB/s; when the spool has banked more than that
+# would drain, _rec_drain_ceiling_s scales it up with the pending bytes
+# so a low-capped long session never has its tail guillotined.
 _REC_DRAIN_STALL_S = 12.0
 _REC_DRAIN_CEILING_S = 600.0
 
@@ -436,7 +472,16 @@ class DRTCClient:
             return
         # Close sentinel: the sender flushes the whole spool, then exits.
         self._rec_q.put(None)
-        deadline = time.monotonic() + _REC_DRAIN_CEILING_S
+        pending_bytes = spool.pending_bytes if spool is not None else 0
+        ceiling_s = _rec_drain_ceiling_s(pending_bytes)
+        if ceiling_s > _REC_DRAIN_CEILING_S:
+            log.info(
+                "DRTC recorder drain: %.0f MB banked in the spool — "
+                "ceiling scaled to %.0fs (assumes >= %d KiB/s)",
+                pending_bytes / 1e6, ceiling_s,
+                _REC_DRAIN_ASSUMED_MIN_BPS // 1024,
+            )
+        deadline = time.monotonic() + ceiling_s
         last_sent = self._rec_sent
         last_progress = time.monotonic()
         while thread.is_alive():
@@ -459,7 +504,7 @@ class DRTCClient:
                 log.warning(
                     "DRTC recorder drain hit %.0fs ceiling (%d ticks "
                     "unsent); retaining them on disk for later recovery",
-                    _REC_DRAIN_CEILING_S, _pending(),
+                    ceiling_s, _pending(),
                 )
                 self._rec_abandon.set()
                 break
@@ -477,12 +522,22 @@ class DRTCClient:
             return
         retained = self._rec_unsent_retained
         if retained or self._rec_refused:
+            if retained and self._spool is not None:
+                detail = (
+                    "un-acked ticks (%.0f MB) kept in the spool at %s — "
+                    "they resume ONLY if this session is re-assigned; "
+                    "otherwise spool GC deletes them after ~7 days"
+                    % (self._spool.pending_bytes / 1e6, self._spool.dir)
+                )
+            elif retained:
+                detail = "un-acked ticks kept in the spool for recovery"
+            else:
+                detail = "capture was hard-stopped part of the time"
             log.warning(
                 "DRTC recording finished: captured=%d sent=%d "
                 "retained_on_disk=%d refused_at_capture=%d — %s",
                 captured, self._rec_sent, retained, self._rec_refused,
-                ("un-acked ticks kept in the spool for recovery"
-                 if retained else "capture was hard-stopped part of the time"),
+                detail,
             )
         else:
             log.info(

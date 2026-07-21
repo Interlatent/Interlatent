@@ -134,3 +134,96 @@ def test_unary_fallback_acks_per_tick(tmp_path):
     assert cli._rec_sent == 3
     assert cli._spool.pending_count == 0
     assert cli._rec_batch_unsupported is True
+
+
+# ---------------------------------------------------------------------------
+# Dynamic close-drain ceiling (_rec_drain_ceiling_s + _drain_recorder)
+# ---------------------------------------------------------------------------
+
+from interlatent.inference.client import controller as _ctrl  # noqa: E402
+
+
+def test_drain_ceiling_scales_with_pending(monkeypatch):
+    monkeypatch.delenv("INTERLATENT_REC_DRAIN_CEILING_S", raising=False)
+    # Small backlog: the historical 600s floor holds.
+    assert _ctrl._rec_drain_ceiling_s(0) == 600.0
+    assert _ctrl._rec_drain_ceiling_s(10 * 1024 * 1024) == 600.0
+    # 3 GiB at the assumed 250 KiB/s floor.
+    three_gib = 3 * 2**30
+    assert _ctrl._rec_drain_ceiling_s(three_gib) == pytest.approx(
+        three_gib / (250 * 1024)
+    )
+    # Env override wins regardless of pending; garbage falls to the formula.
+    monkeypatch.setenv("INTERLATENT_REC_DRAIN_CEILING_S", "60")
+    assert _ctrl._rec_drain_ceiling_s(three_gib) == 60.0
+    monkeypatch.setenv("INTERLATENT_REC_DRAIN_CEILING_S", "banana")
+    assert _ctrl._rec_drain_ceiling_s(0) == 600.0
+
+
+def _start_sender(cli):
+    import threading
+
+    cli._rec_thread = threading.Thread(target=cli._rec_loop, daemon=True)
+    cli._rec_thread.start()
+
+
+def test_drain_scaling_log_and_full_drain(tmp_path, monkeypatch, caplog):
+    import logging
+
+    # Make a tiny spool exceed the base ceiling so the scaling INFO fires.
+    monkeypatch.setattr(_ctrl, "_REC_DRAIN_ASSUMED_MIN_BPS", 1)
+    cli, stub = _client(tmp_path, script=["all"])
+    for i in range(3):
+        _tick(cli, i)
+    _start_sender(cli)
+    with caplog.at_level(logging.INFO, logger=_ctrl.log.name):
+        cli._drain_recorder()
+    assert any("ceiling scaled to" in r.getMessage() for r in caplog.records)
+    assert cli._rec_unsent_retained == 0
+    assert not cli._spool.dir.exists()  # fully drained -> disposed
+
+
+def test_drain_stall_retains_tail_with_loud_warning(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(_ctrl, "_REC_DRAIN_STALL_S", 0.2)
+    cli, stub = _client(tmp_path, script=["err"] * 100)
+    for i in range(3):
+        _tick(cli, i)
+    _start_sender(cli)
+    with caplog.at_level(logging.WARNING, logger=_ctrl.log.name):
+        cli._drain_recorder()
+        cli._log_recording_summary()
+    assert cli._rec_unsent_retained == 3
+    assert cli._spool.dir.exists()  # tail retained, not disposed
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "stalled" in text
+    # The summary names the spool path and the GC consequence.
+    assert str(cli._spool.dir) in text
+    assert "GC" in text or "re-assigned" in text
+
+
+def test_drain_env_ceiling_bounds_slow_link(tmp_path, monkeypatch, caplog):
+    import logging
+    import time as _time
+
+    # Stall detector effectively off; a slow-but-alive stub acks 1 tick
+    # per RPC with a delay, so only the (forced tiny) ceiling can end it.
+    monkeypatch.setattr(_ctrl, "_REC_DRAIN_STALL_S", 30.0)
+    monkeypatch.setenv("INTERLATENT_REC_DRAIN_CEILING_S", "0.4")
+    cli, stub = _client(tmp_path, script=[1] * 100)
+    real_record_ticks = stub.RecordTicks
+
+    def slow(req, metadata=None, timeout=None):
+        _time.sleep(0.15)
+        return real_record_ticks(req, metadata=metadata, timeout=timeout)
+
+    stub.RecordTicks = slow
+    for i in range(30):
+        _tick(cli, i)
+    _start_sender(cli)
+    with caplog.at_level(logging.WARNING, logger=_ctrl.log.name):
+        cli._drain_recorder()
+    assert cli._rec_unsent_retained > 0
+    assert any("0s ceiling" in r.getMessage() or "ceiling" in r.getMessage()
+               for r in caplog.records)
