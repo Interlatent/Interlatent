@@ -214,6 +214,10 @@ active**, because xHCI cannot reserve the bandwidth upfront. Rules of thumb:
   (`UVC front connected (... negotiated MJPG 640x480@30)`) and warns when
   the driver refuses the requested format.
 
+Once frames are captured, the *encoding* side (JPEG backend chain, GPU
+acceleration on Jetson, network bandwidth budgeting) is covered in
+[docs/node-encoding.md](docs/node-encoding.md).
+
 ## 4. `node.toml`: who this machine is
 
 Written for you by `interlatent-node pair`; you rarely touch it. It holds a long-lived

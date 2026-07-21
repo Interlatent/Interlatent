@@ -116,3 +116,4 @@ box can bridge it.
 - Concepts (DRTC, sessions, chunks, the node): [concepts.md](concepts.md)
 - Which robots/policies work: [robots-and-policies.md](robots-and-policies.md)
 - Managed GPUs + hosted datasets: [going-to-cloud.md](going-to-cloud.md)
+- Frame encoding, Jetson GPU setup, bandwidth: [node-encoding.md](node-encoding.md)
