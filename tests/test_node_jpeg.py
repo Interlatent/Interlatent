@@ -48,14 +48,34 @@ def _available_backends() -> list[str]:
         out.append("turbojpeg")
     except Exception:
         pass
+    try:
+        # Real GPU only — probe() is exception-safe and returns None on
+        # GPU-less CI, which auto-skips the nvjpeg parity case.
+        from interlatent.node import nvjpeg as nvjpeg_mod
+
+        enc = nvjpeg_mod.probe()
+        if enc is not None:
+            enc.close()
+            out.append("nvjpeg")
+    except Exception:
+        pass
     return out
 
 
+def _clear_backend_state():
+    jpeg_mod._BACKEND = None
+    jpeg_mod._CPU_BACKEND = None
+    jpeg_mod._NVJPEG_MIN_PIXELS = None
+    jpeg_mod._NVJPEG_WARNED = False
+
+
 @pytest.fixture(autouse=True)
-def _reset_backend():
-    jpeg_mod._BACKEND = None
+def _reset_backend(monkeypatch):
+    monkeypatch.delenv("INTERLATENT_JPEG_BACKEND", raising=False)
+    monkeypatch.delenv("INTERLATENT_NVJPEG_MIN_PIXELS", raising=False)
+    _clear_backend_state()
     yield
-    jpeg_mod._BACKEND = None
+    _clear_backend_state()
 
 
 @pytest.mark.parametrize("backend", _available_backends())
@@ -68,6 +88,15 @@ def test_color_order_parity(backend, monkeypatch):
         import cv2
 
         jpeg_mod._BACKEND = ("cv2", cv2)
+    elif backend == "nvjpeg":
+        from interlatent.node import nvjpeg as nvjpeg_mod
+
+        enc = nvjpeg_mod.probe()
+        assert enc is not None  # listed only when the probe succeeded
+        jpeg_mod._BACKEND = ("nvjpeg", enc)
+        # The parity frame is 48x64 — route it to the GPU regardless of
+        # the size threshold so an RGBI/BGRI swap fails this test.
+        monkeypatch.setattr(jpeg_mod, "_NVJPEG_MIN_PIXELS", 0)
     src = _test_frame()
     data = encode_jpeg(src, quality=95)
     assert data is not None and data[:3] == b"\xff\xd8\xff"

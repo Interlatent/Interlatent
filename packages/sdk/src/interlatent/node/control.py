@@ -690,10 +690,10 @@ def _capture_tick(
                 arr = None
             if arr is not None and arr.dtype == np.uint8 and arr.ndim >= 2:
                 cam_arrays += 1
-                # Capability-adaptive encoder (ADR 0023): turbojpeg when
-                # installed, else cv2 (releases the GIL), else PIL. Same
-                # encoder as the inference uplink, so recorded and served
-                # frames match byte-for-byte behavior.
+                # Capability-adaptive encoder (ADR 0023, SDK ADR 0019):
+                # nvjpeg on CUDA boxes, else turbojpeg, else cv2 (releases
+                # the GIL), else PIL. Same encoder as the inference uplink,
+                # so recorded and served frames match byte-for-byte behavior.
                 data = _encode_jpeg(arr)
                 if data:
                     jpegs[k] = data
