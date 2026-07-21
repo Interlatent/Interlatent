@@ -45,11 +45,22 @@ One-time install on the Jetson:
 sudo apt update && sudo apt install -y cuda-toolkit cmake build-essential
 
 # 2. Build + install GPUJPEG — use this tag; the SDK pins its ABI (v0.25+,
-#    validated against v0.27.13) and refuses older builds
+#    validated against v0.27.13) and refuses older builds.
+#    The toolkit does NOT put nvcc on PATH, and CMake's CUDA-arch
+#    auto-detect fails without it ("Failed to detect a default CUDA
+#    architecture") — point at nvcc and name the arch explicitly
+#    (Orin family = 87, Xavier = 72).
 git clone --branch v0.27.13 --depth 1 https://github.com/CESNET/GPUJPEG.git
-cd GPUJPEG && cmake -B build -DCMAKE_BUILD_TYPE=Release
+cd GPUJPEG
+export PATH=/usr/local/cuda/bin:$PATH
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DCMAKE_CUDA_ARCHITECTURES=87
 cmake --build build -j$(nproc)
 sudo cmake --install build && sudo ldconfig
+# If /usr/local/cuda/bin/nvcc is missing, the metapackage skipped the
+# compiler — install the versioned toolkit matching your JetPack
+# (e.g. `sudo apt install cuda-toolkit-12-6` on JetPack 6) and retry.
 
 # 3. CPU fallback for small/preview frames (NEON, ~3x faster than cv2)
 pip install 'interlatent[turbo]' && sudo apt install -y libturbojpeg
