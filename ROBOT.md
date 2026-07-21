@@ -187,6 +187,33 @@ it becomes the `observation.images.<name>` the model sees.
 Full references: [SO-101 config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) ·
 [YAM config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md).
 
+### USB bandwidth on multi-camera rigs
+
+`--camera` accepts comma-separated capture extras after the device:
+
+```bash
+--camera front=/dev/video0,width=1280,height=720,fps=15,pixel_format=yuyv
+```
+
+UVC webcams default to **MJPG** wire format. Uncompressed YUYV at 640×480@30
+reserves ~147 Mbit/s of USB isochronous bandwidth *per camera*; MJPG is
+~20–40 Mbit/s. That matters because every USB2-class device shares **one
+480 Mbit/s domain per host controller** (on a Jetson Orin Nano, that is all
+the type-A ports together) — the failure mode is not slowness but a camera
+or CAN adapter **refusing to open/enumerate only when the others are
+active**, because xHCI cannot reserve the bandwidth upfront. Rules of thumb:
+
+- Keep the MJPG default unless the rig is CPU-bound (MJPG costs a per-frame
+  JPEG decode in OpenCV; `pixel_format=yuyv` or `=default` trades bandwidth
+  for CPU on an uncongested USB3 bus).
+- Give a RealSense its own USB3 port — its color stream over a USB2 link
+  starves everything else on the domain.
+- Keep USB-CAN adapters (the YAM arm links) off camera hubs; camera
+  isochronous traffic adds latency to the latency-sensitive arm channel.
+- The node logs the negotiated format per camera at connect
+  (`UVC front connected (... negotiated MJPG 640x480@30)`) and warns when
+  the driver refuses the requested format.
+
 ## 4. `node.toml`: who this machine is
 
 Written for you by `interlatent-node pair`; you rarely touch it. It holds a long-lived
