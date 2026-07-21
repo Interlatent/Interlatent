@@ -163,10 +163,15 @@ def cuda_device_count() -> int:
     """Visible CUDA devices; 0 on any failure (no driver, no libcudart)."""
     try:
         count = ctypes.c_int(0)
-        if _cudart().cudaGetDeviceCount(ctypes.byref(count)) != 0:
+        status = _cudart().cudaGetDeviceCount(ctypes.byref(count))
+        if status != 0:
+            _LOG.debug("cudaGetDeviceCount returned status %d", status)
             return 0
         return max(0, int(count.value))
-    except Exception:
+    except Exception as exc:
+        # Distinguish "libcudart not loadable" from "runtime says 0 GPUs"
+        # in the debug log — the two need different fixes in the field.
+        _LOG.debug("CUDA runtime unavailable (%s: %s)", type(exc).__name__, exc)
         return 0
 
 
