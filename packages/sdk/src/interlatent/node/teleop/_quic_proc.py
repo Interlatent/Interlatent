@@ -50,8 +50,26 @@ _STATS_LOG_PERIOD_S = 5.0
 # frame-streams per camera / overall before new frames are dropped at the
 # source, and a stream still unfinished after the TTL is RESET so stale
 # bytes stop competing with control datagrams in the congestion window.
-_VIDEO_INFLIGHT_PER_CAM = 2
-_VIDEO_INFLIGHT_GLOBAL = 6
+#
+# The per-camera cap bounds the delivered preview rate on a long-RTT
+# relay path: fps/cam ~= cap / stream_completion_time (cap 2 at ~200ms
+# RTT tops out ~10 fps). INTERLATENT_QUIC_VIDEO_INFLIGHT raises it for
+# operators who want more headset fps — safe-ish now that the parent's
+# adaptive preview backoff also regulates the offered rate, but more
+# in-flight video does queue more bytes against control datagrams; the
+# global cap stays 3x per-cam (the 3-camera rig ratio).
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        val = int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, val))
+
+
+_VIDEO_INFLIGHT_PER_CAM = _env_int("INTERLATENT_QUIC_VIDEO_INFLIGHT", 2, 1, 16)
+_VIDEO_INFLIGHT_GLOBAL = 3 * _VIDEO_INFLIGHT_PER_CAM
 _VIDEO_STREAM_TTL_S = 1.0
 
 
@@ -457,6 +475,12 @@ def main() -> None:
         level=os.environ.get("INTERLATENT_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if _VIDEO_INFLIGHT_PER_CAM != 2:
+        _LOG.info(
+            "video in-flight cap overridden: %d per cam / %d global "
+            "(INTERLATENT_QUIC_VIDEO_INFLIGHT)",
+            _VIDEO_INFLIGHT_PER_CAM, _VIDEO_INFLIGHT_GLOBAL,
+        )
     asyncio.run(_amain(_load_cfg()))
 
 

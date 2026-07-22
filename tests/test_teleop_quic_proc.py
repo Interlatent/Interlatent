@@ -837,3 +837,30 @@ def test_vstats_payload_pure():
     kind, payload = _quic_ipc.parse(_quic_ipc.encode_ctrl(msg))
     assert kind == _quic_ipc.TYPE_CTRL
     assert _quic_ipc.parse_ctrl(payload) == msg
+
+
+def test_video_inflight_env_parse(monkeypatch):
+    # Valid override, clamping, and garbage falling back to the default.
+    monkeypatch.setenv("X_INFLIGHT", "4")
+    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 4
+    monkeypatch.setenv("X_INFLIGHT", "99")
+    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 16
+    monkeypatch.setenv("X_INFLIGHT", "0")
+    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 1
+    monkeypatch.setenv("X_INFLIGHT", "many")
+    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 2
+    monkeypatch.delenv("X_INFLIGHT")
+    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 2
+
+
+def test_video_governor_honors_raised_cap(monkeypatch):
+    monkeypatch.setattr(_quic_proc, "_VIDEO_INFLIGHT_PER_CAM", 4)
+    monkeypatch.setattr(_quic_proc, "_VIDEO_INFLIGHT_GLOBAL", 12)
+    gov = _quic_proc._VideoGovernor(
+        now=lambda: 0.0, is_finished=lambda sid: False, reset=lambda sid: None
+    )
+    for i in range(4):
+        assert gov.admit("cam")
+        gov.note_open(i, "cam")
+    assert not gov.admit("cam")  # 5th per-cam frame hits the raised cap
+    assert gov.dropped_cap == 1

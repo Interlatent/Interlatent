@@ -84,6 +84,7 @@ python -c "import logging; logging.basicConfig(level=logging.DEBUG); \
 | `INTERLATENT_PREVIEW_HZ` | Live teleop preview rate **ceiling**, clamped [1, 30], default 10. Read once at node start — set it in the environment the node process actually inherits. On the QUIC transport the effective rate backs off (down to 1 Hz) when the uplink drops video streams and recovers automatically when it clears. |
 | `INTERLATENT_PREVIEW_ADAPTIVE` | `0` disables the QUIC congestion backoff — the preview runs at the fixed configured rate. Default on. |
 | `INTERLATENT_REC_DRAIN_CEILING_S` | Force a fixed close-drain hard ceiling (seconds). Default: scales with the banked spool bytes at an assumed ≥250 KiB/s link, floor 600 s. |
+| `INTERLATENT_QUIC_VIDEO_INFLIGHT` | Per-camera in-flight preview-stream cap in the QUIC child (default 2, clamp [1, 16]; global cap = 3×). On a long-RTT relay the delivered preview fps ≈ cap ÷ round-trip — raise to 3–4 for more headset fps at the cost of more video bytes queued against control datagrams. |
 
 ## Know what encode does — and does not — buy you
 
