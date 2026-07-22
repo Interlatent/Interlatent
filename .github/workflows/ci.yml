@@ -48,8 +48,7 @@ jobs:
               "interlatent-": ["interlatent/node/cli.py",                # interlatent-node
                                "interlatent/node/act_cli.py",             # interlatent-act
                                "interlatent/cli/main.py",                 # interlatent
-                               "interlatent/inference/integration/preflight.py",  # interlatent-preflight
-                               "interlatent/adapters/lerobot/sync_inference/sync_rollout.py"],  # interlatent-sync-rollout
+                               "interlatent/inference/integration/preflight.py"],  # interlatent-preflight
           }
           for prefix, files in required.items():
               [wheel] = [w for w in glob.glob("/tmp/wheels/*.whl") if w.split("/")[-1].startswith(prefix)]
