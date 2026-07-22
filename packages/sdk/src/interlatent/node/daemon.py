@@ -175,6 +175,25 @@ class NodeDaemon:
             _LOG.info(
                 "Node host addresses: %s (hostname=%s)", ", ".join(_ips), _host
             )
+        # Surface tick spools left behind by a crashed run (ADR 0023).
+        # A spool whose session gets re-assigned resumes draining
+        # automatically (TickSpool is keyed by session id); anything else
+        # is retained for the GC retention window, then removed loudly.
+        try:
+            from ..inference.client import spool as tick_spool
+
+            for orphan in tick_spool.orphan_sessions():
+                if orphan["pending_count"]:
+                    _LOG.warning(
+                        "orphan tick spool: session=%s has %d unsent ticks "
+                        "(%.0f MB) at %s — resumes automatically if the "
+                        "session is re-assigned; GC'd after retention",
+                        orphan["session_id"], orphan["pending_count"],
+                        orphan["pending_bytes"] / 1e6, orphan["dir"],
+                    )
+            tick_spool.gc_orphans()
+        except Exception:
+            _LOG.warning("orphan spool scan failed (non-fatal)", exc_info=True)
         # Best-effort: tell the dashboard what hardware is attached so
         # the user can examine it (robot type, USB port, cameras). Never
         # fatal — a failed report just leaves the panel empty.
@@ -218,12 +237,39 @@ class NodeDaemon:
     # Heartbeat
     # ------------------------------------------------------------------
 
+    def _recording_state(self) -> dict:
+        """Spool/drain telemetry for the heartbeat (ADR 0023).
+
+        ``blocked`` is the active session's hard-stop state; the spool
+        totals cover every session dir on disk (active + retained), so
+        the backend can see un-drained backlog and gate the next launch
+        on drain-done instead of the old blind ~5s flush.
+        """
+        state: dict = {"blocked": False, "spool_pending": 0, "spool_bytes": 0}
+        h = self._active
+        if h is not None:
+            try:
+                state["blocked"] = bool(getattr(h.client, "recording_blocked", False))
+            except Exception:
+                pass
+        try:
+            from ..inference.client import spool as tick_spool
+
+            sessions = tick_spool.orphan_sessions()
+            state["spool_pending"] = sum(o["pending_count"] for o in sessions)
+            state["spool_bytes"] = sum(o["pending_bytes"] for o in sessions)
+        except Exception:
+            pass
+        state["drain_done"] = state["spool_pending"] == 0
+        return state
+
     async def _heartbeat_loop(self) -> None:
         backoff = self.cfg.reconnect_backoff_s
         while True:
             try:
                 r = await self._http.post(
-                    f"/api/v1/nodes/{self.cfg.node_id}/heartbeat"
+                    f"/api/v1/nodes/{self.cfg.node_id}/heartbeat",
+                    json={"recording": self._recording_state()},
                 )
                 if r.status_code >= 400:
                     _LOG.warning("Heartbeat %s: %s", r.status_code, r.text)
@@ -350,6 +396,29 @@ class NodeDaemon:
             self._stop_active_loop()
 
         if session is None:
+            self._known_session_id = ""
+            self._known_endpoint = ""
+            self._active_endpoint = ""
+            return
+
+        # Spool hard-stop gate (ADR 0023): refuse an assignment that would
+        # immediately hard-stop on capture — full disk or a spool backlog
+        # already at the cap. The poll loop keeps retrying, so the node
+        # auto-resumes once the pressure clears (backlog drained/GC'd or
+        # disk freed); nothing is silently dropped to make room.
+        try:
+            from ..inference.client.spool import disk_pressure
+
+            pressure = disk_pressure()
+        except Exception:
+            pressure = None
+        if pressure:
+            _LOG.error(
+                "Refusing session %s: %s. Drain or GC the spool "
+                "(~/.interlatent/spool), or free disk; the node will "
+                "retry on the next poll.",
+                desired_id, pressure,
+            )
             self._known_session_id = ""
             self._known_endpoint = ""
             self._active_endpoint = ""

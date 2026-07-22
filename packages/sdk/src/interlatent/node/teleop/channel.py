@@ -29,21 +29,17 @@ falls back to policy mode.
 from __future__ import annotations
 
 import logging
-import struct
 import threading
 import time
 from typing import Optional
 
+from .. import _env
+from ._frame_store import LatestFrameStore
 from ._mint import mint_teleop_token
-from .frame import TeleopFrame
+from ._telemetry import ArrivalTracker
+from .frame import TeleopFrame, frame_with_header
 
 _LOG = logging.getLogger(__name__)
-
-# How stale a held-key set may be before we drop it. At 30 Hz the
-# dashboard fires every ~33ms; 250ms covers half a dozen frames of
-# jitter without letting a stuck key keep the arm moving after the
-# browser has actually gone silent.
-_FRAME_STALE_MS = 250
 
 # Reconnect backoff between dropped connections. The teleop channel
 # can fail for boring reasons (GPU box bounced, NAT timeout) and the
@@ -72,13 +68,7 @@ _STATS_LOG_PERIOD_S = 5.0
 # × Hz — 10 Hz on a 2-cam rig is ~2 Mbit/s, 20 Hz ~4 Mbit/s). Clamped to
 # [1, 30]; the control loop can't produce more than its tick rate anyway.
 def _preview_period_s() -> float:
-    import os
-
-    try:
-        hz = float(os.environ.get("INTERLATENT_PREVIEW_HZ", "") or 10.0)
-    except (TypeError, ValueError):
-        hz = 10.0
-    return 1.0 / max(1.0, min(30.0, hz))
+    return 1.0 / _env.env_float("INTERLATENT_PREVIEW_HZ", 10.0, 1.0, 30.0)
 
 
 _PREVIEW_SEND_PERIOD_S = _preview_period_s()
@@ -89,12 +79,13 @@ _PREVIEW_SEND_PERIOD_S = _preview_period_s()
 _VIEWER_PRESENCE_S = 5.0
 
 
-class TeleopChannel:
+class TeleopChannel(LatestFrameStore):
     """Background WS client that surfaces the latest browser teleop frame.
 
     Thread-safe: callers may read :meth:`latest_frame` from any thread.
     The receive loop runs in a single background daemon thread and is
-    fully owned by this object.
+    fully owned by this object. The latest-frame + sticky-estop store
+    (:class:`LatestFrameStore`) is shared with the QUIC channel (ADR 0016).
     """
 
     def __init__(
@@ -106,6 +97,7 @@ class TeleopChannel:
         token_path: Optional[str] = None,
         bypass_key: Optional[str] = None,
     ) -> None:
+        super().__init__()
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
@@ -117,12 +109,7 @@ class TeleopChannel:
             or f"/api/v1/inference/sessions/{session_id}/teleop-token"
         )
 
-        self._lock = threading.Lock()
-        self._latest: Optional[TeleopFrame] = None
-        # Sticky operator e-stop: latched at decode time, cleared only by
-        # consume_estop(). Deliberately survives frame staleness and channel
-        # reconnects — a panic press must never be droppable (ADR 0016).
-        self._estop_seen = False
+        # _lock / _latest / _estop_seen live in LatestFrameStore (ADR 0016).
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._connected = False
@@ -156,60 +143,29 @@ class TeleopChannel:
         # monotonic time of the last message received from the relay —
         # browser keepalives included — used as the viewer-presence gate.
         self._last_rx_at = 0.0
-        # Frame-arrival latency window (receive-loop thread only): counts
-        # + inter-arrival gap stats since the last 5s summary. The gap is
-        # the node-observable half of teleop latency — it captures
-        # pod→node network jitter and retarget-stage stalls, which is
-        # what actually makes the arm feel laggy.
-        self._arr_count = 0
-        self._arr_last_ns = 0
-        self._arr_gap_sum_ms = 0.0
-        self._arr_gap_max_ms = 0.0
-        self._arr_seq_first = 0
-        self._arr_seq_last = 0
-        self._arr_window_started = time.monotonic()
+        # Frame-arrival latency window (receive-loop thread only): the gap is
+        # the node-observable half of teleop latency — pod→node jitter and
+        # retarget-stage stalls, what actually makes the arm feel laggy. This
+        # channel appends its preview counters (pv_staged / pv_sent).
+        self._arrivals = ArrivalTracker(_STATS_LOG_PERIOD_S)
 
     def _note_arrival(self, frame: TeleopFrame) -> None:
         """Track inter-arrival gaps of producer frames; log a 5s summary.
-
-        Runs on the receive-loop thread only (no locking needed). Logged
-        rate below the producer's send rate, or a large max gap, means
-        frames are stalling somewhere between the pod and this node.
+        Receive-loop thread only. A logged rate below the producer's send rate,
+        or a large max gap, means frames are stalling between the pod and this
+        node. ``seq_span`` vs ``n`` ≈ frames the relay/retarget collapsed or
+        dropped (latest-wins everywhere, so >0 is normal — the trend matters).
         """
-        now_ns = frame.received_at_ns
-        if self._arr_count == 0:
-            self._arr_seq_first = frame.seq
-        else:
-            gap_ms = (now_ns - self._arr_last_ns) / 1e6
-            self._arr_gap_sum_ms += gap_ms
-            if gap_ms > self._arr_gap_max_ms:
-                self._arr_gap_max_ms = gap_ms
-        self._arr_last_ns = now_ns
-        self._arr_seq_last = frame.seq
-        self._arr_count += 1
-
-        now = time.monotonic()
-        elapsed = now - self._arr_window_started
-        if elapsed < _STATS_LOG_PERIOD_S:
+        summary = self._arrivals.note(frame)
+        if summary is None:
             return
-        n = self._arr_count
-        gaps = n - 1
-        # seq span vs frames received ≈ producer frames the relay/retarget
-        # collapsed or dropped en route (latest-wins everywhere, so >0 is
-        # normal under load — it's the trend that matters).
-        seq_span = self._arr_seq_last - self._arr_seq_first
         _LOG.info(
             "teleop WS frames (%.0fs): n=%d rate=%.1fHz gap mean/max=%.0f/%.0fms "
             "seq_span=%d pv_staged=%d pv_sent=%d session=%s",
-            elapsed, n, n / elapsed if elapsed > 0 else 0.0,
-            (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
-            self._arr_gap_max_ms, seq_span,
+            summary["elapsed"], summary["n"], summary["rate_hz"],
+            summary["gap_mean_ms"], summary["gap_max_ms"], summary["seq_span"],
             self._pv_staged_total, self._pv_sent_total, self._session_id,
         )
-        self._arr_count = 0
-        self._arr_gap_sum_ms = 0.0
-        self._arr_gap_max_ms = 0.0
-        self._arr_window_started = now
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -244,35 +200,8 @@ class TeleopChannel:
     # Read API (called from the control loop)
     # ------------------------------------------------------------------
 
-    def latest_frame(self) -> Optional[TeleopFrame]:
-        """Return the most recent non-stale frame, or None.
-
-        Stale frames (>250ms old) are treated as absent so a frozen
-        browser can't keep the arm moving. Returning ``None`` makes
-        the control loop fall back to policy mode automatically.
-        """
-        with self._lock:
-            frame = self._latest
-        if frame is None:
-            return None
-        age_ms = (time.monotonic_ns() - frame.received_at_ns) / 1_000_000
-        if age_ms > _FRAME_STALE_MS:
-            return None
-        return frame
-
-    def consume_estop(self) -> bool:
-        """Return-and-clear the sticky operator e-stop flag.
-
-        Latched at decode time (not subject to the 250 ms staleness rule or
-        the disconnect frame-drop), so an ``estop:true`` frame that arrives
-        during a loop stall or right before a reconnect still reaches the
-        control loop's next tick exactly once. The caller owns what "handle"
-        means (latch the SafetyGate; forward a hardware latch where one
-        exists). See ADR 0016.
-        """
-        with self._lock:
-            seen, self._estop_seen = self._estop_seen, False
-        return seen
+    # latest_frame() and consume_estop() are inherited from LatestFrameStore
+    # (identical staleness + sticky-estop semantics across transports, ADR 0016).
 
     @property
     def connected(self) -> bool:
@@ -377,17 +306,12 @@ class TeleopChannel:
                 continue
             jpegs, ts_ns = slot
             try:
-                import json
-
                 for cam, data in jpegs.items():
                     if not data:
                         continue
-                    hdr = json.dumps({
-                        "type": "preview",
-                        "cam": cam,
-                        "ts_ns": ts_ns,
-                    }).encode("utf-8")
-                    ws.send(struct.pack(">H", len(hdr)) + hdr + bytes(data))
+                    ws.send(frame_with_header(
+                        {"type": "preview", "cam": cam, "ts_ns": ts_ns}, data,
+                    ))
                 self._pv_sent_total += 1
                 if not self._pv_sent_logged:
                     self._pv_sent_logged = True
@@ -495,10 +419,9 @@ class TeleopChannel:
                     if frame is None:
                         continue
                     self._note_arrival(frame)
-                    with self._lock:
-                        self._latest = frame
-                        if frame.estop:
-                            self._estop_seen = True
+                    self._store_frame(frame)
+                    if frame.estop:
+                        self._latch_estop()
             finally:
                 self._connected = False
                 self._ws = None
@@ -506,8 +429,7 @@ class TeleopChannel:
                 # "engaged" doesn't keep driving the arm. The control
                 # loop sees latest_frame() == None and falls back to
                 # policy mode immediately.
-                with self._lock:
-                    self._latest = None
+                self._drop_frame()
 
 
 def _redact_token(url: str) -> str:

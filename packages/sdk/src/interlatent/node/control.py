@@ -28,7 +28,10 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from . import _env
 from .._clamp_log import warn_clamp
+from .jpeg import backend_name as _jpeg_backend_name
+from .jpeg import encode_jpeg as _encode_jpeg
 from .movement import CommandBus, MovementSource
 from .teleop_profiler import NodeTeleopProfiler
 
@@ -669,11 +672,6 @@ def _capture_tick(
     try:
         import time as _time
 
-        try:
-            import cv2  # type: ignore
-        except ImportError:
-            cv2 = None  # type: ignore
-
         jpegs: dict[str, bytes] = {}
         state: list[float] = []
         state_keys: list[str] = []
@@ -693,30 +691,11 @@ def _capture_tick(
                 arr = None
             if arr is not None and arr.dtype == np.uint8 and arr.ndim >= 2:
                 cam_arrays += 1
-                data: Optional[bytes] = None
-                # Fast path: OpenCV (releases the GIL during imencode).
-                if cv2 is not None:
-                    img = arr
-                    if img.ndim == 3 and img.shape[2] == 3:
-                        # cvtColor over a numpy flip: releases the GIL and is
-                        # faster than the fancy-index copy on the control thread.
-                        img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
-                    ok, buf = cv2.imencode(
-                        ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85],
-                    )
-                    if ok:
-                        data = bytes(buf)
-                # Fallback: PIL — the SAME encoder the inference path uses
-                # (_jpeg_encode). Without this, a node that has Pillow but
-                # not OpenCV records state-only ticks (empty jpegs) while
-                # inference still works, yielding a black/gappy video. Pass
-                # the ORIGINAL RGB array (PIL expects RGB, not the BGR flip).
-                if data is None:
-                    try:
-                        data = _jpeg_encode(arr).tobytes()
-                    except Exception:
-                        _LOG.debug("PIL JPEG encode failed for %r", k, exc_info=True)
-                        data = None
+                # Capability-adaptive encoder (ADR 0023, SDK ADR 0019):
+                # nvjpeg on CUDA boxes, else turbojpeg, else cv2 (releases
+                # the GIL), else PIL. Same encoder as the inference uplink,
+                # so recorded and served frames match byte-for-byte behavior.
+                data = _encode_jpeg(arr)
                 if data:
                     jpegs[k] = data
             else:
@@ -735,10 +714,10 @@ def _capture_tick(
         if cam_arrays and not jpegs and not _FRAMELESS_WARNED:
             _LOG.warning(
                 "record_tick: observation had %d camera array(s) but 0 frames "
-                "encoded (cv2=%s) — episodes will record observations only and "
-                "the video will be blank. Install Pillow or opencv-python on "
-                "the node.",
-                cam_arrays, cv2 is not None,
+                "encoded (jpeg backend=%s) — episodes will record observations "
+                "only and the video will be blank. Install PyTurboJPEG, "
+                "opencv-python, or Pillow on the node.",
+                cam_arrays, _jpeg_backend_name(),
             )
             _FRAMELESS_WARNED = True
 
@@ -759,9 +738,30 @@ def _capture_tick(
 
 # Preview tee tunables: 320px longest side at q70 is ~8-15 KB per frame —
 # visually identical on the headset's 0.8 m quad, and 3-5× cheaper on the
-# uplink than the 640×480 q85 recording frames.
-_PREVIEW_MAX_DIM = 320
-_PREVIEW_JPEG_QUALITY = 70
+# uplink than the 640×480 q85 recording frames. Both are env-overridable
+# because the preview byte-budget is the single lever for coexistence on a
+# thin uplink: on a bufferbloated WiFi link the preview stream is what
+# jitters control-datagram delivery (targets queue behind video bytes,
+# spiking applied frame_age) and what the congestion backoff sheds, so
+# dialing bytes/frame down attacks the fps shed AND the latency jitter at
+# once. Lower resolution or quality on a struggling Jetson; the defaults
+# are the visually-lossless ceiling, not a floor.
+_PREVIEW_MAX_DIM_DEFAULT = 320
+_PREVIEW_JPEG_QUALITY_DEFAULT = 70
+
+
+def _preview_max_dim() -> int:
+    """Preview longest-side cap from INTERLATENT_PREVIEW_MAX_DIM (px)."""
+    return _env.env_int(
+        "INTERLATENT_PREVIEW_MAX_DIM", _PREVIEW_MAX_DIM_DEFAULT, 64, 1280
+    )
+
+
+def _preview_jpeg_quality() -> int:
+    """Preview JPEG quality from INTERLATENT_PREVIEW_JPEG_QUALITY (1-95)."""
+    return _env.env_int(
+        "INTERLATENT_PREVIEW_JPEG_QUALITY", _PREVIEW_JPEG_QUALITY_DEFAULT, 10, 95
+    )
 
 
 def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
@@ -770,15 +770,15 @@ def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
 
     Camera detection matches ``_capture_tick`` exactly (uint8, ndim>=2)
     and keys match RecordTick's raw camera names, so the pod merges both
-    feeds per camera. cv2 fast path (releases the GIL), PIL fallback;
-    a frame that fails to encode is simply skipped. ~1-2 ms per camera
-    at 10 Hz — negligible against a 33 ms tick budget.
+    feeds per camera. Encoding goes through the capability-adaptive
+    encoder (node/jpeg.py); a frame that fails to encode is simply
+    skipped. ~1-2 ms per camera at 10 Hz — negligible against a 33 ms
+    tick budget. Resolution + quality are read per-set so an operator can
+    dial the uplink budget live (INTERLATENT_PREVIEW_MAX_DIM /
+    INTERLATENT_PREVIEW_JPEG_QUALITY) without restarting the node.
     """
-    try:
-        import cv2  # type: ignore
-    except ImportError:
-        cv2 = None  # type: ignore
-
+    max_dim = _preview_max_dim()
+    quality = _preview_jpeg_quality()
     out: dict[str, bytes] = {}
     for k, v in obs.items():
         try:
@@ -787,44 +787,7 @@ def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
             continue
         if arr is None or arr.dtype != np.uint8 or arr.ndim < 2:
             continue
-        h, w = int(arr.shape[0]), int(arr.shape[1])
-        if max(h, w) > _PREVIEW_MAX_DIM:
-            scale = _PREVIEW_MAX_DIM / float(max(h, w))
-            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-        else:
-            new_w, new_h = w, h
-        data: Optional[bytes] = None
-        if cv2 is not None:
-            try:
-                img = arr
-                if img.ndim == 3 and img.shape[2] == 3:
-                    # cvtColor over a numpy flip: releases the GIL (see
-                    # _capture_tick).
-                    img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
-                if (new_w, new_h) != (w, h):
-                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                ok, buf = cv2.imencode(
-                    ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, _PREVIEW_JPEG_QUALITY],
-                )
-                if ok:
-                    data = bytes(buf)
-            except Exception:
-                data = None
-        if data is None:
-            try:
-                from PIL import Image
-
-                img = arr
-                if img.ndim == 3 and img.shape[-1] == 1:
-                    img = img[:, :, 0]
-                pil = Image.fromarray(img)
-                if (new_w, new_h) != (w, h):
-                    pil = pil.resize((new_w, new_h), Image.BILINEAR)
-                buf2 = io.BytesIO()
-                pil.save(buf2, format="JPEG", quality=_PREVIEW_JPEG_QUALITY)
-                data = buf2.getvalue()
-            except Exception:
-                continue
+        data = _encode_jpeg(arr, quality=quality, max_dim=max_dim)
         if data:
             out[k] = data
     return out
@@ -1136,22 +1099,18 @@ def _jpeg_encode(
     and decode cycles for no signal gain).
 
     The server auto-detects the JPEG magic bytes (FF D8 FF) and decodes —
-    no codec negotiation needed.
+    no codec negotiation needed. ``target_size`` is a square resize: we
+    don't preserve aspect ratio because the downstream processor doesn't
+    either — its own resize is also square. Matching that here keeps the
+    wire bytes minimal.
     """
-    from PIL import Image
-
-    img = arr
-    if img.ndim == 3 and img.shape[-1] == 1:
-        img = img[:, :, 0]
-    pil = Image.fromarray(img)
-    if target_size is not None and target_size > 0:
-        # Square resize. We don't preserve aspect ratio because the
-        # downstream processor doesn't either — its own resize is also
-        # square. Matching that here keeps the wire bytes minimal.
-        pil = pil.resize((int(target_size), int(target_size)), Image.BILINEAR)
-    buf = io.BytesIO()
-    pil.save(buf, format="JPEG", quality=quality)
-    return np.frombuffer(buf.getvalue(), dtype=np.uint8)
+    data = _encode_jpeg(arr, quality=quality, target_size=target_size)
+    if data is None:
+        raise RuntimeError(
+            "JPEG encode failed (no encoder backend available — install "
+            "PyTurboJPEG, opencv-python, or Pillow)"
+        )
+    return np.frombuffer(data, dtype=np.uint8)
 
 
 def _encode_npz(obs: dict, image_resize: Optional[int] = None) -> bytes:

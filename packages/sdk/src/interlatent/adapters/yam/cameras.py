@@ -14,7 +14,11 @@ A camera is declared on the CLI as ``--camera <name>=<device>``; ``<name>`` must
 the policy's training camera keys. ``<device>`` is either a vendor camera
 ``<type>:<serial>`` (``--camera wrist=realsense:1234`` / ``--camera overhead=zed:5678``)
 or a generic webcam given by V4L2 path or index (``--camera front=/dev/video2`` /
-``--camera front=2``, optionally prefixed ``uvc:``).
+``--camera front=2``, optionally prefixed ``uvc:``). Capture settings ride as
+comma-separated ``key=val`` extras after the device
+(``--camera front=/dev/video2,width=1280,height=720,fps=15,pixel_format=yuyv``);
+accepted keys are ``width``/``height``/``fps`` (all backends) and ``pixel_format``
+(UVC only: ``mjpg`` (default) / ``yuyv`` / ``default`` = driver's choice).
 """
 from __future__ import annotations
 
@@ -42,6 +46,14 @@ class CameraSpec:
 
     ``device`` is the vendor serial for ``realsense``/``zed`` (empty = first
     available), or the V4L2 path/index (e.g. ``/dev/video2`` or ``2``) for ``uvc``.
+
+    ``pixel_format`` is UVC-only: the wire format requested from the camera.
+    ``mjpg`` (default) keeps 3 cameras + CAN adapters inside a shared USB2
+    domain's 480 Mbit/s isochronous budget (uncompressed 640x480@30 YUYV
+    reserves ~147 Mbit/s PER camera; xHCI then refuses to enumerate the last
+    device). The cost is a per-frame JPEG decode inside OpenCV — a CPU-tight
+    rig on an uncongested USB3 bus can set ``yuyv`` or ``default`` (driver's
+    choice) per camera.
     """
 
     name: str
@@ -50,12 +62,49 @@ class CameraSpec:
     width: int = 640
     height: int = 480
     fps: int = 30
+    pixel_format: str = "mjpg"  # "mjpg" | "yuyv" | "default" (uvc only)
+
+
+_PIXEL_FORMATS = ("mjpg", "yuyv", "default")
+_SPEC_EXTRA_KEYS = ("width", "height", "fps", "pixel_format")
+
+
+def _parse_spec_extras(name: str, device: str, parts: list[str]) -> dict:
+    """Parse trailing ``key=val`` device extras into CameraSpec kwargs."""
+    extras: dict[str, Any] = {}
+    for part in parts:
+        key, sep, val = part.partition("=")
+        key, val = key.strip().lower(), val.strip()
+        if not sep or key not in _SPEC_EXTRA_KEYS:
+            raise ValueError(
+                f"--camera {name}={device!r}: unknown camera option {part!r} "
+                f"(accepted: {', '.join(k + '=' for k in _SPEC_EXTRA_KEYS)})"
+            )
+        if key == "pixel_format":
+            val = val.lower()
+            if val not in _PIXEL_FORMATS:
+                raise ValueError(
+                    f"--camera {name}={device!r}: pixel_format must be one of "
+                    f"{'/'.join(_PIXEL_FORMATS)}, got {val!r}"
+                )
+            extras[key] = val
+        else:
+            try:
+                extras[key] = int(val)
+            except ValueError:
+                raise ValueError(
+                    f"--camera {name}={device!r}: {key} must be an integer, "
+                    f"got {val!r}"
+                ) from None
+    return extras
 
 
 def parse_camera_device(name: str, device: str) -> CameraSpec:
     """Parse a ``--camera name=<device>`` string into a CameraSpec.
 
-    Accepts three forms:
+    The device accepts three forms, each optionally followed by
+    comma-separated ``key=val`` capture extras (``width``/``height``/``fps``/
+    ``pixel_format``, e.g. ``/dev/video2,width=1280,pixel_format=yuyv``):
 
     - ``realsense[:<serial>]`` / ``zed[:<serial>]`` — vendor camera by serial
       (serial optional; empty → first available device of that kind).
@@ -64,11 +113,13 @@ def parse_camera_device(name: str, device: str) -> CameraSpec:
     - a bare V4L2 path or index (``/dev/video2`` or ``2``) — shorthand for ``uvc``.
     """
     raw = str(device).strip()
-    kind_part, sep, rest = raw.partition(":")
+    dev_token, *extra_parts = [p.strip() for p in raw.split(",")]
+    extras = _parse_spec_extras(name, device, extra_parts)
+    kind_part, sep, rest = dev_token.partition(":")
     kind = kind_part.strip().lower()
 
     if kind in (_REALSENSE, _ZED):
-        return CameraSpec(name=name, kind=kind, device=rest.strip())
+        return CameraSpec(name=name, kind=kind, device=rest.strip(), **extras)
     if kind in _UVC_ALIASES:
         dev = rest.strip()
         if not dev:
@@ -76,10 +127,10 @@ def parse_camera_device(name: str, device: str) -> CameraSpec:
                 f"--camera {name}={device!r}: a UVC camera needs a device "
                 f"(e.g. {name}=uvc:/dev/video2 or {name}=uvc:2)"
             )
-        return CameraSpec(name=name, kind=_UVC, device=dev)
+        return CameraSpec(name=name, kind=_UVC, device=dev, **extras)
     # No recognized prefix: a /dev path or a bare index is a generic webcam.
-    if not sep and (raw.startswith("/dev/") or raw.isdigit()):
-        return CameraSpec(name=name, kind=_UVC, device=raw)
+    if not sep and (dev_token.startswith("/dev/") or dev_token.isdigit()):
+        return CameraSpec(name=name, kind=_UVC, device=dev_token, **extras)
     raise ValueError(
         f"--camera {name}={device!r}: camera must be a vendor type "
         f"({_REALSENSE}/{_ZED}, e.g. {name}=realsense:1234 or {name}=zed:5678) "
@@ -323,11 +374,21 @@ class ZedCamera:
             self._zed = None
 
 
+def _fourcc_to_str(code: int) -> str:
+    """Decode an OpenCV FOURCC int to its 4-char tag (``"?"`` when unset)."""
+    if code <= 0:
+        return "?"
+    return "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
+
+
 class UVCCamera:
     """Generic UVC/V4L2 webcam (e.g. Logitech) → ``uint8 HxWx3`` RGB via OpenCV.
 
     ``spec.device`` is a V4L2 path (``/dev/video2``) or a numeric index (``2``).
-    OpenCV captures BGR; we reorder to RGB to match the other backends.
+    OpenCV captures BGR; we reorder to RGB to match the other backends. The
+    wire format defaults to MJPG (see :class:`CameraSpec.pixel_format`);
+    the negotiated format is read back and logged, and a refused request
+    falls back to the driver default with a warning rather than failing.
     """
 
     def __init__(self, spec: CameraSpec) -> None:
@@ -339,7 +400,19 @@ class UVCCamera:
 
         dev = self.spec.device
         target: Any = int(dev) if dev.isdigit() else dev
-        cap = cv2.VideoCapture(target)
+        # Pin the V4L2 backend: GStreamer-built OpenCV silently ignores
+        # CAP_PROP_FOURCC, which would make pixel_format a no-op with no
+        # signal. With the backend pinned, an unsupported platform fails
+        # the isOpened() check below instead.
+        cap = cv2.VideoCapture(target, cv2.CAP_V4L2)
+        # FOURCC must be set BEFORE frame size/fps: V4L2 renegotiates the
+        # format on each property set, and a size chosen against the
+        # driver-default format (usually uncompressed YUYV) can lock a
+        # size list the requested format doesn't offer.
+        fourcc_req: int | None = None
+        if self.spec.pixel_format != "default":
+            fourcc_req = cv2.VideoWriter_fourcc(*self.spec.pixel_format.upper())
+            cap.set(cv2.CAP_PROP_FOURCC, fourcc_req)
         # V4L2 keeps a driver-side queue of captured frames (OpenCV default
         # 4). A control loop that consumes slower than the camera produces
         # (e.g. 27 Hz loop vs 30 fps camera) leaves that queue permanently
@@ -358,10 +431,24 @@ class UVCCamera:
                 f"UVC camera {self.spec.name} (device={dev}) failed to open — check "
                 f"the path/index (e.g. `v4l2-ctl --list-devices`) and permissions."
             )
+        got_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        got = _fourcc_to_str(got_fourcc)
+        if fourcc_req is not None and got_fourcc != fourcc_req:
+            _logger.warning(
+                "UVC %s: %s not accepted by the driver, running %s — an "
+                "uncompressed format reserves ~147 Mbit/s of USB isochronous "
+                "bandwidth at 640x480@30 (per camera)",
+                self.spec.name, self.spec.pixel_format.upper(), got,
+            )
         self._cap = cap
         _logger.info(
-            "UVC %s connected (device=%s, requested %dx%d@%d)",
-            self.spec.name, dev, self.spec.width, self.spec.height, self.spec.fps,
+            "UVC %s connected (device=%s, requested %dx%d@%d, negotiated "
+            "%s %dx%d@%g)",
+            self.spec.name, dev, self.spec.width, self.spec.height,
+            self.spec.fps, got,
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            float(cap.get(cv2.CAP_PROP_FPS)),
         )
 
     def read(self) -> np.ndarray:

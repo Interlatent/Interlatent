@@ -46,10 +46,6 @@ EXTRAS_ONLY = [
 # Keep this list short and justified — every entry is a module a barebones
 # node can never import.
 EXEMPT = {
-    # Drop-in replacement for `lerobot-record`; only ever run by a user who
-    # has installed [lerobot]. Its module-level lerobot imports register
-    # draccus CLI types and cannot be deferred.
-    "interlatent.adapters.lerobot.sync_inference.sync_rollout",
     # THE isolation boundary for [teleop-quic]: this module exists so that
     # aioquic is imported in exactly one clearly-marked place, and only in the
     # QUIC child process (`_quic_proc.py` imports it inside a function).

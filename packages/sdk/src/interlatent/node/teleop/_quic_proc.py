@@ -1,21 +1,25 @@
 """Dumb-pipe QUIC child process for the node teleop channel.
 
 Run as ``python -m interlatent.node.teleop._quic_proc`` by
-:class:`~.quic_channel.QuicTeleopChannel`. Owns ONLY the aioquic WebTransport
+:class:`~.quic_channel.QuicTeleopChannel`. Owns the aioquic WebTransport
 connection — connect, handshake, reconnect-with-backoff — and pumps raw
 datagrams verbatim between the relay and the parent's loopback UDP socket
-(framing in ``_quic_ipc``). No codec, no dedupe, no pacing: all protocol
-logic stays in the parent — with ONE child-owned policy: the video tee's
-load shedding (:class:`_VideoGovernor` — in-flight stream cap + TTL resets).
-It must live here because only the child can observe when a unidirectional
-stream finishes (acked+FIN) or needs RESET_STREAM; the parent just hands
-over framed TYPE_VIDEO payloads and the child ships each on its own uni
-stream (still never inspecting the wire bytes).
+(framing in ``_quic_ipc``). No codec, no dedupe: DATA payloads are opaque here.
+
+The video preview path is deliberately **bicameral**: the child owns the
+low-level *mechanism* — the in-flight stream cap + TTL resets
+(:class:`_VideoGovernor`), which must live here because only the child can
+observe when a unidirectional stream finishes (acked+FIN) or needs RESET —
+while the parent owns the *rate control* (its ``PreviewBackoff`` reacts to the
+child's ``reset_ttl`` counter, shipped via ``vstats``). The child still never
+inspects the video wire bytes; it just ships each framed TYPE_VIDEO payload on
+its own uni stream. aioquic's own send-only-uni-stream leak GC lives one layer
+down in ``_quic_client._UniStreamGC`` (ADR 0020).
 
 Why a process: the robot drivers (e.g. i2rt's ~270 Hz gravity-comp/CAN
 threads) monopolize the GIL and starve an in-process asyncio loop, so the
 timing-sensitive QUIC handshake never completes. A child process has its own
-GIL. See the ADR 0017 amendment.
+GIL. See ADR 0021.
 
 Lifecycle: exits when the parent closes its stdin pipe (EOF — covers parent
 crash and clean stop alike). Mints its own relay tokens on every reconnect
@@ -34,6 +38,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .. import _env
 from . import _quic_ipc
 from ._mint import mint_teleop_token
 
@@ -50,15 +55,47 @@ _STATS_LOG_PERIOD_S = 5.0
 # frame-streams per camera / overall before new frames are dropped at the
 # source, and a stream still unfinished after the TTL is RESET so stale
 # bytes stop competing with control datagrams in the congestion window.
-_VIDEO_INFLIGHT_PER_CAM = 2
-_VIDEO_INFLIGHT_GLOBAL = 6
-_VIDEO_STREAM_TTL_S = 1.0
+#
+# The per-camera cap bounds the delivered preview rate on a long-RTT
+# relay path: fps/cam ~= cap / stream_completion_time (cap 2 at ~200ms
+# RTT tops out ~10 fps). INTERLATENT_QUIC_VIDEO_INFLIGHT raises it for
+# operators who want more headset fps — but note the latency cost: more
+# unfinished streams is a DEEPER queue on a bufferbloated uplink, and a
+# preview frame's glass-to-eye age grows to fill it. The global cap stays
+# 3x per-cam (the 3-camera rig ratio).
+#
+# The TTL is the freshness ceiling, and it is the load-bearing knob for a
+# LIVE preview: a frame still unsent after the TTL is RESET (dropped), not
+# delivered late, because a stale preview frame is worse than a gap. The
+# 1.0 s legacy default let glass-to-eye latency climb to ~1 s under
+# congestion (a standing queue draining slower than it fills — measured
+# browser-side as video_lag growing while offered fps fell); 350 ms bounds
+# the felt lag without ever touching a healthy link (which delivers frames
+# in tens of ms). Lower it for a tighter latency cap at the cost of more
+# dropped frames, raise it to tolerate a slow link. Env-tunable in ms.
+
+_DEFAULT_INFLIGHT_PER_CAM = 2
+_VIDEO_INFLIGHT_PER_CAM = _env.env_int(
+    "INTERLATENT_QUIC_VIDEO_INFLIGHT", _DEFAULT_INFLIGHT_PER_CAM, 1, 16
+)
+_VIDEO_INFLIGHT_GLOBAL = 3 * _VIDEO_INFLIGHT_PER_CAM
+_VIDEO_STREAM_TTL_S = _env.env_int(
+    "INTERLATENT_QUIC_VIDEO_TTL_MS", 350, 50, 5000
+) / 1000.0
 
 
 class _VideoGovernor:
     """In-flight cap + TTL for per-frame video streams. Pure policy —
     ``now``/``is_finished``/``reset`` are injected so unit tests never touch
-    aioquic. Counters feed the 5s stats line."""
+    aioquic. Counters feed the 5s stats line.
+
+    Load shedding only: it caps how many uni streams are in flight per camera /
+    overall, and RESETs a stream that goes stale (unfinished past the TTL) so
+    its bytes stop competing with control datagrams. It does NOT touch aioquic's
+    per-connection stream bookkeeping — that leak GC (ADR 0020) lives in
+    ``_WTClientProtocol`` (``_UniStreamGC``), which discards every uni stream
+    once its send side acks, independent of this governor.
+    """
 
     def __init__(
         self,
@@ -154,7 +191,6 @@ class _ParentLink(asyncio.DatagramProtocol):
         self.video_governor: Optional[_VideoGovernor] = None  # stats only
         self.wt_session = None  # live session (datagram-drop counter), stats only
         self.rx_from_parent = 0  # DATA datagrams parent→relay
-        self.rx_video_from_parent = 0  # VIDEO frames parent→relay
         self.tx_to_parent = 0  # DATA datagrams relay→parent
 
     def connection_made(self, transport) -> None:  # type: ignore[override]
@@ -188,7 +224,6 @@ class _ParentLink(asyncio.DatagramProtocol):
             parsed_video = _quic_ipc.parse_video(payload)
             if parsed_video is None:
                 return
-            self.rx_video_from_parent += 1
             try:
                 vsend(*parsed_video)
             except Exception:
@@ -224,12 +259,37 @@ class _ParentLink(asyncio.DatagramProtocol):
             self._transport.sendto(_quic_ipc.encode_ctrl(obj))
 
 
+def _vstats_payload(gov: Optional[_VideoGovernor]) -> Optional[dict]:
+    """The video-path counters the parent's preview backoff actually consumes:
+    ``drop_cap`` (cap-pacing, diagnostic only) and ``reset_ttl`` (the sole
+    backoff signal). None while no video governor exists (no relay session).
+
+    CUMULATIVE, not per-window deltas: a lost loopback datagram then costs
+    nothing — the parent diffs against its last sample (and clamps negative
+    deltas after a reconnect restarts these counters). The child only OBSERVES;
+    the rate policy stays in the parent. (The ``qs`` leak gauge and ``dg_drop``
+    ride the 5s stats log line, not this IPC — the parent has no use for them.)
+    """
+    if gov is None:
+        return None
+    return {
+        "t": "vstats",
+        "drop_cap": gov.dropped_cap,
+        "reset_ttl": gov.reset_ttl,
+    }
+
+
 async def _hello_loop(link: _ParentLink, cfg: _Cfg) -> None:
     """1s hello heartbeat: makes a lost first hello a non-event and proves to
-    the parent that the child imported and is running (its backoff reset)."""
+    the parent that the child imported and is running (its backoff reset).
+    Rides a vstats message alongside each hello while video is flowing —
+    the parent's preview backoff consumes it; an old parent ignores it."""
     hello = {"t": "hello", "cookie": cfg.cookie, "pid": os.getpid()}
     while True:
         link.send_control(hello)
+        vstats = _vstats_payload(link.video_governor)
+        if vstats is not None:
+            link.send_control(vstats)
         await asyncio.sleep(_HELLO_PERIOD_S)
 
 
@@ -354,6 +414,10 @@ async def _stats_loop(link: _ParentLink) -> None:
             dg_drop = wt.datagrams_dropped() if wt is not None else last_dg_drop
         except Exception:
             dg_drop = last_dg_drop
+        try:
+            qs = wt.quic_stream_count() if wt is not None else 0
+        except Exception:
+            qs = -1
         if (
             rx != last_rx or tx != last_tx or video != last_video
             or dg_drop != last_dg_drop
@@ -361,9 +425,9 @@ async def _stats_loop(link: _ParentLink) -> None:
             dv = tuple(a - b for a, b in zip(video, last_video))
             _LOG.info(
                 "quic-proc pumped (%.0fs): parent->relay=%d relay->parent=%d "
-                "video: open=%d fin=%d drop_cap=%d reset_ttl=%d dg_drop=%d",
+                "video: open=%d fin=%d drop_cap=%d reset_ttl=%d dg_drop=%d qs=%d",
                 _STATS_LOG_PERIOD_S, rx - last_rx, tx - last_tx,
-                dv[0], dv[1], dv[2], dv[3], dg_drop - last_dg_drop,
+                dv[0], dv[1], dv[2], dv[3], dg_drop - last_dg_drop, qs,
             )
         last_rx, last_tx = rx, tx
         last_video = video
@@ -424,6 +488,12 @@ def main() -> None:
         level=os.environ.get("INTERLATENT_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    overrides = _env.overrides()
+    if overrides:
+        _LOG.info(
+            "teleop knob overrides: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(overrides.items())),
+        )
     asyncio.run(_amain(_load_cfg()))
 
 
