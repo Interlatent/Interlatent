@@ -87,8 +87,17 @@ _VIDEO_STREAM_TTL_S = _env_int(
 
 class _VideoGovernor:
     """In-flight cap + TTL for per-frame video streams. Pure policy —
-    ``now``/``is_finished``/``reset`` are injected so unit tests never touch
-    aioquic. Counters feed the 5s stats line."""
+    ``now``/``is_finished``/``reset``/``discard`` are injected so unit tests
+    never touch aioquic. Counters feed the 5s stats line.
+
+    ``discard`` releases a stream from aioquic's per-connection bookkeeping
+    once its send side is fully acked (see ``discard_uni_stream``) — without
+    it every frame stream lingers in aioquic's per-packet iteration forever
+    and frame delivery slows linearly with session age. A finished stream
+    discards immediately (finish and discard test the same sender.is_finished
+    predicate); a TTL-RESET stream can't be discarded until its RESET frame
+    is acked, so it parks in ``_await_discard`` and retries each sweep.
+    """
 
     def __init__(
         self,
@@ -96,23 +105,42 @@ class _VideoGovernor:
         now: Callable[[], float],
         is_finished: Callable[[int], bool],
         reset: Callable[[int], None],
+        discard: Optional[Callable[[int], bool]] = None,
     ) -> None:
         self._now = now
         self._is_finished = is_finished
         self._reset = reset
+        self._discard = discard or (lambda sid: True)
         self._inflight: "dict[int, tuple[str, float]]" = {}
+        self._await_discard: "list[int]" = []
         self.opened = 0
         self.finished = 0
         self.dropped_cap = 0
         self.reset_ttl = 0
 
+    def _try_discard(self, sid: int) -> None:
+        try:
+            done = self._discard(sid)
+        except Exception:
+            done = True
+        if not done:
+            # RESET not yet acked — retry next sweep. Bounded: teardown
+            # clears it, and a healthy connection acks RESETs promptly.
+            self._await_discard.append(sid)
+
     def _sweep(self) -> None:
+        if self._await_discard:
+            pending, self._await_discard = self._await_discard, []
+            for sid in pending:
+                self._try_discard(sid)
+            del self._await_discard[64:]  # runaway guard on a dying conn
         now = self._now()
         for sid in list(self._inflight):
             cam, opened_at = self._inflight[sid]
             if self._is_finished(sid):
                 del self._inflight[sid]
                 self.finished += 1
+                self._try_discard(sid)
             elif now - opened_at > _VIDEO_STREAM_TTL_S:
                 try:
                     self._reset(sid)
@@ -120,6 +148,7 @@ class _VideoGovernor:
                     pass
                 del self._inflight[sid]
                 self.reset_ttl += 1
+                self._try_discard(sid)
 
     def admit(self, cam: str) -> bool:
         self._sweep()
@@ -138,6 +167,7 @@ class _VideoGovernor:
     def reset_all(self) -> None:
         # Session teardown: the streams die with the connection; just forget.
         self._inflight.clear()
+        self._await_discard.clear()
 
 
 @dataclass
@@ -341,6 +371,7 @@ async def _session_loop(cfg: _Cfg, link: _ParentLink, stop: asyncio.Event) -> No
                     now=time.monotonic,
                     is_finished=wt.uni_stream_finished,
                     reset=wt.reset_uni_stream,
+                    discard=wt.discard_uni_stream,
                 )
 
                 def _send_video(cam: str, wire: bytes) -> None:

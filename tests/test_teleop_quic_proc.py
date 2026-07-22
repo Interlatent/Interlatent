@@ -478,6 +478,65 @@ def test_governor_ttl_resets_stale_streams():
     assert gov.reset_ttl == 1
 
 
+def test_governor_discards_finished_streams():
+    # The aioquic leak: send-only uni streams are never collected by
+    # aioquic's own sweep, so the governor must actively discard each
+    # stream once it finishes — otherwise per-packet cost grows with
+    # session age and delivered fps decays monotonically.
+    finished: set = set()
+    discarded: list = []
+    gov = _quic_proc._VideoGovernor(
+        now=FakeClock(),
+        is_finished=lambda sid: sid in finished,
+        reset=lambda sid: None,
+        discard=lambda sid: discarded.append(sid) or True,
+    )
+    gov.admit("a")
+    gov.note_open(1, "a")
+    finished.add(1)
+    gov.admit("a")  # sweep observes the finish
+    assert discarded == [1]
+    assert gov.finished == 1
+
+
+def test_governor_ttl_reset_discard_retries_until_reset_acked():
+    # A TTL-RESET stream can't be discarded until its RESET frame is acked
+    # (discard-before-send would strand the peer's receive side). The
+    # governor parks it and retries each sweep; once the discard succeeds
+    # it never retries again.
+    finished: set = set()
+    resets: list = []
+    clock = FakeClock()
+    acked = {"ok": False}
+    attempts: list = []
+
+    def _discard(sid: int) -> bool:
+        attempts.append(sid)
+        return acked["ok"]
+
+    gov = _quic_proc._VideoGovernor(
+        now=clock,
+        is_finished=lambda sid: sid in finished,
+        reset=resets.append,
+        discard=_discard,
+    )
+    gov.admit("a")
+    gov.note_open(1, "a")
+    clock.t += _quic_proc._VIDEO_STREAM_TTL_S + 0.1
+    gov.admit("a")  # sweep TTL-resets sid 1; discard fails (RESET unacked)
+    assert resets == [1]
+    assert attempts == [1]
+
+    gov.admit("a")  # retried from the parked list, still unacked
+    assert attempts == [1, 1]
+
+    acked["ok"] = True
+    gov.admit("a")  # RESET acked -> discard succeeds
+    assert attempts == [1, 1, 1]
+    gov.admit("a")  # and is never retried again
+    assert attempts == [1, 1, 1]
+
+
 def test_parent_link_video_dispatch():
     link = _quic_proc._ParentLink()
     got: list = []

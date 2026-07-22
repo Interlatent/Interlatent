@@ -150,6 +150,45 @@ class _WTClientProtocol(QuicConnectionProtocol):
         except Exception:
             return True
 
+    def discard_uni_stream(self, sid: int) -> bool:
+        """Drop a send-only uni stream from aioquic's per-connection
+        bookkeeping once its send side is fully acked (FIN or RESET
+        delivered). Returns True when the stream is gone (or already was),
+        False if the send side is still in flight — retry later.
+
+        aioquic never collects these streams itself: its discard sweep
+        requires ``QuicStream.is_finished`` (receiver AND sender), and
+        ``QuicStreamReceiver.__init__`` hardcodes ``is_finished = False``
+        even for a send-only stream (contradicting its own docstring), so
+        every frame stream stays in ``_quic._streams`` and
+        ``_streams_queue`` forever. Both are iterated on EVERY packet build
+        (``_write_application``), so at ~72 frame-streams/s the per-packet
+        cost grows linearly with session age — measured on the Jetson as
+        per-frame completion time creeping ~40 → ~100 ms over a minute
+        (delivered fps ~23 → ~9 against a pinned 24 Hz offer), resetting
+        only on reconnect. This replicates exactly what aioquic's own
+        sweep does when it does fire: pop from ``_streams``, record the id
+        in ``_streams_finished`` (so a late peer frame is treated as
+        already-handled, not a protocol error), drop from
+        ``_streams_queue``. Private attrs — same pinned-aioquic caveat as
+        ``uni_stream_finished``; on attr error report True so callers
+        don't retry forever."""
+        try:
+            stream = self._quic._streams.get(sid)
+            if stream is None:
+                return True
+            if not stream.sender.is_finished:
+                return False
+            self._quic._streams.pop(sid, None)
+            self._quic._streams_finished.add(sid)
+            try:
+                self._quic._streams_queue.remove(stream)
+            except ValueError:
+                pass
+            return True
+        except Exception:
+            return True
+
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ConnectionTerminated):
             _LOG.warning(
@@ -201,6 +240,9 @@ class WebTransportSession:
 
     def uni_stream_finished(self, sid: int) -> bool:
         return self._proto.uni_stream_finished(sid)
+
+    def discard_uni_stream(self, sid: int) -> bool:
+        return self._proto.discard_uni_stream(sid)
 
     def datagrams_dropped(self) -> int:
         """Cumulative outbound datagrams shed by drop-don't-queue."""
