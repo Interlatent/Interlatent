@@ -7,9 +7,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Deployment hardware is ARM (Raspberry Pi / Jetson), so the suite runs on
+    # both arches. ubuntu-24.04-arm is a free hosted runner for public repos.
+    # fail-fast is off so an ARM-only break still leaves x86 results readable.
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +31,7 @@ jobs:
           pip install -e ./packages/sdk Pillow opencv-python-headless pytest pytest-timeout ruff
       - name: Import smoke test
         run: |
-          python -c "import interlatent; import interlatent.inference.client; import interlatent.node.cli; import interlatent.cli.main"
+          pytest tests/test_lazy_imports.py -v --timeout=300
       - name: Test suite (unit + e2e, no GPU, no robot)
         run: |
           pytest tests/ -v --timeout=120
@@ -74,6 +79,108 @@ jobs:
           # PEP 420: the SDK must not claim the namespace (ADR 0017 point 1).
           assert "interlatent_robots/__init__.py" not in names
           print(f"all wheels complete (robot kinds: {', '.join(kinds)})")
+          EOF
+
+  extras-resolve:
+    # The optional extras have never been installed or resolved in CI - only the
+    # base package is. A bad pin, a typo, or a wheel that does not exist for this
+    # arch therefore reaches users as a failed `pip install 'interlatent[yam]'`
+    # on their robot. This resolves the full dependency graph for every extra
+    # declared in pyproject.toml and installs nothing (--dry-run).
+    #
+    # Extras are discovered from the file, so a new one is covered automatically.
+    # An extra gated to a higher interpreter than the job runs (e.g. [axol] needs
+    # Python >= 3.13 via almond-axol) is reported SKIP, not FAIL.
+    name: extras resolve (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Resolve every optional extra (dry run, installs nothing)
+        run: |
+          python - <<'EOF'
+          import subprocess, sys, tomllib
+          from pathlib import Path
+
+          # Extras whose resolution is ADVISORY: always reported, never fails the
+          # job. [yam] pulls i2rt straight from a git HEAD (no released metadata,
+          # moves under us) and gates pyrealsense2 to x86_64, so a red here is
+          # usually upstream churn rather than a defect in our declaration.
+          # Keep the signal, drop the gate.
+          ADVISORY = {"yam"}
+
+          PYPROJECT = Path("packages/sdk/pyproject.toml")
+          project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+          extras = sorted(project.get("optional-dependencies", {}))
+          if not extras:
+              sys.exit("no optional-dependencies in %s - did the file move?" % PYPROJECT)
+
+          print("python      : %s" % sys.version.split()[0])
+          print("pyproject   : %s (requires-python %s)"
+                % (PYPROJECT, project.get("requires-python")))
+          print("extras found: %s" % ", ".join(extras))
+
+          rows, failures, advisories = [], [], []
+          for extra in extras:
+              target = "./packages/sdk[%s]" % extra
+              print("::group::resolving %s" % target, flush=True)
+              proc = subprocess.run(
+                  [sys.executable, "-m", "pip", "install", "--dry-run",
+                   "--ignore-installed", target],
+                  capture_output=True, text=True,
+              )
+              out = proc.stdout + proc.stderr
+              print(out, flush=True)
+              print("::endgroup::", flush=True)
+
+              if proc.returncode == 0:
+                  rows.append(("OK", extra, "resolves on this interpreter/arch"))
+              elif "requires a different Python" in out:
+                  note = next((ln.strip() for ln in out.splitlines()
+                               if "requires a different Python" in ln), "python-gated")
+                  rows.append(("SKIP", extra, note))
+              elif extra in ADVISORY:
+                  rows.append(("WARN", extra, "did NOT resolve (advisory, not gating)"))
+                  advisories.append((extra, "\n".join(out.strip().splitlines()[-20:])))
+              else:
+                  rows.append(("FAIL", extra, "see the group above"))
+                  failures.append((extra, "\n".join(out.strip().splitlines()[-20:])))
+
+          print()
+          print("=" * 72)
+          print("EXTRAS RESOLUTION SUMMARY")
+          print("=" * 72)
+          for status, extra, note in rows:
+              print("  %-4s  [%s]  %s" % (status, extra, note))
+          print("=" * 72)
+
+          for extra, tail in advisories:
+              print()
+              print("::warning title=extra [%s] did not resolve::advisory only - "
+                    "not failing the build" % extra)
+              print("--- [%s] last lines ---" % extra)
+              print(tail)
+
+          if failures:
+              print()
+              for extra, tail in failures:
+                  print("--- [%s] last lines ---" % extra)
+                  print(tail)
+                  print()
+              sys.exit("%d extra(s) failed to resolve. A broken declaration here "
+                       "reaches users as a failed pip install on their robot."
+                       % len(failures))
+          print()
+          print("no gating extra failed to resolve.")
           EOF
 
   secret-scan:

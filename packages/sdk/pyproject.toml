@@ -32,6 +32,7 @@ dependencies = [
   # Node-side teleop receiver stub (node/teleop/channel.py) opens a sync
   # connection to the hosted teleop relay. Small, pure-Python.
   "websockets>=12",
+  "cmake",
 ]
 
 [project.optional-dependencies]
