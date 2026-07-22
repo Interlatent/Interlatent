@@ -32,9 +32,9 @@ kernel-side. The child owns only connect/handshake/reconnect and pumps raw
 datagrams verbatim over a loopback UDP socket (framing in ``_quic_ipc``); ALL
 protocol logic — codec, dedupe, staleness, pacing, applied-seq echo, arrival
 telemetry — stays here in the parent. Child exits on stdin EOF (no orphans);
-this class respawns a crashed child with 1→15 s backoff. See the ADR 0017
-amendment (which also records the ``_connected`` attribute-shadowing bug in
-``_quic_client`` that was the actual cause of the v1 handshake failure).
+this class respawns a crashed child with 1→15 s backoff. See ADR 0021 (which
+also records the ``_connected`` attribute-shadowing bug in ``_quic_client``
+that was the actual cause of the v1 handshake failure).
 
 This process never imports aioquic; only the child does.
 """
@@ -45,31 +45,33 @@ import logging
 import os
 import secrets
 import socket
-import struct
 import subprocess
 import sys
 import threading
 import time
 from typing import Dict, Optional
 
+from .. import _env
 from . import _quic_ipc
-from .channel import _VIEWER_PRESENCE_S, _preview_period_s
-from .frame import TeleopFrame
+from ._frame_store import LatestFrameStore
+from ._telemetry import ArrivalTracker
+from .channel import (
+    _RECONNECT_INITIAL_S,
+    _RECONNECT_MAX_S,
+    _STATE_SEND_PERIOD_S,
+    _STATS_LOG_PERIOD_S,
+    _VIEWER_PRESENCE_S,
+    _preview_period_s,
+)
+from .frame import TeleopFrame, frame_with_header
 
 _LOG = logging.getLogger(__name__)
 
-# Match the WS channel so behavior is identical downstream.
-_FRAME_STALE_MS = 250
-_STATE_SEND_PERIOD_S = 1.0 / 15.0
-_RECONNECT_INITIAL_S = 1.0
-_RECONNECT_MAX_S = 15.0
 # Duplicate each outbound state datagram this many times (loss tolerance).
 _STATE_DUP = 2
 # A seq that jumps this far *backward* is a browser reconnect/reset, not a
 # reordered duplicate — accept it and re-anchor.
 _SEQ_RESET_GAP = 1000
-# Telemetry: log an arrival-gap summary every this many seconds.
-_STATS_LOG_PERIOD_S = 5.0
 # Supervisor read cadence: recvfrom timeout doubles as the supervision tick.
 _SUPERVISE_TICK_S = 0.5
 # Rate-limit for answering browser ``request_spec`` datagrams: the browser
@@ -79,15 +81,14 @@ _SPEC_SEND_MIN_INTERVAL_S = 0.2
 
 
 def frame_spec_wire(spec_obj: dict, robot_kind: str) -> bytes:
-    """Frame a kinematic_spec for the browser: ``uint16-BE header length +
-    JSON {"type":"spec","robot_kind"} + spec-JSON body`` — the SAME envelope
-    the preview tee uses for video (header ``type`` distinguishes them), so the
-    browser's inbound-uni-stream reader is shared. Pure + unit-tested."""
-    header = json.dumps(
-        {"type": "spec", "robot_kind": robot_kind}
-    ).encode("utf-8")
-    body = json.dumps(spec_obj).encode("utf-8")
-    return struct.pack(">H", len(header)) + header + body
+    """Frame a kinematic_spec for the browser using the shared
+    :func:`~.frame.frame_with_header` envelope (header ``type:"spec"``
+    distinguishes it from a video frame), so the browser's inbound-uni-stream
+    reader is one parser. Pure + unit-tested."""
+    return frame_with_header(
+        {"type": "spec", "robot_kind": robot_kind},
+        json.dumps(spec_obj).encode("utf-8"),
+    )
 
 
 def is_request_spec(payload: bytes) -> bool:
@@ -201,8 +202,9 @@ class PreviewBackoff:
             self._mult = max(self._mult / self._RECOVER_FACTOR, 1.0)
 
     def period(self, base_period_s: float) -> float:
-        return min(max(base_period_s * self._mult, base_period_s),
-                   max(self._MAX_PERIOD_S, base_period_s))
+        # The 1 s ceiling (and the 1.0 floor) already live in on_window's
+        # clamp of _mult, so a plain scale is exact here.
+        return base_period_s * self._mult
 
 
 def encode_state_datagram(qpos, seq: int, applied_seq: int = -1) -> bytes:
@@ -239,8 +241,13 @@ def decode_target_datagram(data: bytes) -> Optional[TeleopFrame]:
         return None
 
 
-class QuicTeleopChannel:
-    """WebTransport/QUIC teleop channel with the TeleopChannel surface."""
+class QuicTeleopChannel(LatestFrameStore):
+    """WebTransport/QUIC teleop channel with the TeleopChannel surface.
+
+    Inherits the thread-safe latest-frame + sticky-estop store
+    (:class:`LatestFrameStore`) so ``latest_frame``/``consume_estop`` and the
+    staleness/estop semantics are byte-identical to the WS channel (ADR 0016).
+    """
 
     def __init__(
         self,
@@ -252,6 +259,7 @@ class QuicTeleopChannel:
         bypass_key: Optional[str] = None,
         robot_kind: Optional[str] = None,
     ) -> None:
+        super().__init__()
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
@@ -273,12 +281,7 @@ class QuicTeleopChannel:
         self._spec_served = False
         self._spec_miss_warned = False
 
-        self._lock = threading.Lock()
-        self._latest: Optional[TeleopFrame] = None
-        # Sticky operator e-stop — same semantics as the WS channel (latched
-        # at decode, cleared only by consume_estop; survives staleness,
-        # dedupe, and reconnects). See ADR 0016.
-        self._estop_seen = False
+        # _lock / _latest / _estop_seen live in LatestFrameStore (ADR 0016).
         self._dedup = LatestSeqBuffer()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -297,16 +300,14 @@ class QuicTeleopChannel:
 
         # Video tee (see module docs). On by default in QUIC mode;
         # INTERLATENT_QUIC_VIDEO=0 is the kill switch (control unaffected).
-        self._video_enabled = os.environ.get("INTERLATENT_QUIC_VIDEO", "1") != "0"
+        self._video_enabled = _env.env_bool("INTERLATENT_QUIC_VIDEO", True)
         self._preview_period_s = _preview_period_s()
         # Congestion-adaptive preview rate (INTERLATENT_PREVIEW_HZ is the
         # ceiling): the child's 1s vstats messages feed PreviewBackoff.
         # INTERLATENT_PREVIEW_ADAPTIVE=0 pins today's fixed behavior.
-        self._preview_adaptive = (
-            os.environ.get("INTERLATENT_PREVIEW_ADAPTIVE", "1") != "0"
-        )
+        self._preview_adaptive = _env.env_bool("INTERLATENT_PREVIEW_ADAPTIVE", True)
         self._preview_backoff = PreviewBackoff()
-        self._vstats_last: Optional[tuple] = None  # (open, drop_cap, reset_ttl)
+        self._vstats_last: Optional[tuple] = None  # (drop_cap, reset_ttl)
         self._last_rx_at = 0.0  # viewer presence: any decoded target frame
         self._next_preview_due = 0.0  # credit deadline; see preview_due()
         self._preview_seq = 0
@@ -321,14 +322,9 @@ class QuicTeleopChannel:
 
         # Arrival telemetry (supervisor thread only): inter-arrival gap of
         # target datagrams — the node-observable half of teleop latency
-        # (relay→node jitter). 5s rolling summary.
-        self._arr_count = 0
-        self._arr_last_ns = 0
-        self._arr_gap_sum_ms = 0.0
-        self._arr_gap_max_ms = 0.0
-        self._arr_seq_first = 0
-        self._arr_seq_last = 0
-        self._arr_window_started = time.monotonic()
+        # (relay→node jitter). Shared 5s rolling summary; this channel appends
+        # its preview counters (pv / pv_hz) to the line.
+        self._arrivals = ArrivalTracker(_STATS_LOG_PERIOD_S)
 
     def _load_spec_wire(self) -> Optional[bytes]:
         """Frame this node's installed kinematic_spec, or None when there is no
@@ -490,8 +486,7 @@ class QuicTeleopChannel:
                 self._proc = None
                 self._child_addr = None
                 self._connected = False
-                with self._lock:
-                    self._latest = None
+                self._drop_frame()
                 self._next_spawn_at = now + self._spawn_backoff
                 self._spawn_backoff = min(self._spawn_backoff * 2, _RECONNECT_MAX_S)
             if self._proc is None and now >= self._next_spawn_at:
@@ -552,8 +547,7 @@ class QuicTeleopChannel:
                 # driving the arm across a reconnect.
                 self._connected = False
                 self._vstats_last = None
-                with self._lock:
-                    self._latest = None
+                self._drop_frame()
             elif t == "vstats":
                 self._on_vstats(msg)
             return
@@ -575,13 +569,11 @@ class QuicTeleopChannel:
         # E-stop latches BEFORE dedupe: a duplicated/late estop datagram must
         # still stop the robot even when its seq loses the latest-wins race.
         if frame.estop:
-            with self._lock:
-                self._estop_seen = True
+            self._latch_estop()
         if not self._dedup.accept(frame.seq):
             return
         self._note_arrival(frame)
-        with self._lock:
-            self._latest = frame
+        self._store_frame(frame)
 
     def _maybe_send_spec(self, addr) -> None:
         """Hand the framed kinematic_spec to the child (TYPE_SPEC) to ship on a
@@ -624,21 +616,8 @@ class QuicTeleopChannel:
             )
 
     # -- read API (control loop) --
-    def latest_frame(self) -> Optional[TeleopFrame]:
-        with self._lock:
-            frame = self._latest
-        if frame is None:
-            return None
-        if (time.monotonic_ns() - frame.received_at_ns) / 1e6 > _FRAME_STALE_MS:
-            return None
-        return frame
-
-    def consume_estop(self) -> bool:
-        """Return-and-clear the sticky operator e-stop flag. Mirrors
-        TeleopChannel.consume_estop (see channel.py + ADR 0016)."""
-        with self._lock:
-            seen, self._estop_seen = self._estop_seen, False
-        return seen
+    # latest_frame() and consume_estop() are inherited from LatestFrameStore
+    # (identical staleness + sticky-estop semantics across transports, ADR 0016).
 
     @property
     def connected(self) -> bool:
@@ -690,20 +669,19 @@ class QuicTeleopChannel:
         if not self._preview_adaptive or not self._video_enabled:
             return
         try:
-            open_ct = int(msg.get("open", 0))
             drop_cap = int(msg.get("drop_cap", 0))
             reset_ttl = int(msg.get("reset_ttl", 0))
         except (TypeError, ValueError):
             return
         last = self._vstats_last
-        self._vstats_last = (open_ct, drop_cap, reset_ttl)
+        self._vstats_last = (drop_cap, reset_ttl)
         if last is None:
             return  # first sample of this connection — baseline only
-        d_cap = max(0, drop_cap - last[1])
+        d_cap = max(0, drop_cap - last[0])
         # Only TTL resets (frames gone stale in flight) drive backoff;
         # d_cap is the in-flight cap pacing the timer — free, expected,
         # not congestion (see PreviewBackoff).
-        stale = max(0, reset_ttl - last[2])
+        stale = max(0, reset_ttl - last[1])
         before = self._preview_backoff.mult
         self._preview_backoff.on_window(stale, self._preview_period_s)
         after = self._preview_backoff.mult
@@ -721,9 +699,9 @@ class QuicTeleopChannel:
             )
 
     def _effective_preview_period_s(self) -> float:
-        """The configured period scaled by the congestion backoff."""
-        if not self._preview_adaptive:
-            return self._preview_period_s
+        """The configured period scaled by the congestion backoff. When
+        adaptive is off, ``_on_vstats`` never runs so the multiplier stays 1.0
+        and this is just the base period — no separate branch needed."""
         return self._preview_backoff.period(self._preview_period_s)
 
     def preview_due(self) -> bool:
@@ -773,13 +751,11 @@ class QuicTeleopChannel:
         for cam, jpeg in jpegs.items():
             if not jpeg:
                 continue
-            header = json.dumps({
-                "type": "video",
-                "cam": cam,
-                "seq": self._preview_seq,
-                "ts_ms": ts_ms,
-            }).encode("utf-8")
-            wire = struct.pack(">H", len(header)) + header + bytes(jpeg)
+            wire = frame_with_header(
+                {"type": "video", "cam": cam,
+                 "seq": self._preview_seq, "ts_ms": ts_ms},
+                jpeg,
+            )
             try:
                 sock.sendto(_quic_ipc.encode_video(cam, wire), addr)
             except OSError:
@@ -796,42 +772,22 @@ class QuicTeleopChannel:
     def _note_arrival(self, frame: TeleopFrame) -> None:
         """Track inter-arrival gaps of target datagrams; log a 5s summary.
         Supervisor thread only. A low rate or a large max gap means targets
-        are stalling between the browser and this node (relay/network jitter)."""
-        now_ns = frame.received_at_ns
-        if self._arr_count == 0:
-            self._arr_seq_first = frame.seq
-        else:
-            gap_ms = (now_ns - self._arr_last_ns) / 1e6
-            self._arr_gap_sum_ms += gap_ms
-            if gap_ms > self._arr_gap_max_ms:
-                self._arr_gap_max_ms = gap_ms
-        self._arr_last_ns = now_ns
-        self._arr_seq_last = frame.seq
-        self._arr_count += 1
-
-        now = time.monotonic()
-        elapsed = now - self._arr_window_started
-        if elapsed < _STATS_LOG_PERIOD_S:
+        are stalling between the browser and this node (relay/network jitter).
+        ``seq_span`` vs ``n`` ≈ dedupe drops + datagrams lost en route (dup×3,
+        so span > n is normal)."""
+        summary = self._arrivals.note(frame)
+        if summary is None:
             return
-        n = self._arr_count
-        gaps = n - 1
-        # seq_span vs frames received ≈ duplicates the dedupe dropped + any
-        # datagrams lost en route (dup×3, so span > n is normal).
-        seq_span = self._arr_seq_last - self._arr_seq_first
         _LOG.info(
             "teleop(quic) target datagrams (%.0fs): n=%d rate=%.1fHz "
             "gap mean/max=%.0f/%.0fms seq_span=%d pv=%d pv_hz=%.1f "
             "session=%s",
-            elapsed, n, n / elapsed if elapsed > 0 else 0.0,
-            (self._arr_gap_sum_ms / gaps) if gaps > 0 else 0.0,
-            self._arr_gap_max_ms, seq_span, self._pv_window,
-            1.0 / self._effective_preview_period_s(), self._session_id,
+            summary["elapsed"], summary["n"], summary["rate_hz"],
+            summary["gap_mean_ms"], summary["gap_max_ms"], summary["seq_span"],
+            self._pv_window, 1.0 / self._effective_preview_period_s(),
+            self._session_id,
         )
-        self._arr_count = 0
-        self._arr_gap_sum_ms = 0.0
-        self._arr_gap_max_ms = 0.0
         self._pv_window = 0
-        self._arr_window_started = now
 
 
 __all__ = [

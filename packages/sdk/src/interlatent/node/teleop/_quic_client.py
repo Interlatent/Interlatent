@@ -27,6 +27,8 @@ from aioquic.h3.events import DatagramReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated, QuicEvent
 
+from ._quic_uni_gc import UniStreamGC
+
 _LOG = logging.getLogger(__name__)
 
 # Drop-don't-queue bound for outbound datagrams. aioquic parks datagrams in an
@@ -55,6 +57,20 @@ class _WTClientProtocol(QuicConnectionProtocol):
             asyncio.get_event_loop().create_future()
         )
         self._datagrams: "asyncio.Queue[bytes]" = asyncio.Queue()
+        # Owns the aioquic send-only-uni-stream leak GC (ADR 0020): every uni
+        # stream opened here is parked and discarded once its send side acks,
+        # swept at packet cadence in transmit().
+        self._uni_gc = UniStreamGC(self._sender_finished, self._discard_stream)
+
+    def transmit(self) -> None:
+        # Piggyback the leak GC on every packet build (datagram sends, stream
+        # writes, ACKs) so finished/reset uni streams leave aioquic's
+        # per-connection bookkeeping promptly. Guard against a base-class
+        # transmit before our __init__ body ran.
+        gc = getattr(self, "_uni_gc", None)
+        if gc is not None:
+            gc.sweep()
+        super().transmit()
 
     def open_session(self, authority: str, path: str) -> None:
         """Send the extended CONNECT that opens the WebTransport session."""
@@ -116,6 +132,7 @@ class _WTClientProtocol(QuicConnectionProtocol):
                 self._session_stream_id, is_unidirectional=True
             )
             self._quic.send_stream_data(sid, payload, end_stream=True)
+            self._uni_gc.add(sid)  # discard once its send side acks (ADR 0020)
             self.transmit()
             return sid
         except Exception:
@@ -130,18 +147,18 @@ class _WTClientProtocol(QuicConnectionProtocol):
         except Exception:
             pass
 
-    def uni_stream_finished(self, sid: int) -> bool:
-        """True once the stream's send side is fully acked+FIN.
+    def _sender_finished(self, sid: int) -> bool:
+        """True once a locally-opened uni stream's send side is fully acked
+        (FIN or RESET delivered), or the stream is already gone.
 
-        Checks ``sender.is_finished`` directly (private attrs, hence the
-        pinned aioquic range): a send-only uni stream is NEVER popped from
-        ``_quic._streams`` — aioquic's ``QuicStreamReceiver.__init__`` ignores
-        its ``readable`` flag, so ``QuicStream.is_finished`` (receiver AND
-        sender) stays False forever and the discard sweep never collects it.
-        The naive ``sid not in _streams`` check therefore reported every
-        frame as unfinished, and the governor TTL-reset streams that had long
-        been delivered. On any attr error we degrade to 'always finished',
-        leaving the TTL as the only shedding signal."""
+        The single predicate behind both :meth:`uni_stream_finished` (the
+        governor frees a slot) and the leak GC (discard the stream). Checks
+        ``sender.is_finished`` directly: a send-only uni stream is NEVER
+        popped from ``_quic._streams`` by aioquic — its
+        ``QuicStreamReceiver.__init__`` ignores ``readable``, so
+        ``QuicStream.is_finished`` (receiver AND sender) stays False forever
+        (ADR 0020). Private attrs, hence the pinned aioquic range; on any attr
+        error degrade to 'finished' so callers never spin."""
         try:
             stream = self._quic._streams.get(sid)
             if stream is None:
@@ -150,50 +167,33 @@ class _WTClientProtocol(QuicConnectionProtocol):
         except Exception:
             return True
 
-    def discard_uni_stream(self, sid: int) -> bool:
-        """Drop a send-only uni stream from aioquic's per-connection
-        bookkeeping once its send side is fully acked (FIN or RESET
-        delivered). Returns True when the stream is gone (or already was),
-        False if the send side is still in flight — retry later.
-
-        aioquic never collects these streams itself: its discard sweep
-        requires ``QuicStream.is_finished`` (receiver AND sender), and
-        ``QuicStreamReceiver.__init__`` hardcodes ``is_finished = False``
-        even for a send-only stream (contradicting its own docstring), so
-        every frame stream stays in ``_quic._streams`` and
-        ``_streams_queue`` forever. Both are iterated on EVERY packet build
-        (``_write_application``), so at ~72 frame-streams/s the per-packet
-        cost grows linearly with session age — measured on the Jetson as
-        per-frame completion time creeping ~40 → ~100 ms over a minute
-        (delivered fps ~23 → ~9 against a pinned 24 Hz offer), resetting
-        only on reconnect. This replicates exactly what aioquic's own
-        sweep does when it does fire: pop from ``_streams``, record the id
-        in ``_streams_finished`` (so a late peer frame is treated as
-        already-handled, not a protocol error), drop from
-        ``_streams_queue``. Private attrs — same pinned-aioquic caveat as
-        ``uni_stream_finished``; on attr error report True so callers
-        don't retry forever."""
+    def _discard_stream(self, sid: int) -> None:
+        """Replicate aioquic's own stream GC for one finished send-only uni
+        stream: pop from ``_streams``, record the id in ``_streams_finished``
+        (so a late peer frame is treated as already-handled, not a protocol
+        error), drop from ``_streams_queue``, and prune the H3-layer entry.
+        Idempotent; every touch degrades to a no-op on attr error, so an
+        aioquic-pin bump fails soft (leak returns, the ``qs`` gauge exposes
+        it) rather than crashing. See ADR 0020."""
         try:
-            stream = self._quic._streams.get(sid)
-            if stream is None:
-                return True
-            if not stream.sender.is_finished:
-                return False
-            self._quic._streams.pop(sid, None)
+            stream = self._quic._streams.pop(sid, None)
             self._quic._streams_finished.add(sid)
-            try:
-                self._quic._streams_queue.remove(stream)
-            except ValueError:
-                pass
-            # The H3 layer keeps its own per-stream entry (~200 B) that is
-            # also never collected — prune it alongside the QUIC one.
+            if stream is not None:
+                try:
+                    self._quic._streams_queue.remove(stream)
+                except ValueError:
+                    pass
             try:
                 self._http._stream.pop(sid, None)
             except Exception:
                 pass
-            return True
         except Exception:
-            return True
+            pass
+
+    def uni_stream_finished(self, sid: int) -> bool:
+        """True once the stream's send side is fully acked+FIN (or it is gone).
+        The governor uses this to free an in-flight slot."""
+        return self._sender_finished(sid)
 
     def quic_stream_count(self) -> int:
         """Live size of aioquic's per-connection stream dict — the gauge for
@@ -256,9 +256,6 @@ class WebTransportSession:
 
     def uni_stream_finished(self, sid: int) -> bool:
         return self._proto.uni_stream_finished(sid)
-
-    def discard_uni_stream(self, sid: int) -> bool:
-        return self._proto.discard_uni_stream(sid)
 
     def quic_stream_count(self) -> int:
         return self._proto.quic_stream_count()

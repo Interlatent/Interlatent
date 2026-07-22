@@ -39,11 +39,22 @@ rules (ADR 0016).
 from __future__ import annotations
 
 import json
+import struct
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 _VALID_MODES = ("keys", "pose", "targets")
+
+
+def frame_with_header(header: dict, body: bytes) -> bytes:
+    """The node→browser length-prefixed wire envelope, shared by every hop that
+    ships JSON-header + opaque body on one stream: ``uint16-BE header length +
+    UTF-8 JSON header + body``. Used for the WS preview tee, the QUIC video
+    tee, and the QUIC kinematic_spec — the header ``type`` distinguishes them,
+    so the browser's inbound reader is one parser. Pure + unit-tested."""
+    head = json.dumps(header).encode("utf-8")
+    return struct.pack(">H", len(head)) + head + body
 
 
 @dataclass
@@ -133,4 +144,4 @@ def _float_list(raw: object, length: int) -> Optional[list[float]]:
         return None
 
 
-__all__ = ["TeleopFrame"]
+__all__ = ["TeleopFrame", "frame_with_header"]

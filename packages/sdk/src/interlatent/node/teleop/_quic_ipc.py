@@ -2,7 +2,7 @@
 
 The QUIC connection runs in a dumb-pipe child process (``_quic_proc``) so the
 robot process's GIL contention can't starve aioquic's handshake/loss timers
-(see the ADR 0017 amendment). Parent and child exchange datagrams over a
+(see ADR 0021). Parent and child exchange datagrams over a
 loopback UDP socket pair using the 1-byte-type framing defined here — kept in
 one aioquic-free module so both sides (and the unit tests) share a single
 source of truth.
@@ -17,11 +17,12 @@ Framing (both directions): ``type_byte + payload``.
       {"t": "hello", "cookie": <hex>, "pid": <int>}   bind + 1s heartbeat
       {"t": "connected"}                              WT CONNECT accepted
       {"t": "disconnected", "reason": <str>}          session ended (best-effort)
-      {"t": "vstats", "open": N, "fin": N, "drop_cap": N,
-       "reset_ttl": N, "dg_drop": N}                  cumulative video-path
+      {"t": "vstats", "drop_cap": N, "reset_ttl": N}  cumulative video-path
                                                       counters, 1s cadence —
-                                                      feeds the parent's
-                                                      adaptive preview backoff
+                                                      feed the parent's adaptive
+                                                      preview backoff (only
+                                                      reset_ttl drives it;
+                                                      drop_cap is diagnostic)
     Unknown "t" values are ignored by the receiver (version-skew safe).
   * ``TYPE_VIDEO`` — parent→child only: one framed video frame to ship to the
     browser on its own WebTransport unidirectional stream. Payload is

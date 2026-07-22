@@ -1,6 +1,6 @@
 """QUIC child-process isolation for the node teleop channel.
 
-Covers the three offline-testable layers of the design (ADR 0017 amendment):
+Covers the three offline-testable layers of the design (ADR 0021):
 the ``_quic_ipc`` loopback framing, ``QuicTeleopChannel``'s child supervision
 and datagram handling (with a fake child played by the test over a real
 loopback UDP socket), and a real ``-m interlatent.node.teleop._quic_proc``
@@ -478,63 +478,78 @@ def test_governor_ttl_resets_stale_streams():
     assert gov.reset_ttl == 1
 
 
-def test_governor_discards_finished_streams():
-    # The aioquic leak: send-only uni streams are never collected by
-    # aioquic's own sweep, so the governor must actively discard each
-    # stream once it finishes — otherwise per-packet cost grows with
-    # session age and delivered fps decays monotonically.
+# ---------------------------------------------------------------------------
+# aioquic send-only-uni-stream leak GC (_UniStreamGC), owned by the connection
+# (ADR 0020). Pure: is_finished/discard are injected, so no aioquic needed.
+# ---------------------------------------------------------------------------
+
+def test_uni_gc_discards_finished_streams():
+    # The aioquic leak: send-only uni streams are never collected by aioquic's
+    # own sweep, so the connection must actively discard each stream once its
+    # send side acks — otherwise per-packet cost grows with session age and
+    # delivered fps decays monotonically.
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
     finished: set = set()
     discarded: list = []
-    gov = _quic_proc._VideoGovernor(
-        now=FakeClock(),
+    gc = UniStreamGC(
         is_finished=lambda sid: sid in finished,
-        reset=lambda sid: None,
-        discard=lambda sid: discarded.append(sid) or True,
+        discard=discarded.append,
     )
-    gov.admit("a")
-    gov.note_open(1, "a")
+    gc.add(1)
+    gc.add(2)
+    gc.sweep()  # neither acked yet
+    assert discarded == []
+    assert gc.pending_count() == 2
+
     finished.add(1)
-    gov.admit("a")  # sweep observes the finish
+    gc.sweep()  # sid 1's send side acked -> discarded, sid 2 parked
     assert discarded == [1]
-    assert gov.finished == 1
+    assert gc.pending_count() == 1
+
+    finished.add(2)
+    gc.sweep()
+    assert discarded == [1, 2]
+    assert gc.pending_count() == 0
+    gc.sweep()  # nothing left; a discarded stream is never revisited
+    assert discarded == [1, 2]
 
 
-def test_governor_ttl_reset_discard_retries_until_reset_acked():
+def test_uni_gc_parks_reset_stream_until_acked():
     # A TTL-RESET stream can't be discarded until its RESET frame is acked
-    # (discard-before-send would strand the peer's receive side). The
-    # governor parks it and retries each sweep; once the discard succeeds
-    # it never retries again.
-    finished: set = set()
-    resets: list = []
-    clock = FakeClock()
+    # (discard-before-send would strand the peer's receive side). It parks and
+    # retries each sweep; once its send side reports finished it discards once.
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
     acked = {"ok": False}
-    attempts: list = []
-
-    def _discard(sid: int) -> bool:
-        attempts.append(sid)
-        return acked["ok"]
-
-    gov = _quic_proc._VideoGovernor(
-        now=clock,
-        is_finished=lambda sid: sid in finished,
-        reset=resets.append,
-        discard=_discard,
+    discarded: list = []
+    gc = UniStreamGC(
+        is_finished=lambda sid: acked["ok"],
+        discard=discarded.append,
     )
-    gov.admit("a")
-    gov.note_open(1, "a")
-    clock.t += _quic_proc._VIDEO_STREAM_TTL_S + 0.1
-    gov.admit("a")  # sweep TTL-resets sid 1; discard fails (RESET unacked)
-    assert resets == [1]
-    assert attempts == [1]
-
-    gov.admit("a")  # retried from the parked list, still unacked
-    assert attempts == [1, 1]
+    gc.add(7)
+    gc.sweep()  # RESET unacked -> parked
+    gc.sweep()
+    assert discarded == []
+    assert gc.pending_count() == 1
 
     acked["ok"] = True
-    gov.admit("a")  # RESET acked -> discard succeeds
-    assert attempts == [1, 1, 1]
-    gov.admit("a")  # and is never retried again
-    assert attempts == [1, 1, 1]
+    gc.sweep()  # RESET acked -> discard once
+    assert discarded == [7]
+    gc.sweep()  # never retried again
+    assert discarded == [7]
+
+
+def test_uni_gc_clear_and_runaway_guard():
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
+    gc = UniStreamGC(is_finished=lambda sid: False, discard=lambda sid: None)
+    for sid in range(400):  # nothing ever acks (a dying connection)
+        gc.add(sid)
+    gc.sweep()
+    assert gc.pending_count() <= UniStreamGC._MAX_PENDING
+    gc.clear()
+    assert gc.pending_count() == 0
 
 
 def test_parent_link_video_dispatch():
@@ -545,15 +560,13 @@ def test_parent_link_video_dispatch():
         _quic_ipc.encode_video("cam0", b"WIREBYTES"), ("127.0.0.1", 1)
     )
     assert got == [("cam0", b"WIREBYTES")]
-    assert link.rx_video_from_parent == 1
 
-    # No sender (no session up) → dropped silently, not counted.
+    # No sender (no session up) → dropped silently.
     link.set_video_sender(None)
     link.datagram_received(
         _quic_ipc.encode_video("cam0", b"MORE"), ("127.0.0.1", 1)
     )
     assert got == [("cam0", b"WIREBYTES")]
-    assert link.rx_video_from_parent == 1
 
     # Garbage payload with a sender set → ignored.
     link.set_video_sender(lambda cam, wire: got.append((cam, wire)))
@@ -791,8 +804,9 @@ def test_preview_backoff_base_slower_than_floor():
 
 
 def _vstats(drop_cap: int, reset_ttl: int = 0, open_ct: int = 0) -> dict:
-    return {"t": "vstats", "open": open_ct, "fin": 0, "drop_cap": drop_cap,
-            "reset_ttl": reset_ttl, "dg_drop": 0}
+    # open_ct is accepted for call-site readability but no longer on the wire —
+    # the trimmed payload carries only what the parent consumes.
+    return {"t": "vstats", "drop_cap": drop_cap, "reset_ttl": reset_ttl}
 
 
 def test_vstats_cap_drops_never_back_off(channel):
@@ -913,31 +927,16 @@ def test_vstats_adaptive_kill_switch(monkeypatch):
 
 
 def test_vstats_payload_pure():
-    assert _quic_proc._vstats_payload(None, None) is None
+    # Trimmed to exactly what the parent's PreviewBackoff consumes: drop_cap
+    # (diagnostic) + reset_ttl (the backoff signal). The qs/dg_drop gauges ride
+    # the 5s stats log line, not this IPC. None while no governor exists.
+    assert _quic_proc._vstats_payload(None) is None
 
     class _Gov:
         opened, finished, dropped_cap, reset_ttl = 7, 6, 3, 1
 
-    class _WT:
-        def datagrams_dropped(self):
-            return 9
-
-        def quic_stream_count(self):
-            return 4
-
-    msg = _quic_proc._vstats_payload(_Gov(), _WT())
-    assert msg == {"t": "vstats", "open": 7, "fin": 6, "drop_cap": 3,
-                   "reset_ttl": 1, "dg_drop": 9, "qs": 4}
-    # No live WT session (or a broken counter) degrades to 0, never raises.
-    no_wt = _quic_proc._vstats_payload(_Gov(), None)
-    assert no_wt["dg_drop"] == 0
-    assert no_wt["qs"] == 0
-
-    class _BrokenWT:
-        def datagrams_dropped(self):
-            raise RuntimeError("boom")
-
-    assert _quic_proc._vstats_payload(_Gov(), _BrokenWT())["qs"] == -1
+    msg = _quic_proc._vstats_payload(_Gov())
+    assert msg == {"t": "vstats", "drop_cap": 3, "reset_ttl": 1}
     kind, payload = _quic_ipc.parse(_quic_ipc.encode_ctrl(msg))
     assert kind == _quic_ipc.TYPE_CTRL
     assert _quic_ipc.parse_ctrl(payload) == msg
@@ -945,16 +944,18 @@ def test_vstats_payload_pure():
 
 def test_video_inflight_env_parse(monkeypatch):
     # Valid override, clamping, and garbage falling back to the default.
+    from interlatent.node import _env
+
     monkeypatch.setenv("X_INFLIGHT", "4")
-    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 4
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 4
     monkeypatch.setenv("X_INFLIGHT", "99")
-    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 16
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 16
     monkeypatch.setenv("X_INFLIGHT", "0")
-    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 1
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 1
     monkeypatch.setenv("X_INFLIGHT", "many")
-    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 2
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 2
     monkeypatch.delenv("X_INFLIGHT")
-    assert _quic_proc._env_int("X_INFLIGHT", 2, 1, 16) == 2
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 2
 
 
 def test_video_governor_honors_raised_cap(monkeypatch):

@@ -28,6 +28,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from . import _env
 from .._clamp_log import warn_clamp
 from .jpeg import backend_name as _jpeg_backend_name
 from .jpeg import encode_jpeg as _encode_jpeg
@@ -751,22 +752,16 @@ _PREVIEW_JPEG_QUALITY_DEFAULT = 70
 
 def _preview_max_dim() -> int:
     """Preview longest-side cap from INTERLATENT_PREVIEW_MAX_DIM (px)."""
-    try:
-        v = int(os.environ.get("INTERLATENT_PREVIEW_MAX_DIM", "")
-                or _PREVIEW_MAX_DIM_DEFAULT)
-    except (TypeError, ValueError):
-        v = _PREVIEW_MAX_DIM_DEFAULT
-    return max(64, min(v, 1280))
+    return _env.env_int(
+        "INTERLATENT_PREVIEW_MAX_DIM", _PREVIEW_MAX_DIM_DEFAULT, 64, 1280
+    )
 
 
 def _preview_jpeg_quality() -> int:
     """Preview JPEG quality from INTERLATENT_PREVIEW_JPEG_QUALITY (1-95)."""
-    try:
-        v = int(os.environ.get("INTERLATENT_PREVIEW_JPEG_QUALITY", "")
-                or _PREVIEW_JPEG_QUALITY_DEFAULT)
-    except (TypeError, ValueError):
-        v = _PREVIEW_JPEG_QUALITY_DEFAULT
-    return max(10, min(v, 95))
+    return _env.env_int(
+        "INTERLATENT_PREVIEW_JPEG_QUALITY", _PREVIEW_JPEG_QUALITY_DEFAULT, 10, 95
+    )
 
 
 def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
