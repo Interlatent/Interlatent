@@ -25,12 +25,14 @@ while blocked, loudly, and auto-resumes.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
 import shutil
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -111,7 +113,7 @@ class TickSpool:
             except OSError:
                 pass
         self._pending = pending                      # seq -> size
-        self._order = sorted(pending)                # ascending seqs
+        self._order = deque(sorted(pending))         # ascending seqs
         self._bytes = sum(pending.values())
         self._next_seq = (self._order[-1] + 1) if self._order else 0
 
@@ -136,12 +138,20 @@ class TickSpool:
             if not over_cap and self._blocked:
                 # Only resume once drained below the hysteresis line.
                 over_cap = self._bytes >= _RESUME_FRACTION * self._max_bytes
-            low_disk = False
-            if not over_cap:
-                try:
-                    low_disk = shutil.disk_usage(self.dir).free < self._min_free
-                except OSError:
-                    low_disk = False
+            need_disk_check = not over_cap
+
+        # statvfs can stall tens of ms on a loaded SD card or a network
+        # mount — do it OUTSIDE the lock so a slow syscall never blocks the
+        # append (control) and _forget/ack (sender) threads that share it.
+        # (_min_free is set once in __init__, so reading it here is safe.)
+        low_disk = False
+        if need_disk_check:
+            try:
+                low_disk = shutil.disk_usage(self.dir).free < self._min_free
+            except OSError:
+                low_disk = False
+
+        with self._lock:
             now_blocked = over_cap or low_disk
             if now_blocked and not self._blocked_logged:
                 log.error(
@@ -196,7 +206,7 @@ class TickSpool:
         Always returns at least one tick when any is pending (a lone
         oversized tick still goes out solo)."""
         with self._lock:
-            seqs = list(self._order[: max(1, int(max_ticks))])
+            seqs = list(itertools.islice(self._order, max(1, int(max_ticks))))
         out: list[tuple[int, bytes]] = []
         total = 0
         for seq in seqs:
@@ -219,16 +229,26 @@ class TickSpool:
         """Delete every pending tick with seq <= through_seq (the server
         durably accepted them — RecordTicks prefix semantics)."""
         with self._lock:
-            acked = [s for s in self._order if s <= through_seq]
+            # _order is monotonic, so the acked set is a contiguous front
+            # prefix — popleft it in one O(k) pass rather than an O(k·n)
+            # series of list.remove calls (a close-drain can ack thousands).
+            acked: list[int] = []
+            while self._order and self._order[0] <= through_seq:
+                seq = self._order.popleft()
+                acked.append(seq)
+                size = self._pending.pop(seq, None)
+                if size is not None:
+                    self._bytes -= size
         for seq in acked:
             path = self.dir / f"{seq:0{_SEQ_WIDTH}d}{_TICK_SUFFIX}"
             try:
                 path.unlink(missing_ok=True)
             except OSError:
                 log.debug("spool ack unlink failed for %d", seq, exc_info=True)
-            self._forget(seq)
 
     def _forget(self, seq: int) -> None:
+        # Mid-order removal for the rare vanished-file case in peek_batch;
+        # the O(n) deque.remove is fine here (one seq, not a bulk ack).
         with self._lock:
             size = self._pending.pop(seq, None)
             if size is not None:
@@ -320,6 +340,15 @@ def gc_orphans(
     removed = 0
     for orphan in orphan_sessions(root):
         created = float(orphan["meta"].get("created_at") or 0.0)
+        if not created:
+            # meta.json is missing or unreadable (e.g. its write failed at
+            # init, line 126) — fall back to the spool dir's mtime so an
+            # ageless-but-recent spool is still age-gated rather than GC'd
+            # out from under a just-crashed (or active) session.
+            try:
+                created = orphan["dir"].stat().st_mtime
+            except OSError:
+                created = 0.0
         if created and (time.time() - created) < max_age_s:
             continue
         if orphan["pending_count"]:

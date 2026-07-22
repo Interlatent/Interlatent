@@ -469,6 +469,11 @@ class DRTCClient:
         if thread is None or not thread.is_alive():
             self._rec_thread = None
             self._rec_unsent_retained = _pending()
+            if spool is not None and self._rec_unsent_retained == 0:
+                # Sender already drained the spool and exited before we could
+                # send the sentinel — nothing left to protect, so tidy up
+                # rather than leave an empty dir behind as an orphan.
+                spool.dispose()
             return
         # Close sentinel: the sender flushes the whole spool, then exits.
         self._rec_q.put(None)
@@ -629,7 +634,15 @@ class DRTCClient:
             try:
                 tok = self._rec_q.get(timeout=0.25)
             except queue.Empty:
-                if self._stop.is_set():
+                # Stay alive while the spool still holds data, even after
+                # _stop: close() sets _stop up to ~2s before _drain_recorder
+                # enqueues the close sentinel, and that sentinel must reach a
+                # LIVE sender for _flush_backlog (and the subsequent dispose)
+                # to run. Returning here on _stop alone would strand a
+                # perfectly drainable spool as an on-disk orphan.
+                if self._stop.is_set() and (
+                    self._spool is None or self._spool.pending_count == 0
+                ):
                     return
                 # Idle tick: retry any backlog a failed send left behind.
                 if self._spool is not None and self._spool.pending_count:

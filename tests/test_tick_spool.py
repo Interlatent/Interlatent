@@ -7,9 +7,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-import interlatent.inference.client.spool as spool_mod
 from interlatent.inference.client.spool import (
     TickSpool,
     disk_pressure,
