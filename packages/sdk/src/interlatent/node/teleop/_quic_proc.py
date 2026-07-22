@@ -54,10 +54,20 @@ _STATS_LOG_PERIOD_S = 5.0
 # The per-camera cap bounds the delivered preview rate on a long-RTT
 # relay path: fps/cam ~= cap / stream_completion_time (cap 2 at ~200ms
 # RTT tops out ~10 fps). INTERLATENT_QUIC_VIDEO_INFLIGHT raises it for
-# operators who want more headset fps — safe-ish now that the parent's
-# adaptive preview backoff also regulates the offered rate, but more
-# in-flight video does queue more bytes against control datagrams; the
-# global cap stays 3x per-cam (the 3-camera rig ratio).
+# operators who want more headset fps — but note the latency cost: more
+# unfinished streams is a DEEPER queue on a bufferbloated uplink, and a
+# preview frame's glass-to-eye age grows to fill it. The global cap stays
+# 3x per-cam (the 3-camera rig ratio).
+#
+# The TTL is the freshness ceiling, and it is the load-bearing knob for a
+# LIVE preview: a frame still unsent after the TTL is RESET (dropped), not
+# delivered late, because a stale preview frame is worse than a gap. The
+# 1.0 s legacy default let glass-to-eye latency climb to ~1 s under
+# congestion (a standing queue draining slower than it fills — measured
+# browser-side as video_lag growing while offered fps fell); 350 ms bounds
+# the felt lag without ever touching a healthy link (which delivers frames
+# in tens of ms). Lower it for a tighter latency cap at the cost of more
+# dropped frames, raise it to tolerate a slow link. Env-tunable in ms.
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -70,7 +80,9 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
 
 _VIDEO_INFLIGHT_PER_CAM = _env_int("INTERLATENT_QUIC_VIDEO_INFLIGHT", 2, 1, 16)
 _VIDEO_INFLIGHT_GLOBAL = 3 * _VIDEO_INFLIGHT_PER_CAM
-_VIDEO_STREAM_TTL_S = 1.0
+_VIDEO_STREAM_TTL_S = _env_int(
+    "INTERLATENT_QUIC_VIDEO_TTL_MS", 350, 50, 5000
+) / 1000.0
 
 
 class _VideoGovernor:

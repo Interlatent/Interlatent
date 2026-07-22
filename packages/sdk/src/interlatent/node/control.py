@@ -737,9 +737,36 @@ def _capture_tick(
 
 # Preview tee tunables: 320px longest side at q70 is ~8-15 KB per frame —
 # visually identical on the headset's 0.8 m quad, and 3-5× cheaper on the
-# uplink than the 640×480 q85 recording frames.
-_PREVIEW_MAX_DIM = 320
-_PREVIEW_JPEG_QUALITY = 70
+# uplink than the 640×480 q85 recording frames. Both are env-overridable
+# because the preview byte-budget is the single lever for coexistence on a
+# thin uplink: on a bufferbloated WiFi link the preview stream is what
+# jitters control-datagram delivery (targets queue behind video bytes,
+# spiking applied frame_age) and what the congestion backoff sheds, so
+# dialing bytes/frame down attacks the fps shed AND the latency jitter at
+# once. Lower resolution or quality on a struggling Jetson; the defaults
+# are the visually-lossless ceiling, not a floor.
+_PREVIEW_MAX_DIM_DEFAULT = 320
+_PREVIEW_JPEG_QUALITY_DEFAULT = 70
+
+
+def _preview_max_dim() -> int:
+    """Preview longest-side cap from INTERLATENT_PREVIEW_MAX_DIM (px)."""
+    try:
+        v = int(os.environ.get("INTERLATENT_PREVIEW_MAX_DIM", "")
+                or _PREVIEW_MAX_DIM_DEFAULT)
+    except (TypeError, ValueError):
+        v = _PREVIEW_MAX_DIM_DEFAULT
+    return max(64, min(v, 1280))
+
+
+def _preview_jpeg_quality() -> int:
+    """Preview JPEG quality from INTERLATENT_PREVIEW_JPEG_QUALITY (1-95)."""
+    try:
+        v = int(os.environ.get("INTERLATENT_PREVIEW_JPEG_QUALITY", "")
+                or _PREVIEW_JPEG_QUALITY_DEFAULT)
+    except (TypeError, ValueError):
+        v = _PREVIEW_JPEG_QUALITY_DEFAULT
+    return max(10, min(v, 95))
 
 
 def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
@@ -751,8 +778,12 @@ def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
     feeds per camera. Encoding goes through the capability-adaptive
     encoder (node/jpeg.py); a frame that fails to encode is simply
     skipped. ~1-2 ms per camera at 10 Hz — negligible against a 33 ms
-    tick budget.
+    tick budget. Resolution + quality are read per-set so an operator can
+    dial the uplink budget live (INTERLATENT_PREVIEW_MAX_DIM /
+    INTERLATENT_PREVIEW_JPEG_QUALITY) without restarting the node.
     """
+    max_dim = _preview_max_dim()
+    quality = _preview_jpeg_quality()
     out: dict[str, bytes] = {}
     for k, v in obs.items():
         try:
@@ -761,9 +792,7 @@ def _encode_preview_jpegs(obs: dict) -> dict[str, bytes]:
             continue
         if arr is None or arr.dtype != np.uint8 or arr.ndim < 2:
             continue
-        data = _encode_jpeg(
-            arr, quality=_PREVIEW_JPEG_QUALITY, max_dim=_PREVIEW_MAX_DIM,
-        )
+        data = _encode_jpeg(arr, quality=quality, max_dim=max_dim)
         if data:
             out[k] = data
     return out
