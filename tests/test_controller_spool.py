@@ -170,18 +170,23 @@ def _start_sender(cli):
 def test_drain_scaling_log_and_full_drain(tmp_path, monkeypatch, caplog):
     import logging
 
-    # Force the ceiling to scale past its 600s floor: assume a 1 B/s drain
-    # rate and bank enough that bytes/rate exceeds the floor. The ceiling is
-    # max(600, pending_bytes / min_bps), so with min_bps=1 the spool must hold
-    # > 600 bytes — three ~1 KB-JPEG ticks bank ~3 KB, well over.
+    # The ceiling scales past its 600s floor once the banked backlog would take
+    # longer than the floor to clear at the assumed drain rate. Force a 1 B/s
+    # rate so a small spool trips it: max(600, pending_bytes / 1) > 600 for any
+    # backlog over 600 bytes. Asserted on the pure ceiling helper so the log
+    # doesn't race the background sender draining the spool out from under us.
     monkeypatch.setattr(_ctrl, "_REC_DRAIN_ASSUMED_MIN_BPS", 1)
+    with caplog.at_level(logging.INFO, logger=_ctrl.log.name):
+        ceiling = _ctrl._drain_ceiling_logged(3000)
+    assert ceiling > _ctrl._REC_DRAIN_CEILING_S
+    assert any("ceiling scaled to" in r.getMessage() for r in caplog.records)
+
+    # And a real drain of a banked spool runs to completion and disposes it.
     cli, stub = _client(tmp_path, script=["all"])
     for i in range(3):
         _tick(cli, i, jpeg_size=1000)
     _start_sender(cli)
-    with caplog.at_level(logging.INFO, logger=_ctrl.log.name):
-        cli._drain_recorder()
-    assert any("ceiling scaled to" in r.getMessage() for r in caplog.records)
+    cli._drain_recorder()
     assert cli._rec_unsent_retained == 0
     assert not cli._spool.dir.exists()  # fully drained -> disposed
 

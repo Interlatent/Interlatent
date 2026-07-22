@@ -123,6 +123,24 @@ def _rec_drain_ceiling_s(pending_bytes: int) -> float:
         float(max(0, pending_bytes)) / _REC_DRAIN_ASSUMED_MIN_BPS,
     )
 
+
+def _drain_ceiling_logged(pending_bytes: int) -> float:
+    """The drain ceiling for ``pending_bytes``, announcing it when a banked
+    backlog scales it past the 600s floor.
+
+    Split out from ``_drain_recorder`` so the log decision is a pure function
+    of the pending bytes, testable without racing the background sender.
+    """
+    ceiling_s = _rec_drain_ceiling_s(pending_bytes)
+    if ceiling_s > _REC_DRAIN_CEILING_S:
+        log.info(
+            "DRTC recorder drain: %.0f MB banked in the spool — "
+            "ceiling scaled to %.0fs (assumes >= %d KiB/s)",
+            pending_bytes / 1e6, ceiling_s,
+            _REC_DRAIN_ASSUMED_MIN_BPS // 1024,
+        )
+    return ceiling_s
+
 # Cap the wire size of one batched RecordTicks RPC. Two constraints:
 # the server's default gRPC receive limit is 4 MiB (hard ceiling), and —
 # the binding one — each batch is a single head-of-line burst on the
@@ -478,14 +496,7 @@ class DRTCClient:
         # Close sentinel: the sender flushes the whole spool, then exits.
         self._rec_q.put(None)
         pending_bytes = spool.pending_bytes if spool is not None else 0
-        ceiling_s = _rec_drain_ceiling_s(pending_bytes)
-        if ceiling_s > _REC_DRAIN_CEILING_S:
-            log.info(
-                "DRTC recorder drain: %.0f MB banked in the spool — "
-                "ceiling scaled to %.0fs (assumes >= %d KiB/s)",
-                pending_bytes / 1e6, ceiling_s,
-                _REC_DRAIN_ASSUMED_MIN_BPS // 1024,
-            )
+        ceiling_s = _drain_ceiling_logged(pending_bytes)
         deadline = time.monotonic() + ceiling_s
         last_sent = self._rec_sent
         last_progress = time.monotonic()
