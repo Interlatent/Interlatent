@@ -19,7 +19,11 @@ jobs:
           cache: pip
       - name: Install packages
         run: |
-          pip install -e ./packages/sdk pytest pytest-timeout ruff
+          # Pillow + opencv give node/jpeg.py's fallback chain a CPU encoder.
+          # Both are optional deps (Pillow via [lerobot], opencv via robot
+          # extras), so a bare SDK install has no encoder and the node-jpeg
+          # tests — which assert a real backend resolves — see 'none' and fail.
+          pip install -e ./packages/sdk Pillow opencv-python-headless pytest pytest-timeout ruff
       - name: Import smoke test
         run: |
           python -c "import interlatent; import interlatent.inference.client; import interlatent.node.cli; import interlatent.cli.main"

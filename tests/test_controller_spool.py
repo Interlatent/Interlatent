@@ -170,11 +170,14 @@ def _start_sender(cli):
 def test_drain_scaling_log_and_full_drain(tmp_path, monkeypatch, caplog):
     import logging
 
-    # Make a tiny spool exceed the base ceiling so the scaling INFO fires.
+    # Force the ceiling to scale past its 600s floor: assume a 1 B/s drain
+    # rate and bank enough that bytes/rate exceeds the floor. The ceiling is
+    # max(600, pending_bytes / min_bps), so with min_bps=1 the spool must hold
+    # > 600 bytes — three ~1 KB-JPEG ticks bank ~3 KB, well over.
     monkeypatch.setattr(_ctrl, "_REC_DRAIN_ASSUMED_MIN_BPS", 1)
     cli, stub = _client(tmp_path, script=["all"])
     for i in range(3):
-        _tick(cli, i)
+        _tick(cli, i, jpeg_size=1000)
     _start_sender(cli)
     with caplog.at_level(logging.INFO, logger=_ctrl.log.name):
         cli._drain_recorder()
