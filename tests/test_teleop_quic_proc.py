@@ -688,20 +688,43 @@ def test_preview_backoff_pure():
     base = 0.1  # 10 Hz configured
     assert b.period(base) == pytest.approx(base)
 
-    # >= 3 drops doubles the period; 1-2 is a dead band; 0 decays /1.25.
-    b.on_window(3, base)
-    assert b.period(base) == pytest.approx(0.2)
-    b.on_window(2, base)
-    assert b.period(base) == pytest.approx(0.2)  # dead band holds
-    b.on_window(1, base)
-    assert b.period(base) == pytest.approx(0.2)
-    b.on_window(0, base)
+    # Proportional threshold: at a busy 90-frame window a few drops are
+    # jitter, not congestion — up to max(3, 10% of offered) holds steady.
+    b.on_window(drops=3, offered=90, base_period_s=base)
+    assert b.period(base) == pytest.approx(base)   # 3 <= 9, no backoff
+    b.on_window(drops=9, offered=90, base_period_s=base)
+    assert b.period(base) == pytest.approx(base)   # exactly 10% still holds
+    b.on_window(drops=10, offered=90, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2)    # 10 > 9 -> back off
+
+    # Recovery on low-but-nonzero windows: <= 2% of offered decays /1.25,
+    # so a marginal link no longer needs a perfectly clean window to climb.
+    b.on_window(drops=1, offered=90, base_period_s=base)  # 1 <= 1.8 -> recover
     assert b.period(base) == pytest.approx(0.2 / 1.25)
+    # Dead band between the two fractions holds (2..9 drops on a 90 window).
+    b.on_window(drops=5, offered=90, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2 / 1.25)
+
+
+def test_preview_backoff_absolute_floor_on_small_windows():
+    # On a small (low-rate) window the absolute floor of 3 dominates the
+    # 10% fraction, so a couple of denials never trip a halving.
+    b = qc.PreviewBackoff()
+    base = 0.1
+    b.on_window(drops=3, offered=10, base_period_s=base)
+    assert b.period(base) == pytest.approx(base)   # 3 not > max(3, 1)
+    b.on_window(drops=4, offered=10, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2)     # 4 > 3
+
+
+def test_preview_backoff_clamp_and_recovery():
+    b = qc.PreviewBackoff()
+    base = 0.1
 
     # Backoff clamps exactly at the 1s period ceiling (1 Hz floor rate),
     # never overshooting past it (overshoot would only slow recovery).
     for _ in range(10):
-        b.on_window(50, base)
+        b.on_window(drops=50, offered=90, base_period_s=base)
     assert b.period(base) == pytest.approx(1.0)
     assert b.mult == pytest.approx(10.0)  # 1.0s / 0.1s, not 2**n
 
@@ -709,7 +732,7 @@ def test_preview_backoff_pure():
     # in ~10-11 clean windows from the floor (log1.25(10) ~= 10.3).
     clean = 0
     while b.mult > 1.0:
-        b.on_window(0, base)
+        b.on_window(drops=0, offered=90, base_period_s=base)
         clean += 1
     assert 10 <= clean <= 12
     assert b.period(base) == pytest.approx(base)
@@ -718,13 +741,36 @@ def test_preview_backoff_pure():
 def test_preview_backoff_base_slower_than_floor():
     # A configured rate at/below 1 Hz never gets slowed further.
     b = qc.PreviewBackoff()
-    b.on_window(100, 1.0)
+    b.on_window(drops=100, offered=200, base_period_s=1.0)
     assert b.period(1.0) == pytest.approx(1.0)
 
 
-def _vstats(drop_cap: int, reset_ttl: int = 0) -> dict:
-    return {"t": "vstats", "open": 0, "fin": 0, "drop_cap": drop_cap,
+def _vstats(drop_cap: int, reset_ttl: int = 0, open_ct: int = 0) -> dict:
+    return {"t": "vstats", "open": open_ct, "fin": 0, "drop_cap": drop_cap,
             "reset_ttl": reset_ttl, "dg_drop": 0}
+
+
+def test_vstats_proportional_no_backoff_on_clean_busy_window(channel):
+    # The regression: a busy 30 Hz x 3-cam window (~90 offered/s) with a
+    # handful of cap denials is ordinary jitter, not congestion — the
+    # proportional threshold (max(3, 10% of offered)) must hold the rate
+    # steady where the old absolute >=3 rule ratcheted it down.
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    base = chan._preview_period_s
+
+    sim.ctrl(_vstats(drop_cap=0, open_ct=0))          # baseline sample
+    sim.ctrl(_vstats(drop_cap=6, open_ct=84))         # 6 drops / 90 offered
+    # Give the supervisor thread a beat to process, then assert no backoff.
+    time.sleep(0.2)
+    assert chan._preview_backoff.mult == pytest.approx(1.0)
+    assert chan._effective_preview_period_s() == pytest.approx(base)
+
+    # Another ~90-frame window but past 10% loss (78 opened, 12 denied)
+    # does back off — the proportional rule still catches real congestion.
+    sim.ctrl(_vstats(drop_cap=6 + 12, open_ct=84 + 78))
+    _wait_for(lambda: chan._preview_backoff.mult == pytest.approx(2.0),
+              what="backoff on >10% loss")
 
 
 def test_vstats_backoff_and_deadline(channel):

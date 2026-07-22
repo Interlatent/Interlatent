@@ -143,20 +143,35 @@ class PreviewBackoff:
 
     The parent cannot observe video stream completion (the hand-off to
     the child is a fire-and-forget loopback sendto), so the child
-    reports cumulative drop counters (``vstats``) and this class turns
-    per-window drop deltas into a period multiplier. AIMD-shaped
-    asymmetry: double the period the moment a window shows sustained
-    drops (>= _BACKOFF_DROPS — on a 3-cam 10 Hz rig 1-2 denials happen
-    on a single congestion-window stall, three-plus in one second means
-    the uplink persistently can't finish streams), recover slowly
-    (/1.25 per clean window, ~10 clean seconds from the floor back to
-    10 Hz) so a marginal link re-probes instead of flapping. The floor
-    rate is 1 Hz (period ceiling 1 s): the operator's quad stays alive
-    at negligible bandwidth while the configured INTERLATENT_PREVIEW_HZ
-    becomes a ceiling, not a promise. Pure + unit-tested.
+    reports cumulative counters (``vstats``) and this class turns
+    per-window deltas into a period multiplier. AIMD-shaped asymmetry:
+    double the period the moment a window shows sustained loss, recover
+    slowly (/1.25 per good window, ~10 windows from the floor back to
+    the configured rate) so a marginal link re-probes instead of
+    flapping.
+
+    The backoff threshold is **proportional to the frames actually
+    offered** this window, not an absolute drop count. An absolute
+    threshold measures congestion against a fixed number regardless of
+    rate, so at 30 Hz × 3 cams (~90 offered/s) three stray denials —
+    3% loss, ordinary jitter — tripped a halving, and recovery required
+    a perfectly clean window; the multiplier then ratcheted down and
+    stayed there, parking the preview far below the link's real
+    capacity. Backing off only above ``max(3, 10% of offered)`` and
+    recovering on low-but-nonzero windows (<= 2% of offered) tracks the
+    link instead of collapsing toward the floor. The absolute floor of
+    3 keeps a couple of denials in a small (low-rate) window from
+    tripping it. The dead band between the two fractions holds steady.
+
+    The floor rate is 1 Hz (period ceiling 1 s): the operator's quad
+    stays alive at negligible bandwidth while the configured
+    INTERLATENT_PREVIEW_HZ becomes a ceiling, not a promise. Pure +
+    unit-tested.
     """
 
-    _BACKOFF_DROPS = 3
+    _BACKOFF_MIN_DROPS = 3
+    _BACKOFF_FRACTION = 0.10
+    _RECOVER_FRACTION = 0.02
     _BACKOFF_FACTOR = 2.0
     _RECOVER_FACTOR = 1.25
     _MAX_PERIOD_S = 1.0
@@ -168,17 +183,21 @@ class PreviewBackoff:
     def mult(self) -> float:
         return self._mult
 
-    def on_window(self, drops: int, base_period_s: float) -> None:
-        """Feed one ~1s window's drop count (drop_cap + reset_ttl delta).
+    def on_window(self, drops: int, offered: int, base_period_s: float) -> None:
+        """Feed one ~1s window's loss (``drops`` = drop_cap + reset_ttl
+        delta) against the frames offered (``offered`` = opened +
+        drop_cap delta — every frame the governor was asked to admit).
 
         The multiplier is capped exactly where the effective period hits
         the 1 s ceiling for this base period — overshooting past the
-        floor would only lengthen recovery. 1-2 drops is a dead band.
+        floor would only lengthen recovery.
         """
         cap = max(1.0, self._MAX_PERIOD_S / max(base_period_s, 1e-6))
-        if drops >= self._BACKOFF_DROPS:
+        backoff_at = max(self._BACKOFF_MIN_DROPS, self._BACKOFF_FRACTION * offered)
+        recover_at = self._RECOVER_FRACTION * offered
+        if drops > backoff_at:
             self._mult = min(self._mult * self._BACKOFF_FACTOR, cap)
-        elif drops == 0:
+        elif drops <= recover_at:
             self._mult = max(self._mult / self._RECOVER_FACTOR, 1.0)
 
     def period(self, base_period_s: float) -> float:
@@ -287,7 +306,7 @@ class QuicTeleopChannel:
             os.environ.get("INTERLATENT_PREVIEW_ADAPTIVE", "1") != "0"
         )
         self._preview_backoff = PreviewBackoff()
-        self._vstats_last: Optional[tuple] = None  # (drop_cap, reset_ttl)
+        self._vstats_last: Optional[tuple] = None  # (open, drop_cap, reset_ttl)
         self._last_rx_at = 0.0  # viewer presence: any decoded target frame
         self._next_preview_due = 0.0  # credit deadline; see preview_due()
         self._preview_seq = 0
@@ -671,17 +690,23 @@ class QuicTeleopChannel:
         if not self._preview_adaptive or not self._video_enabled:
             return
         try:
+            open_ct = int(msg.get("open", 0))
             drop_cap = int(msg.get("drop_cap", 0))
             reset_ttl = int(msg.get("reset_ttl", 0))
         except (TypeError, ValueError):
             return
         last = self._vstats_last
-        self._vstats_last = (drop_cap, reset_ttl)
+        self._vstats_last = (open_ct, drop_cap, reset_ttl)
         if last is None:
             return  # first sample of this connection — baseline only
-        drops = max(0, drop_cap - last[0]) + max(0, reset_ttl - last[1])
+        d_open = max(0, open_ct - last[0])
+        d_cap = max(0, drop_cap - last[1])
+        drops = d_cap + max(0, reset_ttl - last[2])
+        # Offered = frames the governor was asked to admit this window:
+        # those it opened plus those it denied on the in-flight cap.
+        offered = d_open + d_cap
         before = self._preview_backoff.mult
-        self._preview_backoff.on_window(drops, self._preview_period_s)
+        self._preview_backoff.on_window(drops, offered, self._preview_period_s)
         after = self._preview_backoff.mult
         if after > before:
             _LOG.info(
