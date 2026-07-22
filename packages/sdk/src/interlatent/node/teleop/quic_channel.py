@@ -150,18 +150,24 @@ class PreviewBackoff:
     the configured rate) so a marginal link re-probes instead of
     flapping.
 
-    The backoff threshold is **proportional to the frames actually
-    offered** this window, not an absolute drop count. An absolute
-    threshold measures congestion against a fixed number regardless of
-    rate, so at 30 Hz × 3 cams (~90 offered/s) three stray denials —
-    3% loss, ordinary jitter — tripped a halving, and recovery required
-    a perfectly clean window; the multiplier then ratcheted down and
-    stayed there, parking the preview far below the link's real
-    capacity. Backing off only above ``max(3, 10% of offered)`` and
-    recovering on low-but-nonzero windows (<= 2% of offered) tracks the
-    link instead of collapsing toward the floor. The absolute floor of
-    3 keeps a couple of denials in a small (low-rate) window from
-    tripping it. The dead band between the two fractions holds steady.
+    The backoff signal is **TTL resets only** (frames that exceeded
+    INTERLATENT_QUIC_VIDEO_TTL_MS while in flight), never the
+    governor's admission denials (``drop_cap``). Admission denials are
+    the pacing mechanism, not congestion: with the in-flight cap the
+    timer intentionally over-offers and the governor discards, for
+    free, every frame that arrives while a slot is busy — delivered
+    fps then equals the link's completion rate. Counting those
+    denials as loss made the backoff strangle its own pacing loop:
+    any window where the timer outran completion tripped a halving,
+    recovery never fired (a busy link always shows collisions), and
+    the multiplier ratcheted the timer *below* the completion rate —
+    delivered fps fell while the link had headroom and every drop was
+    already free. A TTL reset, by contrast, means a frame sat in
+    flight past the freshness budget — the one unambiguous "link
+    cannot keep up" signal, already time-normalized by the TTL, so an
+    absolute threshold is correct: >= 2 stale frames in a window
+    halves the rate, a fully fresh window recovers a step, exactly 1
+    holds (dead band for a stray WiFi burp).
 
     The floor rate is 1 Hz (period ceiling 1 s): the operator's quad
     stays alive at negligible bandwidth while the configured
@@ -169,9 +175,7 @@ class PreviewBackoff:
     unit-tested.
     """
 
-    _BACKOFF_MIN_DROPS = 3
-    _BACKOFF_FRACTION = 0.10
-    _RECOVER_FRACTION = 0.02
+    _BACKOFF_STALE = 2
     _BACKOFF_FACTOR = 2.0
     _RECOVER_FACTOR = 1.25
     _MAX_PERIOD_S = 1.0
@@ -183,21 +187,17 @@ class PreviewBackoff:
     def mult(self) -> float:
         return self._mult
 
-    def on_window(self, drops: int, offered: int, base_period_s: float) -> None:
-        """Feed one ~1s window's loss (``drops`` = drop_cap + reset_ttl
-        delta) against the frames offered (``offered`` = opened +
-        drop_cap delta — every frame the governor was asked to admit).
+    def on_window(self, stale: int, base_period_s: float) -> None:
+        """Feed one ~1s window's TTL-reset delta.
 
         The multiplier is capped exactly where the effective period hits
         the 1 s ceiling for this base period — overshooting past the
         floor would only lengthen recovery.
         """
         cap = max(1.0, self._MAX_PERIOD_S / max(base_period_s, 1e-6))
-        backoff_at = max(self._BACKOFF_MIN_DROPS, self._BACKOFF_FRACTION * offered)
-        recover_at = self._RECOVER_FRACTION * offered
-        if drops > backoff_at:
+        if stale >= self._BACKOFF_STALE:
             self._mult = min(self._mult * self._BACKOFF_FACTOR, cap)
-        elif drops <= recover_at:
+        elif stale == 0:
             self._mult = max(self._mult / self._RECOVER_FACTOR, 1.0)
 
     def period(self, base_period_s: float) -> float:
@@ -699,20 +699,19 @@ class QuicTeleopChannel:
         self._vstats_last = (open_ct, drop_cap, reset_ttl)
         if last is None:
             return  # first sample of this connection — baseline only
-        d_open = max(0, open_ct - last[0])
         d_cap = max(0, drop_cap - last[1])
-        drops = d_cap + max(0, reset_ttl - last[2])
-        # Offered = frames the governor was asked to admit this window:
-        # those it opened plus those it denied on the in-flight cap.
-        offered = d_open + d_cap
+        # Only TTL resets (frames gone stale in flight) drive backoff;
+        # d_cap is the in-flight cap pacing the timer — free, expected,
+        # not congestion (see PreviewBackoff).
+        stale = max(0, reset_ttl - last[2])
         before = self._preview_backoff.mult
-        self._preview_backoff.on_window(drops, offered, self._preview_period_s)
+        self._preview_backoff.on_window(stale, self._preview_period_s)
         after = self._preview_backoff.mult
         if after > before:
             _LOG.info(
                 "teleop(quic) preview backing off to %.1f Hz "
-                "(video drops %d/1s) session=%s",
-                1.0 / self._effective_preview_period_s(), drops,
+                "(stale frames %d/1s, cap-paced %d/1s) session=%s",
+                1.0 / self._effective_preview_period_s(), stale, d_cap,
                 self._session_id,
             )
         elif after < before and after == 1.0:

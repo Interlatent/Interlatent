@@ -688,33 +688,19 @@ def test_preview_backoff_pure():
     base = 0.1  # 10 Hz configured
     assert b.period(base) == pytest.approx(base)
 
-    # Proportional threshold: at a busy 90-frame window a few drops are
-    # jitter, not congestion — up to max(3, 10% of offered) holds steady.
-    b.on_window(drops=3, offered=90, base_period_s=base)
-    assert b.period(base) == pytest.approx(base)   # 3 <= 9, no backoff
-    b.on_window(drops=9, offered=90, base_period_s=base)
-    assert b.period(base) == pytest.approx(base)   # exactly 10% still holds
-    b.on_window(drops=10, offered=90, base_period_s=base)
-    assert b.period(base) == pytest.approx(0.2)    # 10 > 9 -> back off
+    # A single TTL reset is a stray WiFi burp — the dead band holds.
+    b.on_window(stale=1, base_period_s=base)
+    assert b.period(base) == pytest.approx(base)
+    # Two frames stale in flight in one window -> halve.
+    b.on_window(stale=2, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2)
 
-    # Recovery on low-but-nonzero windows: <= 2% of offered decays /1.25,
-    # so a marginal link no longer needs a perfectly clean window to climb.
-    b.on_window(drops=1, offered=90, base_period_s=base)  # 1 <= 1.8 -> recover
+    # A fully fresh window decays /1.25 back toward the configured rate.
+    b.on_window(stale=0, base_period_s=base)
     assert b.period(base) == pytest.approx(0.2 / 1.25)
-    # Dead band between the two fractions holds (2..9 drops on a 90 window).
-    b.on_window(drops=5, offered=90, base_period_s=base)
+    # Dead band again: exactly one stale frame holds steady.
+    b.on_window(stale=1, base_period_s=base)
     assert b.period(base) == pytest.approx(0.2 / 1.25)
-
-
-def test_preview_backoff_absolute_floor_on_small_windows():
-    # On a small (low-rate) window the absolute floor of 3 dominates the
-    # 10% fraction, so a couple of denials never trip a halving.
-    b = qc.PreviewBackoff()
-    base = 0.1
-    b.on_window(drops=3, offered=10, base_period_s=base)
-    assert b.period(base) == pytest.approx(base)   # 3 not > max(3, 1)
-    b.on_window(drops=4, offered=10, base_period_s=base)
-    assert b.period(base) == pytest.approx(0.2)     # 4 > 3
 
 
 def test_preview_backoff_clamp_and_recovery():
@@ -724,7 +710,7 @@ def test_preview_backoff_clamp_and_recovery():
     # Backoff clamps exactly at the 1s period ceiling (1 Hz floor rate),
     # never overshooting past it (overshoot would only slow recovery).
     for _ in range(10):
-        b.on_window(drops=50, offered=90, base_period_s=base)
+        b.on_window(stale=50, base_period_s=base)
     assert b.period(base) == pytest.approx(1.0)
     assert b.mult == pytest.approx(10.0)  # 1.0s / 0.1s, not 2**n
 
@@ -732,7 +718,7 @@ def test_preview_backoff_clamp_and_recovery():
     # in ~10-11 clean windows from the floor (log1.25(10) ~= 10.3).
     clean = 0
     while b.mult > 1.0:
-        b.on_window(drops=0, offered=90, base_period_s=base)
+        b.on_window(stale=0, base_period_s=base)
         clean += 1
     assert 10 <= clean <= 12
     assert b.period(base) == pytest.approx(base)
@@ -741,7 +727,7 @@ def test_preview_backoff_clamp_and_recovery():
 def test_preview_backoff_base_slower_than_floor():
     # A configured rate at/below 1 Hz never gets slowed further.
     b = qc.PreviewBackoff()
-    b.on_window(drops=100, offered=200, base_period_s=1.0)
+    b.on_window(stale=100, base_period_s=1.0)
     assert b.period(1.0) == pytest.approx(1.0)
 
 
@@ -750,27 +736,28 @@ def _vstats(drop_cap: int, reset_ttl: int = 0, open_ct: int = 0) -> dict:
             "reset_ttl": reset_ttl, "dg_drop": 0}
 
 
-def test_vstats_proportional_no_backoff_on_clean_busy_window(channel):
-    # The regression: a busy 30 Hz x 3-cam window (~90 offered/s) with a
-    # handful of cap denials is ordinary jitter, not congestion — the
-    # proportional threshold (max(3, 10% of offered)) must hold the rate
-    # steady where the old absolute >=3 rule ratcheted it down.
+def test_vstats_cap_drops_never_back_off(channel):
+    # The regression: with the in-flight cap, admission denials
+    # (drop_cap) are the pacing mechanism — the timer over-offers, the
+    # governor discards the excess for free. Punishing them strangled
+    # the timer below the link's completion rate and recovery never
+    # fired (a paced link always shows collisions). Any amount of
+    # cap-pacing must hold the rate; only TTL resets back off.
     chan, sim, _ = channel
     _make_viewer_present(chan, sim)
     base = chan._preview_period_s
 
-    sim.ctrl(_vstats(drop_cap=0, open_ct=0))          # baseline sample
-    sim.ctrl(_vstats(drop_cap=6, open_ct=84))         # 6 drops / 90 offered
+    sim.ctrl(_vstats(drop_cap=0, open_ct=0))           # baseline sample
+    sim.ctrl(_vstats(drop_cap=60, open_ct=30))         # heavy cap pacing
     # Give the supervisor thread a beat to process, then assert no backoff.
     time.sleep(0.2)
     assert chan._preview_backoff.mult == pytest.approx(1.0)
     assert chan._effective_preview_period_s() == pytest.approx(base)
 
-    # Another ~90-frame window but past 10% loss (78 opened, 12 denied)
-    # does back off — the proportional rule still catches real congestion.
-    sim.ctrl(_vstats(drop_cap=6 + 12, open_ct=84 + 78))
+    # Two frames going stale in flight (TTL resets) does back off.
+    sim.ctrl(_vstats(drop_cap=60, open_ct=60, reset_ttl=2))
     _wait_for(lambda: chan._preview_backoff.mult == pytest.approx(2.0),
-              what="backoff on >10% loss")
+              what="backoff on stale frames")
 
 
 def test_vstats_backoff_and_deadline(channel):
@@ -778,8 +765,8 @@ def test_vstats_backoff_and_deadline(channel):
     _make_viewer_present(chan, sim)
     base = chan._preview_period_s
 
-    sim.ctrl(_vstats(0))  # baseline sample
-    sim.ctrl(_vstats(5))  # +5 drops in one window -> back off
+    sim.ctrl(_vstats(0))                 # baseline sample
+    sim.ctrl(_vstats(0, reset_ttl=5))    # +5 stale in one window -> back off
     _wait_for(lambda: chan._effective_preview_period_s()
               == pytest.approx(2 * base), what="backoff engaged")
 
@@ -794,12 +781,12 @@ def test_vstats_recovery_logs_once(channel, caplog):
     chan, sim, _ = channel
     _make_viewer_present(chan, sim)
     sim.ctrl(_vstats(0))
-    sim.ctrl(_vstats(4))
+    sim.ctrl(_vstats(0, reset_ttl=4))
     _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
     with caplog.at_level(logging.INFO, logger="interlatent.node.teleop.quic_channel"):
         # Repeated clean windows (cumulative counters unchanged) decay back.
         for _ in range(12):
-            sim.ctrl(_vstats(4))
+            sim.ctrl(_vstats(0, reset_ttl=4))
         _wait_for(lambda: chan._preview_backoff.mult == 1.0, what="recovery")
     recovered = [r for r in caplog.records if "recovered" in r.getMessage()]
     assert len(recovered) == 1
@@ -813,7 +800,8 @@ def test_vstats_malformed_and_stray_ignored(channel):
     sim.ctrl({"t": "bogus", "x": 1})  # unknown type -> ignored
     stray = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        stray.sendto(_quic_ipc.encode_ctrl(_vstats(999)), sim.parent_addr)
+        stray.sendto(_quic_ipc.encode_ctrl(_vstats(0, reset_ttl=999)),
+                     sim.parent_addr)
         time.sleep(0.2)
         assert chan._preview_backoff.mult == 1.0
     finally:
@@ -824,7 +812,7 @@ def test_vstats_reconnect_resets_baseline(channel):
     chan, sim, _ = channel
     _make_viewer_present(chan, sim)
     sim.ctrl(_vstats(0))
-    sim.ctrl(_vstats(100))
+    sim.ctrl(_vstats(0, reset_ttl=100))
     _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
     mult = chan._preview_backoff.mult
 
@@ -835,7 +823,7 @@ def test_vstats_reconnect_resets_baseline(channel):
     _wait_for(lambda: not chan.connected, what="disconnected")
     sim.ctrl({"t": "connected"})
     _wait_for(lambda: chan.connected, what="reconnected")
-    sim.ctrl(_vstats(2))
+    sim.ctrl(_vstats(0, reset_ttl=2))
     time.sleep(0.2)
     assert chan._preview_backoff.mult == pytest.approx(mult)
 
@@ -856,7 +844,7 @@ def test_vstats_adaptive_kill_switch(monkeypatch):
     try:
         _make_viewer_present(chan, sim)
         sim.ctrl(_vstats(0))
-        sim.ctrl(_vstats(500))
+        sim.ctrl(_vstats(0, reset_ttl=500))
         time.sleep(0.2)
         assert chan._effective_preview_period_s() == chan._preview_period_s
         assert chan._preview_backoff.mult == 1.0
