@@ -185,9 +185,25 @@ class _WTClientProtocol(QuicConnectionProtocol):
                 self._quic._streams_queue.remove(stream)
             except ValueError:
                 pass
+            # The H3 layer keeps its own per-stream entry (~200 B) that is
+            # also never collected — prune it alongside the QUIC one.
+            try:
+                self._http._stream.pop(sid, None)
+            except Exception:
+                pass
             return True
         except Exception:
             return True
+
+    def quic_stream_count(self) -> int:
+        """Live size of aioquic's per-connection stream dict — the gauge for
+        the send-only-uni-stream leak. Healthy: bounded near the video
+        in-flight cap. Growing at ~frame rate: the discard path is not
+        running (old code, or the private attrs moved)."""
+        try:
+            return len(self._quic._streams)
+        except Exception:
+            return -1
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ConnectionTerminated):
@@ -243,6 +259,9 @@ class WebTransportSession:
 
     def discard_uni_stream(self, sid: int) -> bool:
         return self._proto.discard_uni_stream(sid)
+
+    def quic_stream_count(self) -> int:
+        return self._proto.quic_stream_count()
 
     def datagrams_dropped(self) -> int:
         """Cumulative outbound datagrams shed by drop-don't-queue."""

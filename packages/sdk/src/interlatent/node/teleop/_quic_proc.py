@@ -302,6 +302,10 @@ def _vstats_payload(
         dg_drop = wt.datagrams_dropped() if wt is not None else 0  # type: ignore[attr-defined]
     except Exception:
         dg_drop = 0
+    try:
+        qs = wt.quic_stream_count() if wt is not None else 0  # type: ignore[attr-defined]
+    except Exception:
+        qs = -1
     return {
         "t": "vstats",
         "open": gov.opened,
@@ -309,6 +313,10 @@ def _vstats_payload(
         "drop_cap": gov.dropped_cap,
         "reset_ttl": gov.reset_ttl,
         "dg_drop": int(dg_drop),
+        # Gauge (not cumulative): live aioquic stream-dict size. Bounded ≈
+        # the in-flight cap when the discard path is working; growing at
+        # frame rate = the send-only-uni-stream leak is back.
+        "qs": int(qs),
     }
 
 
@@ -448,6 +456,10 @@ async def _stats_loop(link: _ParentLink) -> None:
             dg_drop = wt.datagrams_dropped() if wt is not None else last_dg_drop
         except Exception:
             dg_drop = last_dg_drop
+        try:
+            qs = wt.quic_stream_count() if wt is not None else 0
+        except Exception:
+            qs = -1
         if (
             rx != last_rx or tx != last_tx or video != last_video
             or dg_drop != last_dg_drop
@@ -455,9 +467,9 @@ async def _stats_loop(link: _ParentLink) -> None:
             dv = tuple(a - b for a, b in zip(video, last_video))
             _LOG.info(
                 "quic-proc pumped (%.0fs): parent->relay=%d relay->parent=%d "
-                "video: open=%d fin=%d drop_cap=%d reset_ttl=%d dg_drop=%d",
+                "video: open=%d fin=%d drop_cap=%d reset_ttl=%d dg_drop=%d qs=%d",
                 _STATS_LOG_PERIOD_S, rx - last_rx, tx - last_tx,
-                dv[0], dv[1], dv[2], dv[3], dg_drop - last_dg_drop,
+                dv[0], dv[1], dv[2], dv[3], dg_drop - last_dg_drop, qs,
             )
         last_rx, last_tx = rx, tx
         last_video = video

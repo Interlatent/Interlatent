@@ -922,11 +922,22 @@ def test_vstats_payload_pure():
         def datagrams_dropped(self):
             return 9
 
+        def quic_stream_count(self):
+            return 4
+
     msg = _quic_proc._vstats_payload(_Gov(), _WT())
     assert msg == {"t": "vstats", "open": 7, "fin": 6, "drop_cap": 3,
-                   "reset_ttl": 1, "dg_drop": 9}
+                   "reset_ttl": 1, "dg_drop": 9, "qs": 4}
     # No live WT session (or a broken counter) degrades to 0, never raises.
-    assert _quic_proc._vstats_payload(_Gov(), None)["dg_drop"] == 0
+    no_wt = _quic_proc._vstats_payload(_Gov(), None)
+    assert no_wt["dg_drop"] == 0
+    assert no_wt["qs"] == 0
+
+    class _BrokenWT:
+        def datagrams_dropped(self):
+            raise RuntimeError("boom")
+
+    assert _quic_proc._vstats_payload(_Gov(), _BrokenWT())["qs"] == -1
     kind, payload = _quic_ipc.parse(_quic_ipc.encode_ctrl(msg))
     assert kind == _quic_ipc.TYPE_CTRL
     assert _quic_ipc.parse_ctrl(payload) == msg
