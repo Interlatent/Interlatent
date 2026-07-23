@@ -21,8 +21,8 @@ def mint_teleop_token(
 ) -> dict:
     """POST the teleop-token endpoint and return the full response JSON.
 
-    Raises on any non-2xx. The response includes ``ws_url``, ``token``, and
-    (Phase 2) ``transport`` + ``webtransport_url``.
+    Raises on any non-2xx. The response includes ``token``, ``transport``, and
+    ``webtransport_url`` (teleop runs over QUIC/WebTransport).
     """
     import httpx
 

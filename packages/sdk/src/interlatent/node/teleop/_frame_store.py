@@ -5,8 +5,8 @@ as absent so a frozen browser can't keep the arm moving) and the sticky operator
 e-stop latch (set at decode, cleared only by :meth:`consume_estop`, surviving
 staleness and reconnects) are **safety-critical and must be byte-identical
 across transports** (ADR 0016). :class:`LatestFrameStore` is the single
-implementation; both `TeleopChannel` (WS) and `QuicTeleopChannel` (QUIC) inherit
-it, so the two paths can never drift.
+implementation; `QuicTeleopChannel` inherits it, keeping the staleness/estop
+semantics in one place (and ready for any future transport to share).
 """
 from __future__ import annotations
 
