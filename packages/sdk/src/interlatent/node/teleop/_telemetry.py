@@ -1,12 +1,10 @@
 """Shared teleop arrival telemetry.
 
-Both channels (`channel.TeleopChannel` over WS, `quic_channel.QuicTeleopChannel`
-over QUIC) track the inter-arrival gaps of target frames — the node-observable
-half of teleop latency (relay→node jitter and any retarget-stage stalls). The
-gap math and its rolling window are identical; only the summary log line differs
-(each transport appends its own preview counters). :class:`ArrivalTracker` owns
-the shared accounting and hands the caller a summary dict once per window; the
-caller formats and logs it.
+The QUIC channel (`quic_channel.QuicTeleopChannel`) tracks the inter-arrival
+gaps of target frames — the node-observable half of teleop latency (relay→node
+jitter and any in-browser-solver stalls). :class:`ArrivalTracker` owns the
+accounting and hands the caller a summary dict once per window; the caller
+formats and logs it.
 """
 from __future__ import annotations
 

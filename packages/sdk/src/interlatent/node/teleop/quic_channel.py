@@ -1,13 +1,12 @@
 """Node-side QUIC/WebTransport teleop channel.
 
-The low-latency counterpart to :class:`~.channel.TeleopChannel`: instead of a
-WebSocket to the pod relay, it opens a WebTransport session to the co-located
+The node's teleop transport: it opens a WebTransport session to the co-located
 QUIC relay and consumes **unreliable datagrams** carrying ``mode="targets"``
-frames the browser already IK-solved. Exposes the exact surface the control
-loop uses (``latest_frame`` / ``send_state`` / ``connected`` / ``start`` /
-``stop``), so ``daemon._start_loop`` swaps it in with zero control-loop change.
+frames the browser already IK-solved. Exposes the surface the control loop uses
+(``latest_frame`` / ``send_state`` / ``connected`` / ``start`` / ``stop``), so
+the daemon drives it without any transport-specific control-loop code.
 
-Differences from the WS channel, by design:
+Design notes:
   * targets arrive as duplicated datagrams; we dedupe by ``seq`` (latest-wins)
     so a late duplicate can't clobber a newer frame (drop-don't-buffer).
   * ``send_state`` streams the robot's live joint vector back **to the browser**
@@ -55,17 +54,37 @@ from .. import _env
 from . import _quic_ipc
 from ._frame_store import LatestFrameStore
 from ._telemetry import ArrivalTracker
-from .channel import (
-    _RECONNECT_INITIAL_S,
-    _RECONNECT_MAX_S,
-    _STATE_SEND_PERIOD_S,
-    _STATS_LOG_PERIOD_S,
-    _VIEWER_PRESENCE_S,
-    _preview_period_s,
-)
 from .frame import TeleopFrame, frame_with_header
 
 _LOG = logging.getLogger(__name__)
+
+# Reconnect/child-respawn backoff between dropped connections. Teleop can fail
+# for boring reasons (GPU box bounced, NAT timeout) and the operator might
+# engage again at any moment, so we keep retrying.
+_RECONNECT_INITIAL_S = 1.0
+_RECONNECT_MAX_S = 15.0
+
+# Node→browser state heartbeat rate. Tiny frames, RTT-bound; 15 Hz keeps the
+# browser's IK seed fresh without competing with control/preview traffic.
+_STATE_SEND_PERIOD_S = 1.0 / 15.0
+
+# Period of the rolling frame-arrival latency summary (INFO). Matches the
+# relay's 5s browser-frame summaries so the logs line up.
+_STATS_LOG_PERIOD_S = 5.0
+
+
+# Live-preview push rate (node→browser, small downscaled JPEGs). The cadence is
+# the dominant term in perceived video latency (mean staleness ≈ half the
+# period), so it's tunable per node via INTERLATENT_PREVIEW_HZ. Clamped to
+# [1, 30]; the control loop can't produce more than its tick rate anyway.
+def _preview_period_s() -> float:
+    return 1.0 / _env.env_float("INTERLATENT_PREVIEW_HZ", 10.0, 1.0, 30.0)
+
+
+# A viewer is "present" while browser frames keep arriving (the overlay sends
+# keepalives even when disengaged). No frames for this long ⇒ nobody is
+# watching ⇒ stop burning uplink on previews.
+_VIEWER_PRESENCE_S = 5.0
 
 # Duplicate each outbound state datagram this many times (loss tolerance).
 _STATE_DUP = 2
@@ -242,11 +261,11 @@ def decode_target_datagram(data: bytes) -> Optional[TeleopFrame]:
 
 
 class QuicTeleopChannel(LatestFrameStore):
-    """WebTransport/QUIC teleop channel with the TeleopChannel surface.
+    """WebTransport/QUIC teleop channel.
 
     Inherits the thread-safe latest-frame + sticky-estop store
     (:class:`LatestFrameStore`) so ``latest_frame``/``consume_estop`` and the
-    staleness/estop semantics are byte-identical to the WS channel (ADR 0016).
+    staleness/estop semantics live in one place (ADR 0016).
     """
 
     def __init__(

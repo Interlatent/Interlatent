@@ -611,16 +611,16 @@ class NodeDaemon:
             synchronous=self.cfg.synchronous,
         )
 
-        # Hosted teleop receiver. The TeleopChannel owns a background WS
-        # to the GPU-box relay for the session lifetime (idle when no producer
-        # is engaged); the control loop reads the latest frame and overrides the
-        # policy when engaged. We use ``drtc_api_key`` because the teleop-token
-        # endpoint is owned by the user, not the node — the node token is
-        # rejected by the relay's auth. Skipped (teleop disabled) when no user
-        # key or session id is available.
-        # The factory picks WS vs QUIC/WebTransport from the backend's
-        # ``transport`` flag (returned in the teleop-token response). Both
-        # channels expose the same surface, so the control loop is unchanged.
+        # Hosted teleop receiver. The QUIC channel owns a background
+        # WebTransport session to the co-located relay for the session lifetime
+        # (idle when no producer is engaged); the control loop reads the latest
+        # frame and overrides the policy when engaged. We use ``drtc_api_key``
+        # because the teleop-token endpoint is owned by the user, not the node —
+        # the node token is rejected by the relay's auth. Skipped (teleop
+        # disabled) when no user key or session id is available.
+        # The factory returns a QUIC channel when the deployment is
+        # QUIC-configured, else None (teleop unavailable — the control loop
+        # handles a None channel).
         from .teleop.factory import make_teleop_channel
 
         teleop_channel = None
@@ -644,7 +644,8 @@ class NodeDaemon:
                 # browser from the installed interlatent[<kind>] data.
                 robot_kind=self.cfg.robot_kind,
             )
-            teleop_channel.start()
+            if teleop_channel is not None:
+                teleop_channel.start()
 
         loop_fn = self._resolve_loop_fn()
         handle = _ControlLoopHandle(client=client, teleop_channel=teleop_channel)

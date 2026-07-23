@@ -1,7 +1,7 @@
 """Shared env-var parsing for node knobs.
 
 One clamp-parse surface for the whole node, replacing the copies that used to
-live in each leaf (`_quic_proc._env_int`, `channel._preview_period_s`,
+live in each leaf (`_quic_proc._env_int`, `quic_channel._preview_period_s`,
 `control._preview_max_dim`/`_preview_jpeg_quality`). Every knob read through
 these helpers is recorded in a process-local registry, so a process can log all
 of its non-default overrides in one place (:func:`overrides`) instead of a
