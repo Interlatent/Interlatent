@@ -278,7 +278,7 @@ q70; ~4–6 KB at q50). Example: 24 Hz × 3 cams × 6 KB ≈ 430 KiB/s
 
 | Env var | Default | Effect on bandwidth / latency |
 |---|---|---|
-| `INTERLATENT_PREVIEW_HZ` | `10` (clamp 1–30) | Per-camera frame-rate **ceiling**. Linear in bandwidth. Mean perceived video staleness ≈ half the period, so this is also the dominant smoothness knob. |
+| `INTERLATENT_PREVIEW_HZ` | `30` (clamp 1–30) | Per-camera frame-rate **ceiling**. Linear in bandwidth. Mean perceived video staleness ≈ half the period, so this is also the dominant smoothness knob. |
 | `INTERLATENT_PREVIEW_MAX_DIM` | `320` (64–1280) | Long-side downscale before JPEG encode. Bytes scale ~quadratically with dimension: 640 px is ~4× the bits of 320 px. Live-dialable (read per frame). |
 | `INTERLATENT_PREVIEW_JPEG_QUALITY` | `70` (10–95) | JPEG q. q50 ≈ 25–30 % smaller than q70; above ~q85 bytes balloon fast. Live-dialable. |
 | `INTERLATENT_QUIC_VIDEO` | `1` | Kill switch: `0` sends **zero** preview bytes (control unaffected). |

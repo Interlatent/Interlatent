@@ -302,7 +302,7 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 | `INTERLATENT_NODE_CONFIG` | Path to the node config TOML (default `~/.interlatent/node.toml`). |
 | `INTERLATENT_CALIB_PRESET` | Force or disable a joint-calibration preset (e.g. `so101_pre777`, or `none`). |
 | `INTERLATENT_JPEG_BACKEND` | Force the frame encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). See [node encoding](docs/node-encoding.md). |
-| `INTERLATENT_PREVIEW_HZ` | Live teleop preview push rate (1-30, default 10). Competes with recording/teleop for uplink — see [node encoding](docs/node-encoding.md). |
+| `INTERLATENT_PREVIEW_HZ` | Live teleop preview push rate (1-30, default 30). Competes with recording/teleop for uplink — see [node encoding](docs/node-encoding.md). |
 
 ## Supported robots
 

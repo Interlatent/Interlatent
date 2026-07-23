@@ -78,7 +78,7 @@ _STATS_LOG_PERIOD_S = 5.0
 # period), so it's tunable per node via INTERLATENT_PREVIEW_HZ. Clamped to
 # [1, 30]; the control loop can't produce more than its tick rate anyway.
 def _preview_period_s() -> float:
-    return 1.0 / _env.env_float("INTERLATENT_PREVIEW_HZ", 10.0, 1.0, 30.0)
+    return 1.0 / _env.env_float("INTERLATENT_PREVIEW_HZ", 30.0, 1.0, 30.0)
 
 
 # A viewer is "present" while browser frames keep arriving (the overlay sends
