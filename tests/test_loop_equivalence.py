@@ -32,6 +32,7 @@ from typing import Callable
 import numpy as np
 import pytest
 
+from _frozen.axol_loop_pre_bus import control_loop as frozen_axol
 from _frozen.lerobot_loop_pre_bus import lerobot_control_loop as frozen_lerobot
 from _frozen.nori_loop_pre_bus import control_loop as frozen_nori
 from _frozen.yam_loop_pre_bus import control_loop as frozen_yam
@@ -127,11 +128,16 @@ class LoopPair:
         return getattr(importlib.import_module(mod_name), fn_name)
 
     @property
+    def teleop_capable(self) -> bool:
+        """No RobotProfile ⇒ no SafetyGate ⇒ the teleop/e-stop machinery never
+        engages (ADR 0011:111) — true for Axol today."""
+        return get_profile(self.robot_kind) is not None
+
+    @property
     def action_keys(self) -> list:
         profile = get_profile(self.robot_kind)
-        assert profile is not None, (
-            "equivalence scenarios need a teleop profile for %r" % self.robot_kind
-        )
+        if profile is None:
+            return [f"joint_{i}.pos" for i in range(6)]
         return [f"{n}.pos" for n in profile.joint_names]
 
 
@@ -144,6 +150,12 @@ PAIRS = [
     LoopPair("nori", "nori", frozen_nori,
              "interlatent.adapters.nori.loop:control_loop",
              "interlatent.adapters.nori.robot", robot_cls=NoriEquivRobot),
+    # Axol has no RobotProfile: both generations must ignore the teleop
+    # channel entirely, so even the teleop/e-stop scenarios compare pure
+    # policy/hold behavior — that indifference is itself the contract.
+    LoopPair("axol", "axol", frozen_axol,
+             "interlatent.adapters.axol.loop:control_loop",
+             "interlatent.adapters.axol.robot"),
 ]
 
 
@@ -360,10 +372,17 @@ def test_frozen_loop_is_actually_exercising_motion(pair, monkeypatch):
             ticks=len(frames), client_action=client_action,
         )
         seen.update(trace.events)
-    for required in ("send", "gate.step", "gate.latch", "flush",
-                     "capture:policy", "capture:teleop", "capture:hold"):
-        assert required in seen, (
+    required = ("send", "capture:policy", "capture:hold")
+    if pair.teleop_capable:
+        required += ("gate.step", "gate.latch", "flush", "capture:teleop")
+    else:
+        assert "capture:teleop" not in seen and "gate.step" not in seen, (
+            "%s has no RobotProfile yet its frozen loop drove teleop — the "
+            "pair table is stale" % pair.name
+        )
+    for event in required:
+        assert event in seen, (
             "no scenario produced %r on the frozen side for %s — the matrix "
             "has a hole and the equivalence assertions are weaker than they "
-            "look" % (required, pair.name)
+            "look" % (event, pair.name)
         )

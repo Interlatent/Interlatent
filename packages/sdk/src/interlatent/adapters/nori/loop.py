@@ -27,15 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-import numpy as np
-
 _logger = logging.getLogger(__name__)
-
-
-def _dict_coerce(action: np.ndarray, action_keys: list) -> dict:
-    """Identity frame: Nori has no calibration affine — a plain name→value zip
-    in the daemon-normalized units. (Contrast the engine LeRobot path.)"""
-    return {k: float(action[i]) for i, k in enumerate(action_keys)}
 
 
 def control_loop(
@@ -65,7 +57,7 @@ def control_loop(
     """
     from interlatent.node import control as _ctrl
     from interlatent.node.looprunner import run_control_loop
-    from interlatent.node.movement import CommandBus, WireHelpers
+    from interlatent.node.movement import CommandBus, WireHelpers, dict_coerce
     from interlatent.node.teleop_profiler import NodeTeleopProfiler
 
     from .config import build_adapter_config
@@ -138,7 +130,7 @@ def control_loop(
         helpers=WireHelpers(
             extract=_ctrl._extract_joint_state,
             clamp=_ctrl._clamp_action_delta,
-            coerce=_dict_coerce,
+            coerce=dict_coerce,
             encode=lambda o: _ctrl._encode_npz(
                 _ctrl._to_policy_schema(o), image_resize=image_resize
             ),

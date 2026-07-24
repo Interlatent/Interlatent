@@ -1,25 +1,29 @@
 """Native Axol DRTC control loop (the ``--robot axol`` / registry entry point).
 
 A standalone control-loop function in the shape the node daemon invokes
-(``import_callable`` → ``loop_fn(**kwargs)``). It drives the robot through the
-native :class:`~interlatent.adapters.axol.robot.AxolNativeRobot` and reuses the
-LeRobot-free DRTC wire helpers from :mod:`interlatent.node.control` so the
-observation payload and recording are byte-identical to the built-in loop.
+(``import_callable`` → ``loop_fn(**kwargs)``). A thin shim now: it constructs
+the native :class:`~interlatent.adapters.axol.robot.AxolNativeRobot`, wires a
+full-motion :class:`~interlatent.node.movement.CommandBus`, and hands the tick
+to :func:`~interlatent.node.looprunner.run_control_loop`.
 
 Scope: inference + per-tick recording (``control_source="policy"``), plus the
 policy-less hold path (``control_source="hold"``) a teleop-recording assignment
 needs. Teleop itself is intentionally not wired (no SafetyGate/RobotProfile for
-Axol yet); the ``teleop_channel`` kwarg is accepted and ignored, so a recording
-here captures a held pose rather than human-driven motion.
+Axol yet, ADR 0011:111): the ``teleop_channel`` kwarg is accepted and dropped
+before the bus ever sees it, so a recording here captures a held pose rather
+than human-driven motion. Wiring Axol teleop later is exactly one step —
+register a RobotProfile and stop dropping the channel; the bus already owns the
+rest of the path.
+
+Tick-for-tick equivalence with the pre-migration inline loop is pinned by
+``tests/test_loop_equivalence.py`` against the frozen copy in
+``tests/_frozen/axol_loop_pre_bus.py``.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Callable, Optional
-
-import numpy as np
 
 _logger = logging.getLogger(__name__)
 
@@ -35,7 +39,7 @@ def control_loop(
     robot_cameras: Optional[dict[str, str]] = None,
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
-    teleop_channel: Any = None,  # accepted, ignored (no teleop for Axol yet)
+    teleop_channel: Any = None,  # accepted, dropped (no teleop for Axol yet)
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
     bypass_key: Optional[str] = None,
@@ -54,6 +58,8 @@ def control_loop(
     # Canonical wire helpers. (The ZED cameras pull in lerobot via the native
     # almond_axol camera classes; the node.control helpers themselves do not.)
     from interlatent.node import control as _ctrl
+    from interlatent.node.looprunner import run_control_loop
+    from interlatent.node.movement import CommandBus, WireHelpers, dict_coerce
 
     from .config import build_adapter_config
     from .robot import AxolNativeRobot
@@ -68,7 +74,6 @@ def control_loop(
 
     session_id = session.get("id", "")
     fps = int(session.get("fps", 30) or 30)
-    period = 1.0 / fps if fps > 0 else 1.0 / 30.0
 
     robot.connect()
     action_keys = robot.action_features
@@ -82,81 +87,54 @@ def control_loop(
     # loop via --robot.max_step. Unset ⇒ disabled (the helper logs it).
     _max_step = _ctrl._parse_max_step(robot_extra or {})
 
-    features_reported = False
-    features_report_attempts = 0
-    step_counter = 0
+    # No gate (no RobotProfile), no smoother (Axol has never run one — adding
+    # it would change motion on hardware, which a migration must not), and the
+    # teleop channel is dropped here so the bus cannot sample frames or consume
+    # the channel's e-stop latch a path Axol doesn't have.
+    command_bus = CommandBus(
+        teleop_channel=None,
+        teleop_gate=None,
+        teleop_profile=None,
+        policy_enabled=policy_enabled,
+        robot=robot,
+        client=client,
+        action_keys=list(action_keys),
+        helpers=WireHelpers(
+            extract=_ctrl._extract_joint_state,
+            clamp=_ctrl._clamp_action_delta,
+            coerce=dict_coerce,
+            encode=lambda o: _ctrl._encode_npz(
+                _ctrl._to_policy_schema(o), image_resize=image_resize
+            ),
+        ),
+        max_step=_max_step,
+        action_filter=None,
+    )
+
+    def _capture(obs, action, step, *, control_source=None):
+        return _ctrl._capture_tick(
+            client, obs, action, step, control_source=control_source
+        )
+
+    def _report(state_keys, act_keys):
+        # No teleop_profile: Axol reports feature names only (ADR 0003).
+        return _ctrl._report_robot_features(
+            api_base, node_id, api_key, state_keys, act_keys,
+            bypass_key=bypass_key,
+        )
+
     try:
-        while not should_stop():
-            loop_start = time.perf_counter()
-            obs = robot.get_observation()
-
-            state_keys = None
-            if not policy_enabled:
-                # --- HOLD PATH (teleop recording, no policy loaded) ---
-                # Send nothing (the motors hold) but record every tick so the
-                # episode stays continuous. Axol has no teleop path yet (no
-                # RobotProfile ⇒ no SafetyGate, ADR 0011:111), so a policy-less
-                # assignment is hold-only here — never "policy".
-                actual_joints = _ctrl._extract_joint_state(obs, action_keys)
-                state_keys = _ctrl._capture_tick(
-                    client, obs, actual_joints, step_counter, control_source="hold"
-                )
-                step_counter += 1
-            else:
-                # Encode lazily — client.step() only builds the payload on ticks
-                # where DRTC actually sends an observation.
-                action = client.step(
-                    lambda o=obs: _ctrl._encode_npz(
-                        _ctrl._to_policy_schema(o), image_resize=image_resize
-                    ),
-                    codec="npz",
-                )
-
-                if action is not None:
-                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-                    # Execution-safety delta clamp (+ DRTC-DEBUG glass-box log),
-                    # mirroring node/control.py. A huge delta on the first policy
-                    # command is the slam: the arm leaps from its current pose to
-                    # the model's absolute target.
-                    if action_keys:
-                        actual_joints = _ctrl._extract_joint_state(obs, action_keys)
-                        action_arr = _ctrl._clamp_action_delta(
-                            action_arr, actual_joints, _max_step, action_keys,
-                            step_counter, source="policy",
-                        )
-                    # Build the joint-target dict directly (the 16 *.pos keys in
-                    # order) — no SO101 calibration coercion for Axol.
-                    action_dict = {
-                        k: float(action_arr[i]) for i, k in enumerate(action_keys)
-                    }
-                    robot.send_action(action_dict)
-                    state_keys = _ctrl._capture_tick(
-                        client, obs, action_arr, step_counter, control_source="policy"
-                    )
-                    step_counter += 1
-
-            # One-time feature-element-names report (ADR 0003). state_keys come
-            # from the first capture so they align with observation.state.
-            if (
-                state_keys is not None
-                and not features_reported
-                and features_report_attempts < 5
-            ):
-                features_report_attempts += 1
-                if _ctrl._report_robot_features(
-                    api_base, node_id, api_key, state_keys, action_keys,
-                    bypass_key=bypass_key,
-                ):
-                    features_reported = True
-
-            elapsed = time.perf_counter() - loop_start
-            if elapsed < period:
-                time.sleep(period - elapsed)
+        run_control_loop(
+            robot=robot,
+            bus=command_bus,
+            should_stop=should_stop,
+            fps=fps,
+            action_keys=list(action_keys),
+            capture_fn=_capture,
+            teleop_channel=None,
+            report_features_fn=_report,
+        )
     finally:
-        try:
-            robot.disconnect()
-        except Exception:  # noqa: BLE001
-            _logger.warning("AxolNativeRobot disconnect failed", exc_info=True)
         _logger.info(
             "Native Axol loop exiting for session %s; daemon's client.close() "
             "flushes the recorder queue and triggers server-side upload.",

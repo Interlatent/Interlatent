@@ -130,6 +130,14 @@ class WireHelpers:
     encode: Callable[[dict], bytes]
 
 
+def dict_coerce(action: np.ndarray, action_keys: list) -> dict:
+    """The identity :attr:`WireHelpers.coerce` for robots with no calibration
+    frame: a plain name→value zip in the robot's native units. Callers whose
+    policy commands in a different frame (the engine LeRobot path and its
+    OLD→NEW affine) inject their own coerce instead."""
+    return {k: float(action[i]) for i, k in enumerate(action_keys)}
+
+
 @dataclass(frozen=True)
 class TeleopReadiness:
     """Precomputed teleop-side inputs the arbiter needs, so the decision itself
