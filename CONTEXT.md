@@ -99,8 +99,10 @@ Vendor-specific and dependency-heavy, so it is optional (`interlatent[axol]`,
 `interlatent[yam]`) and imported lazily — the base install never loads it. _Avoid_:
 overloading "adapter" for a server-side policy backend, a collection `--loop`
 adapter, or a LoRA adapter. Vendor adapters today: **axol** (Almond Axol, native
-async SDK) and **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
-directly — not raiden — joint-space only, configurable left/right/both followers).
+async SDK), **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
+directly — not raiden — joint-space only, configurable left/right/both followers),
+and **nori** (bimanual arms behind a supervising daemon reached over an NDJSON
+wire protocol, with a liveness-tied keep-alive pump and a robot-side safety latch).
 See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md).
 
 **Action interface**:
@@ -198,7 +200,11 @@ adapter's session client; the control loop and DRTC client never see it.
 
 **E-stop ingress (teleop)**:
 An additive `estop: true` field on the teleop wire frame — the operator's hard
-stop. On receipt the control loop latches the **SafetyGate** (all robots); the
+stop. On receipt the control loop latches the **SafetyGate**, and thereafter
+re-reads that **latch** (not the frame flag) every tick: the flag is transient
+and the channel's sticky latch is one-shot, so a loop that branched on the event
+would resume driving on the next tick. Every teleop-capable loop owes this;
+Axol has no `RobotProfile` yet, so it has no gate to latch (ADR 0011). The
 Nori loop additionally sends the daemon's `command{name:"estop"}`, which
 hard-latches robot-side. Clearing is never automatic and never the control
 loop's job: for Nori it is an explicit `--reset-latch` act on `--robot nori`,

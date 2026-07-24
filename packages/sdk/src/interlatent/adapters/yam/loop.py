@@ -170,6 +170,27 @@ def control_loop(
             frame = teleop_channel.latest_frame() if teleop_channel is not None else None
             engaged = bool(frame and frame.engaged and frame.deadman)
 
+            # --- OPERATOR E-STOP (ADR 0016; mirrors node/control.py) ---
+            # Sticky channel latch first (it survives the 250 ms frame
+            # staleness rule and reconnects), then the live frame flag.
+            # Latching the SafetyGate is robot-agnostic and every loop owes
+            # it; YAM has no hardware latch to forward on top (unlike Nori).
+            # Clearing is a human act, never this loop's.
+            _consume_estop = getattr(teleop_channel, "consume_estop", None)
+            estop_hit = bool(frame and frame.estop) or bool(
+                _consume_estop is not None and _consume_estop()
+            )
+            if (
+                estop_hit
+                and teleop_gate is not None
+                and not teleop_gate.config.estop_latched
+            ):
+                teleop_gate.latch_estop("teleop_frame")
+                _logger.warning(
+                    "Operator e-stop received — SafetyGate latched; motion and "
+                    "capture suspended until an explicit reset."
+                )
+
             state_keys = None
             teleop_ok = (
                 engaged
@@ -177,7 +198,26 @@ def control_loop(
                 and action_keys
                 and len(action_keys) == len(teleop_profile.joint_names)
             )
-            if teleop_ok:
+            # Read the LATCH, not the event: consume_estop() is one-shot and
+            # frame.estop only holds while the operator's frames say so, so a
+            # loop that branched on `estop_hit` would resume driving on the very
+            # next tick. This sits ABOVE every movement source.
+            estop_latched = (
+                teleop_gate is not None and teleop_gate.config.estop_latched
+            )
+            if estop_latched:
+                # --- E-STOP LATCHED PATH (ADR 0016) ---
+                # No motion, no capture. Queued policy chunks are dropped so
+                # nothing stale fires on reset; the smoother is reset so a
+                # post-reset resume warm-starts from the live pose. The gate
+                # stays latched until an explicit human reset outside this loop.
+                try:
+                    client.schedule.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+                if action_filter is not None:
+                    action_filter.reset()
+            elif teleop_ok:
                 # --- TELEOP PATH (mode="targets" only; see control.py) ---
                 actual_joints = _ctrl._extract_joint_state(obs, action_keys)
                 if (
@@ -274,6 +314,19 @@ def control_loop(
                     # recorded action is the smoothed command actually sent.
                     if action_filter is not None:
                         action_arr = action_filter.filter(action_arr)
+                    # Execution-safety delta clamp (+ DRTC-DEBUG glass-box log),
+                    # mirroring node/control.py. A huge delta on the first policy
+                    # command is the slam: the arm leaps from its current pose to
+                    # the model's absolute target. The robot's own per-step clamp
+                    # inside send_action stays the final guard; this one is
+                    # source-agnostic and logs, so policy and teleop are bounded
+                    # by the same knob.
+                    if action_keys:
+                        actual_joints = _ctrl._extract_joint_state(obs, action_keys)
+                        action_arr = _ctrl._clamp_action_delta(
+                            action_arr, actual_joints, _max_step, action_keys,
+                            step_counter, source="policy",
+                        )
                     action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                     robot.send_action(action_dict)
                     _cmd_at = time.perf_counter()
@@ -336,6 +389,7 @@ def control_loop(
                 frame_age_ms=_frame_age_ms,
                 engaged=engaged,
                 teleop_ok=teleop_ok,
+                estop=estop_latched,
                 over_period=elapsed >= period,
             )
             if elapsed < period:

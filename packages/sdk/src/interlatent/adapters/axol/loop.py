@@ -6,9 +6,11 @@ native :class:`~interlatent.adapters.axol.robot.AxolNativeRobot` and reuses the
 LeRobot-free DRTC wire helpers from :mod:`interlatent.node.control` so the
 observation payload and recording are byte-identical to the built-in loop.
 
-Scope: inference + per-tick recording (``control_source="policy"``). Teleop
-is intentionally not wired (no SafetyGate/RobotProfile for Axol yet); the
-``teleop_channel`` kwarg is accepted and ignored.
+Scope: inference + per-tick recording (``control_source="policy"``), plus the
+policy-less hold path (``control_source="hold"``) a teleop-recording assignment
+needs. Teleop itself is intentionally not wired (no SafetyGate/RobotProfile for
+Axol yet); the ``teleop_channel`` kwarg is accepted and ignored, so a recording
+here captures a held pose rather than human-driven motion.
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ def control_loop(
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
     bypass_key: Optional[str] = None,
+    # False for teleop-recording assignments (no policy loaded): never
+    # client.step(); every tick holds pose and still records. Declaring it
+    # explicitly matters — while it fell into ``**_`` this loop ran inference
+    # against a policy-less session (CONTEXT.md's TeleopRecording contract).
+    policy_enabled: bool = True,
     **_: Any,
 ) -> None:
     """Observe → DRTC step → native motion_control, with per-tick recording.
@@ -71,6 +78,10 @@ def control_loop(
         action_keys, session_id,
     )
 
+    # Last-line guard against a single-tick joint slam, shared with every other
+    # loop via --robot.max_step. Unset ⇒ disabled (the helper logs it).
+    _max_step = _ctrl._parse_max_step(robot_extra or {})
+
     features_reported = False
     features_report_attempts = 0
     step_counter = 0
@@ -79,28 +90,50 @@ def control_loop(
             loop_start = time.perf_counter()
             obs = robot.get_observation()
 
-            # Encode lazily — client.step() only builds the payload on ticks
-            # where DRTC actually sends an observation.
-            action = client.step(
-                lambda o=obs: _ctrl._encode_npz(
-                    _ctrl._to_policy_schema(o), image_resize=image_resize
-                ),
-                codec="npz",
-            )
-
             state_keys = None
-            if action is not None:
-                action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-                # Build the joint-target dict directly (the 16 *.pos keys in
-                # order) — no SO101 calibration coercion for Axol.
-                action_dict = {
-                    k: float(action_arr[i]) for i, k in enumerate(action_keys)
-                }
-                robot.send_action(action_dict)
+            if not policy_enabled:
+                # --- HOLD PATH (teleop recording, no policy loaded) ---
+                # Send nothing (the motors hold) but record every tick so the
+                # episode stays continuous. Axol has no teleop path yet (no
+                # RobotProfile ⇒ no SafetyGate, ADR 0011:111), so a policy-less
+                # assignment is hold-only here — never "policy".
+                actual_joints = _ctrl._extract_joint_state(obs, action_keys)
                 state_keys = _ctrl._capture_tick(
-                    client, obs, action_arr, step_counter, control_source="policy"
+                    client, obs, actual_joints, step_counter, control_source="hold"
                 )
                 step_counter += 1
+            else:
+                # Encode lazily — client.step() only builds the payload on ticks
+                # where DRTC actually sends an observation.
+                action = client.step(
+                    lambda o=obs: _ctrl._encode_npz(
+                        _ctrl._to_policy_schema(o), image_resize=image_resize
+                    ),
+                    codec="npz",
+                )
+
+                if action is not None:
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                    # Execution-safety delta clamp (+ DRTC-DEBUG glass-box log),
+                    # mirroring node/control.py. A huge delta on the first policy
+                    # command is the slam: the arm leaps from its current pose to
+                    # the model's absolute target.
+                    if action_keys:
+                        actual_joints = _ctrl._extract_joint_state(obs, action_keys)
+                        action_arr = _ctrl._clamp_action_delta(
+                            action_arr, actual_joints, _max_step, action_keys,
+                            step_counter, source="policy",
+                        )
+                    # Build the joint-target dict directly (the 16 *.pos keys in
+                    # order) — no SO101 calibration coercion for Axol.
+                    action_dict = {
+                        k: float(action_arr[i]) for i, k in enumerate(action_keys)
+                    }
+                    robot.send_action(action_dict)
+                    state_keys = _ctrl._capture_tick(
+                        client, obs, action_arr, step_counter, control_source="policy"
+                    )
+                    step_counter += 1
 
             # One-time feature-element-names report (ADR 0003). state_keys come
             # from the first capture so they align with observation.state.

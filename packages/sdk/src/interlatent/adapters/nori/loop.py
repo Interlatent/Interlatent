@@ -269,6 +269,18 @@ def control_loop(
                             exc_info=True,
                         )
                         _estop_forwarded = False  # retry next tick
+
+            # Read the LATCH, not the event. ``consume_estop()`` is one-shot and
+            # ``frame.estop`` only holds while the operator's frames say so, so
+            # gating solely on ``estop_hit`` above resumed driving on the very
+            # next tick — and the policy branch below never consults the gate,
+            # so a queued chunk could execute after an e-stop whenever the
+            # daemon's own latch hadn't yet surfaced in telemetry. This rung
+            # sits ABOVE every movement source, exactly as node/control.py's.
+            estop_latched = (
+                teleop_gate is not None and teleop_gate.config.estop_latched
+            )
+            if estop_latched:
                 # The daemon telemetry flips to safety=latched, and the hard-
                 # boundary check above ends the episode on a following tick.
                 # Until then: hold — no motion, no capture, nothing queued.
@@ -385,6 +397,17 @@ def control_loop(
                     # robot-side. (Mirrors yam/loop.py.)
                     if action_filter is not None:
                         action_arr = action_filter.filter(action_arr)
+                    # Execution-safety delta clamp (+ DRTC-DEBUG glass-box log),
+                    # mirroring node/control.py. The adapter's own per-send clamp
+                    # (gripper-exempt) and the daemon's robot-side clamp stay in
+                    # place; this one is source-agnostic, so policy and teleop
+                    # are bounded by the same --robot.max_step knob.
+                    if action_keys:
+                        actual_joints = _ctrl._extract_joint_state(obs, action_keys)
+                        action_arr = _ctrl._clamp_action_delta(
+                            action_arr, actual_joints, _max_step, action_keys,
+                            step_counter, source="policy",
+                        )
                     action_dict = {k: float(action_arr[i]) for i, k in enumerate(action_keys)}
                     robot.send_action(action_dict)
                     state_keys = _ctrl._capture_tick(
