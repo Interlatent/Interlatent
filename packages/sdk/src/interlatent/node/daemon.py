@@ -442,34 +442,24 @@ class NodeDaemon:
     # Control-loop lifecycle
     # ------------------------------------------------------------------
 
-    # Robot kinds that ship their own native (non-LeRobot) control loop, mapped
-    # to the "module:function" the daemon imports. A native loop talks to its
-    # robot's own SDK and reuses only the LeRobot-free DRTC wire helpers — so the
-    # bundled LeRobot wrapper (and lerobot itself) is never imported for it. This
-    # is the single place a vendor robot registers a native loop.
-    # See docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md.
-    _NATIVE_LOOPS: dict[str, str] = {
-        "axol": "interlatent.adapters.axol:control_loop",
-        "yam": "interlatent.adapters.yam:control_loop",
-        "nori": "interlatent.adapters.nori:control_loop",
-    }
-
     def _resolve_loop_fn(self) -> Callable[..., None]:
         """Pick the control-loop function exactly once.
 
-        --loop module:fn wins. Else a robot kind with a registered native loop
-        uses that. Else the bundled LeRobot wrapper.
+        --loop module:fn wins. Else a native robot kind (the adapters registry,
+        ADR 0011/0022) uses its shim over the shared runner. Else the bundled
+        LeRobot wrapper.
         """
         if self._loop_fn is not None:
             return self._loop_fn
 
+        from ..adapters import native_loop_path
         from .control import import_callable
 
-        kind = (self.cfg.robot_kind or "").lower().strip()
+        native_loop = native_loop_path(self.cfg.robot_kind)
         if self.cfg.loop_override:
             self._loop_fn = import_callable(self.cfg.loop_override)
-        elif kind in self._NATIVE_LOOPS:
-            self._loop_fn = import_callable(self._NATIVE_LOOPS[kind])
+        elif native_loop is not None:
+            self._loop_fn = import_callable(native_loop)
         else:
             if not self.cfg.robot_kind:
                 raise RuntimeError(

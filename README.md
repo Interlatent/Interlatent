@@ -427,34 +427,41 @@ of them exist only because we haven't closed the abstraction.
   (`connect` / `read() -> RGB` / `disconnect`) with lazily-imported RealSense, ZED, and UVC
   backends behind it. That is the right shape, but it is *local to that adapter* - others
   open their cameras inside `robot.py`, so there is no single camera seam across the SDK.
-- **The control loop is copy-pasted, not factored.** There are three
-  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots,
-  plus a `loop.py` per native adapter). They share the observe → decide → clamp →
-  `send_action` → record skeleton and the same wire helpers, and diverge only on whether
-  teleop is wired, which safety composition applies, and which calibration preset is
-  active. Those differences are *configuration wearing the costume of code*.
+- **The control loop is factored** (ADR 0022). There is one tick skeleton
+  ([`node/looprunner.py`](packages/sdk/src/interlatent/node/looprunner.py)) and one motion
+  path (`CommandBus.drive()` in
+  [`node/movement.py`](packages/sdk/src/interlatent/node/movement.py) — arbitrate →
+  SafetyGate → delta clamp → `send_action` → flush/smoother bookkeeping). Each `loop.py`
+  is now a thin shim that constructs the robot and its per-session collaborators and hands
+  the tick over; per-robot pre-flight lives in an optional `pre_tick(obs) -> TickVerdict`
+  guard on the robot itself. A new adapter cannot silently miss a safety rung — it has no
+  per-tick code to get wrong.
 
 **Direction:** a new robot should be one `robot.py` plus a `RobotProfile`.
 
 1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
    `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
    template, so promoting it to a shared module is mostly a move, not a design.
-2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
-   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
-   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
-3. **A smaller adapter.** Once cameras and the loop are shared, `config.py` shrinks to a
-   schema and `loop.py` disappears.
+2. ~~One universal control loop~~ **Done** (ADR 0022): the shared runner + command bus own
+   every tick; adapters declare guard hooks (`pre_tick`, `estop`) discovered off the robot,
+   and inject their coerce/calibration policy — hooks won over capability flags because
+   Nori's "end the episode and free the daemon slot" is a verdict, not a boolean.
+3. **A smaller adapter.** Once cameras are shared too, `config.py` shrinks to a schema and
+   the remaining `loop.py` shim (~80 lines of construction, no per-tick logic) can fold
+   into the registry.
 
 The test for whether we've done this right: **adding an arm should be one file and a
 profile.** Anything more is a seam we haven't closed yet.
 
 **Open design questions (resolve before building):**
-- What is the unit of variation for the universal loop - capability flags the robot declares,
-  a strategy object per driving source, or hooks the adapter can override? Flags are simplest
-  until a robot needs a genuinely different tick shape.
-- Some robots need per-tick work that isn't "send an action" (liveness proofs, keep-alive
-  pumps, watchdog feeds for arms driven through a daemon). Does that belong in
-  `get_observation`, in an explicit `tick()` on the contract, or outside the loop entirely?
+- ~~The unit of variation for the universal loop~~ Answered (ADR 0022): optional guard
+  hooks on the existing `RobotAdapter` Protocol, discovered by `getattr` — Nori needed a
+  verdict (`END_EPISODE` frees the daemon's control-client slot), which no capability flag
+  can express.
+- ~~Per-tick work that isn't "send an action"~~ Answered: the liveness proof rides
+  `get_observation` (first and unconditionally every tick), and everything else a robot
+  must check pre-arbitration is `pre_tick(obs) -> TickVerdict`. No `tick()` on the
+  contract.
 - Cameras behind a network transport rather than a local SDK still have to satisfy
   `read() -> uint8 HxWx3 RGB`. Does the shared Camera protocol need a staleness/async story,
   or is latest-wins-plus-decode enough?

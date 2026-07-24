@@ -98,6 +98,27 @@ class RobotAdapter(Protocol):
 
     def send_action(self, action: Dict[str, Any]) -> Any: ...
 
+    # --- Optional members -------------------------------------------------
+    # Deliberately NOT declared on the Protocol body: adding them would make
+    # ``isinstance(robot, RobotAdapter)`` fail for every adapter that doesn't
+    # need them, and most don't. The control loop discovers them with
+    # ``getattr(robot, name, None)`` — the same idiom already used for
+    # ``note_applied`` / ``preview_due`` / ``consume_estop`` on the teleop
+    # channel. Implement one only if your robot needs it:
+    #
+    #   pre_tick(obs) -> TickVerdict
+    #       Per-tick pre-flight, run before any movement is arbitrated, for
+    #       conditions the generic path cannot know about: a supervising daemon
+    #       that died or latched, a telemetry read that went stale mid-reconnect.
+    #       Return PROCEED, HOLD_NO_CAPTURE (no motion and no capture, episode
+    #       continues), or END_EPISODE. See node/movement.py::TickVerdict.
+    #
+    #   estop() -> None
+    #       Forward an operator e-stop to a robot that owns its own hard latch.
+    #       Called once per latch, retried on failure. The SafetyGate latch is
+    #       robot-agnostic and handled for you; this is only the hardware half.
+    #       Clearing is a human act and is never called by the loop (ADR 0016).
+
 
 class ManualActionInterface:
     """Mixin providing the manual, block-then-settle ``action()`` call.

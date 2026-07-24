@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ...node.movement import TickVerdict
 
 from ..._clamp_log import warn_clamp
 from ..base import JointSpec, ManualActionInterface
@@ -37,6 +40,13 @@ from .client import NoriSessionClient
 from .config import NoriAdapterConfig, resolve_token
 
 _logger = logging.getLogger(__name__)
+
+# An idle daemon is ALWAYS watchdog-stopped when a session begins (nobody was
+# streaming control frames), and it recovers as soon as our keep-alive flows.
+# pre_tick gives the pump this long to feed it back to ok before declaring the
+# session unstartable. Verified on hardware 2026-07-10: the first status block
+# after connect reads safety=safe_hold watchdog=stop with latch_reason=None.
+_STARTUP_RECOVERY_S = 10.0
 
 _SIDES = ("left", "right")
 _ARM_JOINTS = (
@@ -82,6 +92,10 @@ class NoriNativeRobot(ManualActionInterface):
         self._last: Optional[np.ndarray] = None  # last-accepted non-gripper vec
         self._drop_count = 0
         self._connected = False
+        # pre_tick guard state (one episode per adapter instance).
+        self._guard_t0: Optional[float] = None
+        self._guard_was_healthy = False
+        self._guard_stale_warned = False
 
     @property
     def is_connected(self) -> bool:
@@ -243,6 +257,96 @@ class NoriNativeRobot(ManualActionInterface):
     @property
     def dead_reason(self) -> str:
         return self._client.dead_reason
+
+    # ------------------------------------------------------------------
+    # Per-tick pre-flight guard (the optional RobotAdapter member the
+    # shared runner discovers; see adapters/base.py and node/looprunner.py)
+    # ------------------------------------------------------------------
+
+    def pre_tick(self, obs: dict) -> "TickVerdict":
+        """Nori's episode guard: daemon conditions the generic path can't know.
+
+        Collapses the three pre-arbitration rungs the old native loop carried
+        (session death, the daemon safety FSM, telemetry staleness) into one
+        verdict. Pure disclosure → verdict: the collaborator hygiene an
+        interrupt owes (schedule flush, gate/smoother reset) is done by
+        ``CommandBus.guard_interrupt``, so it cannot be forgotten here.
+
+        The daemon safety state distinguishes three situations:
+
+        - ``latched`` → hard episode boundary, human-only reset
+          (``interlatent-act --robot nori --reset-latch``).
+        - ``safe_hold``/watchdog-stop AFTER the session was healthy → the
+          control-frame stream broke mid-session; hard boundary (the daemon
+          self-recovers once a client streams again — start a new session).
+        - ``safe_hold``/watchdog-stop BEFORE first health → the idle daemon's
+          normal resting state; hold and let the keep-alive pump feed it back
+          to ok, bounded by ``_STARTUP_RECOVERY_S``. ``get_observation()`` at
+          the top of every tick keeps proving liveness meanwhile (ADR 0015).
+        """
+        from ...node.movement import TickVerdict
+
+        now = time.monotonic()
+        if self._guard_t0 is None:
+            self._guard_t0 = now
+
+        # Fatal daemon error / reconnect window exhausted: the episode is
+        # over. Ending the episode frees the daemon's single control-client
+        # slot and lets the DRTC runner's finally-block upload.
+        if self.session_dead:
+            _logger.error("Nori session dead (%s) — ending episode.", self.dead_reason)
+            return TickVerdict.END_EPISODE
+
+        st = self.last_status
+        safety = (st or {}).get("safety")
+        wd = (st or {}).get("watchdog")
+        latched = safety == "latched"
+        stopped = safety == "safe_hold" or wd == "stop"
+        if latched or (stopped and self._guard_was_healthy):
+            if latched:
+                _logger.warning(
+                    "Nori daemon reports latched (latch_reason=%s) — hard "
+                    "episode boundary. Clear with `interlatent-act --robot "
+                    "nori --reset-latch`.", st.get("latch_reason"),
+                )
+            else:
+                _logger.warning(
+                    "Nori daemon safe-stopped mid-session (safety=%s, "
+                    "watchdog=%s) — the control-frame stream broke; hard "
+                    "episode boundary. It self-recovers when a client streams "
+                    "again — start a new session.", safety, wd,
+                )
+            return TickVerdict.END_EPISODE
+        if stopped:
+            if now - self._guard_t0 > _STARTUP_RECOVERY_S:
+                _logger.error(
+                    "Nori daemon still safe-stopped %.0fs after session start "
+                    "(safety=%s, watchdog=%s) — keep-alive frames are not "
+                    "reviving it; ending episode.",
+                    _STARTUP_RECOVERY_S, safety, wd,
+                )
+                return TickVerdict.END_EPISODE
+            return TickVerdict.HOLD_NO_CAPTURE
+        if st is not None and safety == "ok" and wd in ("ok", "warn"):
+            if not self._guard_was_healthy:
+                _logger.info(
+                    "Nori daemon healthy (safety=ok, watchdog=%s) — session "
+                    "live.", wd,
+                )
+            self._guard_was_healthy = True
+
+        # Staleness hold (mid-reconnect or telemetry gap): stale joints must
+        # not drive the gate, feed the policy, or be recorded as live state.
+        if not self.telemetry_fresh:
+            if not self._guard_stale_warned:
+                self._guard_stale_warned = True
+                _logger.warning(
+                    "Nori telemetry stale (%.0f ms) — holding (no motion, no "
+                    "capture) until the link recovers.", self.obs_age_ms,
+                )
+            return TickVerdict.HOLD_NO_CAPTURE
+        self._guard_stale_warned = False
+        return TickVerdict.PROCEED
 
     # ------------------------------------------------------------------
     # Action
