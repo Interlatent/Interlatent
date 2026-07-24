@@ -1,61 +1,61 @@
-"""Tick-for-tick equivalence: the migrated lerobot loop vs its frozen ancestor.
+"""Tick-for-tick equivalence: each migrated loop vs its frozen ancestor.
 
 ``tests/test_loop_contract.py`` asserts *intent* — invariants every loop owes
-regardless of history. This suite asserts *sameness*: the loop that runs on
+regardless of history. This suite asserts *sameness*: a loop that now runs on
 ``looprunner.run_control_loop`` + ``CommandBus.drive()`` must do exactly what
-the pre-migration inline loop (frozen at ``tests/_frozen/``) did, in the same
-order, with the same numbers. That catches the one failure class the contract
-suite cannot: side effects that all still happen but got silently *reordered*
-when the branch bodies were folded into ``drive()`` — precisely the risk the
-old ``movement.py`` docstring warned about when it left them in the loop.
+its pre-migration inline ancestor (frozen at ``tests/_frozen/``) did, in the
+same order, with the same numbers. That catches the one failure class the
+contract suite cannot: side effects that all still happen but got silently
+*reordered* when the branch bodies were folded into ``drive()`` — precisely
+the risk the old ``movement.py`` docstring warned about when it left them in
+the loop.
 
 Both sides run against the same doubles and the same monkeypatched trace
 points, so the comparison is an ordered event stream plus the actual numeric
-actions sent and captured. Determinism holds because both loops pass their own
-``loop_start`` as the gate's ``now`` *and* the submitted sample's
+actions sent and captured. Determinism holds because both generations pass
+their own ``loop_start`` as the gate's ``now`` *and* the submitted sample's
 ``received_at``, so the gate's frame-age is identically zero on either side;
-everything else on the motion path (Butterworth filter, delta clamp, calib
-coercion) is pure arithmetic.
+everything else on the motion path (Butterworth filter, delta clamp, coerce)
+is pure arithmetic.
 
-The robot double here deliberately has no ``estop()`` and no Nori surface:
-real lerobot robots expose neither, and giving the fake an ``estop()`` would
-make the *new* side forward a hardware latch the old loop never did — a
-difference that exists only for robots that cannot occur on this path.
+The robot double deliberately has no ``estop()`` and no Nori daemon surface:
+neither lerobot robots nor YAM expose them, and giving the fake an ``estop()``
+would make the *new* side forward a hardware latch the old loops never did — a
+difference that exists only for robots that cannot occur on these paths.
 """
 from __future__ import annotations
 
+import importlib
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import pytest
 
-from _frozen.lerobot_loop_pre_bus import lerobot_control_loop as frozen_loop
+from _frozen.lerobot_loop_pre_bus import lerobot_control_loop as frozen_lerobot
+from _frozen.yam_loop_pre_bus import control_loop as frozen_yam
 from test_loop_contract import FakeChannel, FakeClient, Frame, Trace
 
 from interlatent.node import control as _ctrl
 from interlatent.node.teleop.robot_profile import get_profile
 
-_ROBOT_KIND = "so101"
 _FPS = 100
-
-_PROFILE = get_profile(_ROBOT_KIND)
-assert _PROFILE is not None, "equivalence scenarios need the so101 teleop profile"
-_ACTION_KEYS = [f"{n}.pos" for n in _PROFILE.joint_names]
-_N = len(_ACTION_KEYS)
 
 
 class EquivRobot:
-    """Lerobot-shaped robot double: marks tick boundaries, records sends.
+    """Robot double shared by every pair: marks tick boundaries, records sends.
 
     Unlike the contract suite's ``FakeRobot`` it exposes neither ``estop()``
     nor the Nori daemon surface — see the module docstring.
     """
 
-    def __init__(self, trace: Trace):
+    def __init__(self, trace: Trace, action_keys: list):
         self._trace = trace
+        self._action_keys = list(action_keys)
 
     @property
     def action_features(self) -> list[str]:
-        return list(_ACTION_KEYS)
+        return list(self._action_keys)
 
     @property
     def joint_specs(self):
@@ -71,30 +71,72 @@ class EquivRobot:
         # One get_observation per tick in both generations, so this event is
         # the tick delimiter the comparison segments on.
         self._trace.events.append("tick")
-        return {k: 0.0 for k in _ACTION_KEYS}
+        return {k: 0.0 for k in self._action_keys}
 
     def send_action(self, action) -> None:
         self._trace.events.append("send")
         self._trace.sends.append(dict(action) if isinstance(action, dict) else action)
 
 
-# Routes the shared monkeypatched trace points (which are installed once per
-# test, but must record into whichever side is currently running) to the live
-# side's doubles.
-_CURRENT: dict = {"trace": None, "robot": None}
+@dataclass(frozen=True)
+class LoopPair:
+    """One frozen-ancestor / migrated-loop pair under comparison."""
+
+    name: str
+    robot_kind: str
+    frozen_fn: Callable
+    live_path: str            # "module:function", resolved at test time
+    robot_module: str         # module whose *NativeRobot is swapped, "" = lerobot
+
+    @property
+    def live_fn(self) -> Callable:
+        mod_name, fn_name = self.live_path.split(":")
+        return getattr(importlib.import_module(mod_name), fn_name)
+
+    @property
+    def action_keys(self) -> list:
+        profile = get_profile(self.robot_kind)
+        assert profile is not None, (
+            "equivalence scenarios need a teleop profile for %r" % self.robot_kind
+        )
+        return [f"{n}.pos" for n in profile.joint_names]
 
 
-def _install_patches(monkeypatch: pytest.MonkeyPatch) -> None:
+PAIRS = [
+    LoopPair("lerobot", "so101", frozen_lerobot,
+             "interlatent.node.control:lerobot_control_loop", ""),
+    LoopPair("yam", "yam", frozen_yam,
+             "interlatent.adapters.yam.loop:control_loop",
+             "interlatent.adapters.yam.robot"),
+]
+
+
+# Routes the shared monkeypatched trace points (installed once per test, but
+# recording into whichever side is currently running) to the live side's
+# doubles.
+_CURRENT: dict = {"trace": None, "robot": None, "keys": None}
+
+
+def _install_patches(monkeypatch: pytest.MonkeyPatch, pair: LoopPair) -> None:
     """Trace capture/clamp/gate for whichever side is running, via _CURRENT."""
-    monkeypatch.setattr(
-        _ctrl, "_make_lerobot_robot", lambda *a, **k: _CURRENT["robot"]
-    )
+    if pair.robot_module:
+        rmod = importlib.import_module(pair.robot_module)
+        cls_name = next(
+            n for n in dir(rmod) if n.endswith("NativeRobot") and not n.startswith("_")
+        )
+        monkeypatch.setattr(rmod, cls_name, lambda _cfg: _CURRENT["robot"])
+        cmod = importlib.import_module(pair.robot_module.rsplit(".", 1)[0] + ".config")
+        monkeypatch.setattr(cmod, "build_adapter_config", lambda *a, **k: object())
+    else:
+        monkeypatch.setattr(
+            _ctrl, "_make_lerobot_robot", lambda *a, **k: _CURRENT["robot"]
+        )
 
     def _capture(_client, _obs, action, _step, *, control_source=None):
         t: Trace = _CURRENT["trace"]
         t.events.append("capture:%s" % (control_source or "policy"))
         t.captures.append((control_source or "policy", np.asarray(action).copy()))
-        return list(_ACTION_KEYS)
+        return list(_CURRENT["keys"])
 
     monkeypatch.setattr(_ctrl, "_capture_tick", _capture)
     monkeypatch.setattr(_ctrl, "_report_robot_features", lambda *a, **k: True)
@@ -133,19 +175,24 @@ def _install_patches(monkeypatch: pytest.MonkeyPatch) -> None:
         def close(self):
             pass
 
-    # control.py binds the class at module import (`from .teleop_profiler
-    # import NodeTeleopProfiler`), so patch the *control-module* binding — both
-    # generations resolve it there at call time.
+    # The lerobot path binds the class at control-module import; the native
+    # loops from-import it inside the function body at call time. Patch both
+    # homes so every generation of every pair resolves the null profiler.
+    from interlatent.node import teleop_profiler as _tp
+
     monkeypatch.setattr(_ctrl, "NodeTeleopProfiler", _NullProfiler)
+    monkeypatch.setattr(_tp, "NodeTeleopProfiler", _NullProfiler)
 
 
-def _run_side(loop_fn, *, frames, policy_enabled: bool, ticks: int,
-              client_action: bool) -> Trace:
+def _run_side(loop_fn, pair: LoopPair, *, frames, policy_enabled: bool,
+              ticks: int, client_action: bool) -> Trace:
+    keys = pair.action_keys
     trace = Trace()
-    robot = EquivRobot(trace)
-    client = FakeClient(trace, _N, action=client_action)
+    robot = EquivRobot(trace, keys)
+    client = FakeClient(trace, len(keys), action=client_action)
     _CURRENT["trace"] = trace
     _CURRENT["robot"] = robot
+    _CURRENT["keys"] = keys
 
     remaining = {"n": ticks}
 
@@ -159,7 +206,7 @@ def _run_side(loop_fn, *, frames, policy_enabled: bool, ticks: int,
         client=client,
         session={"id": "equiv-session", "fps": _FPS},
         should_stop=should_stop,
-        robot_kind=_ROBOT_KIND,
+        robot_kind=pair.robot_kind,
         robot_port=None,
         robot_extra={"max_step": "5.0"},
         robot_cameras={},
@@ -174,108 +221,113 @@ def _run_side(loop_fn, *, frames, policy_enabled: bool, ticks: int,
     return trace
 
 
-def _send_vector(sent) -> np.ndarray:
+def _send_vector(sent, keys: list) -> np.ndarray:
     """A send as an ordered float vector, whether coerce produced dict or array."""
     if isinstance(sent, dict):
-        return np.asarray([sent[k] for k in _ACTION_KEYS], dtype=np.float64)
+        return np.asarray([sent[k] for k in keys], dtype=np.float64)
     return np.asarray(sent, dtype=np.float64).reshape(-1)
 
 
-def _assert_equivalent(old: Trace, new: Trace, scenario: str) -> None:
+def _assert_equivalent(old: Trace, new: Trace, keys: list, label: str) -> None:
     assert old.events == new.events, (
         "[%s] ordered event streams diverge.\n  frozen : %r\n  runner : %r"
-        % (scenario, old.events, new.events)
+        % (label, old.events, new.events)
     )
-    assert old.step_calls == new.step_calls, scenario
-    assert len(old.sends) == len(new.sends), scenario
+    assert old.step_calls == new.step_calls, label
+    assert len(old.sends) == len(new.sends), label
     for i, (a, b) in enumerate(zip(old.sends, new.sends)):
         np.testing.assert_allclose(
-            _send_vector(a), _send_vector(b), atol=1e-6,
-            err_msg="[%s] send #%d differs" % (scenario, i),
+            _send_vector(a, keys), _send_vector(b, keys), atol=1e-6,
+            err_msg="[%s] send #%d differs" % (label, i),
         )
-    assert old.captured_sources() == new.captured_sources(), scenario
+    assert old.captured_sources() == new.captured_sources(), label
     for i, ((_, a), (_, b)) in enumerate(zip(old.captures, new.captures)):
         np.testing.assert_allclose(
             np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64),
-            atol=1e-6, err_msg="[%s] capture #%d differs" % (scenario, i),
+            atol=1e-6, err_msg="[%s] capture #%d differs" % (label, i),
         )
 
 
-def _engaged(**kw) -> Frame:
-    kw.setdefault("joint_targets", [0.1] * _N)
+def _engaged(n: int, **kw) -> Frame:
+    kw.setdefault("joint_targets", [0.1] * n)
     return Frame(**kw)
 
 
-# Each scenario is (frames, policy_enabled, client_action). Frames are rebuilt
-# per side via the factory so the two runs share no mutable state.
+# Each scenario maps n (joint arity) → (frames, policy_enabled, client_action).
+# Frames are rebuilt per side so the two runs share no mutable state.
 _SCENARIOS = {
     # The highest-traffic path: pure policy inference, no producer connected.
-    "pure_policy": (lambda: [None] * 6, True, True),
+    "pure_policy": lambda n: ([None] * 6, True, True),
     # DRTC cold start / RTC cooldown: client.step() yields no action yet.
-    "policy_no_action": (lambda: [None] * 4, True, False),
+    "policy_no_action": lambda n: ([None] * 4, True, False),
     # TeleopRecording assignment, operator never engages: all-hold episode.
-    "teleop_recording_hold": (lambda: [None] * 4, False, True),
+    "teleop_recording_hold": lambda n: ([None] * 4, False, True),
     # Operator drives continuously.
-    "teleop_engaged": (lambda: [_engaged()] * 6, True, True),
+    "teleop_engaged": lambda n: ([_engaged(n)] * 6, True, True),
     # Engage → release → policy resumes (the smoother-reset / flush handback).
-    "teleop_handback": (
-        lambda: [_engaged(), _engaged(), None, None, None], True, True,
+    "teleop_handback": lambda n: (
+        [_engaged(n), _engaged(n), None, None, None], True, True,
     ),
     # E-stop mid-drive: must latch on tick 1 and stay latched (level, not edge).
-    "estop_mid_run": (
-        lambda: [_engaged(), _engaged(estop=True), _engaged(), _engaged()],
+    "estop_mid_run": lambda n: (
+        [_engaged(n), _engaged(n, estop=True), _engaged(n), _engaged(n)],
         True, True,
     ),
     # TeleopRecording with engage gaps: hold ↔ teleop transitions, gate resets.
-    "teleop_recording_gaps": (
-        lambda: [None, _engaged(), _engaged(), None], False, True,
+    "teleop_recording_gaps": lambda n: (
+        [None, _engaged(n), _engaged(n), None], False, True,
     ),
     # Malformed frame (wrong target arity): teleop still owns the tick but the
     # gate idles toward the measured pose.
-    "malformed_target_len": (
-        lambda: [_engaged(joint_targets=[0.1] * (_N + 1))] * 3, True, True,
+    "malformed_target_len": lambda n: (
+        [_engaged(n, joint_targets=[0.1] * (n + 1))] * 3, True, True,
     ),
     # A pose-mode frame that escaped pod-side retargeting: hold pose + one-shot
     # warning (ADR 0009, second amendment).
-    "pose_mode_frame": (
-        lambda: [_engaged(mode="pose", joint_targets=None)] * 3, True, True,
+    "pose_mode_frame": lambda n: (
+        [_engaged(n, mode="pose", joint_targets=None)] * 3, True, True,
     ),
 }
 
 
+@pytest.mark.parametrize("pair", PAIRS, ids=lambda p: p.name)
 @pytest.mark.parametrize("scenario", sorted(_SCENARIOS), ids=str)
-def test_runner_loop_matches_frozen_loop(scenario, monkeypatch):
-    frames_fn, policy_enabled, client_action = _SCENARIOS[scenario]
-    _install_patches(monkeypatch)
+def test_runner_loop_matches_frozen_loop(pair, scenario, monkeypatch):
+    n = len(pair.action_keys)
+    frames, policy_enabled, client_action = _SCENARIOS[scenario](n)
+    ticks = len(frames)
+    _install_patches(monkeypatch, pair)
 
-    ticks = len(frames_fn())
     old = _run_side(
-        frozen_loop, frames=frames_fn(), policy_enabled=policy_enabled,
-        ticks=ticks, client_action=client_action,
-    )
-    new = _run_side(
-        _ctrl.lerobot_control_loop, frames=frames_fn(),
+        pair.frozen_fn, pair, frames=_SCENARIOS[scenario](n)[0],
         policy_enabled=policy_enabled, ticks=ticks, client_action=client_action,
     )
-    _assert_equivalent(old, new, scenario)
+    new = _run_side(
+        pair.live_fn, pair, frames=_SCENARIOS[scenario](n)[0],
+        policy_enabled=policy_enabled, ticks=ticks, client_action=client_action,
+    )
+    _assert_equivalent(old, new, pair.action_keys, "%s/%s" % (pair.name, scenario))
 
 
-def test_frozen_loop_is_actually_exercising_motion(monkeypatch):
+@pytest.mark.parametrize("pair", PAIRS, ids=lambda p: p.name)
+def test_frozen_loop_is_actually_exercising_motion(pair, monkeypatch):
     """Guard against vacuous equivalence: the frozen side must send, capture,
     flush, and step the gate across the scenario matrix, or a regression that
     silences both sides equally would pass every comparison above."""
-    _install_patches(monkeypatch)
+    _install_patches(monkeypatch, pair)
+    n = len(pair.action_keys)
     seen: set = set()
-    for scenario, (frames_fn, policy_enabled, client_action) in _SCENARIOS.items():
+    for scenario in _SCENARIOS:
+        frames, policy_enabled, client_action = _SCENARIOS[scenario](n)
         trace = _run_side(
-            frozen_loop, frames=frames_fn(), policy_enabled=policy_enabled,
-            ticks=len(frames_fn()), client_action=client_action,
+            pair.frozen_fn, pair, frames=frames, policy_enabled=policy_enabled,
+            ticks=len(frames), client_action=client_action,
         )
         seen.update(trace.events)
     for required in ("send", "gate.step", "gate.latch", "flush",
                      "capture:policy", "capture:teleop", "capture:hold"):
         assert required in seen, (
-            "no scenario produced %r on the frozen side — the matrix has a "
-            "hole and the equivalence assertions are weaker than they look"
-            % required
+            "no scenario produced %r on the frozen side for %s — the matrix "
+            "has a hole and the equivalence assertions are weaker than they "
+            "look" % (required, pair.name)
         )
