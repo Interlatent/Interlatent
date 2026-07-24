@@ -208,17 +208,21 @@ def test_estop_forwards_to_hardware_once_and_retries_on_failure():
     assert robot.calls == 1, "hardware e-stop forwarded more than once per latch"
 
     failing = _Robot(fail_first=True)
+    gate2 = _FakeGate()
     bus2 = CommandBus(
         teleop_channel=_FakeChannel(_FakeFrame(True, True, estop=True)),
-        teleop_gate=_FakeGate(), teleop_profile=profile, policy_enabled=True,
+        teleop_gate=gate2, teleop_profile=profile, policy_enabled=True,
         robot=failing,
     )
-    try:
-        bus2.observe_estop(bus2.sample_teleop())
-    except RuntimeError:
-        pass
+    # A failed forward must be contained (the gate latch above it already
+    # suppresses motion) — raising would end the loop and kill the very
+    # next-tick retry the one-shot flag exists for.
     bus2.observe_estop(bus2.sample_teleop())
-    assert failing.calls == 2, "a failed forward must be retried, not swallowed"
+    assert gate2.config.estop_latched is True, (
+        "the gate must latch even when the hardware forward fails"
+    )
+    bus2.observe_estop(bus2.sample_teleop())
+    assert failing.calls == 2, "a failed forward must be retried, not dropped"
 
 
 def test_no_teleop_channel_is_policy_or_hold():
@@ -488,3 +492,26 @@ def test_drive_latches_before_arbitrating():
     assert gate.config.estop_latched is True
     assert out.source is MovementSource.ESTOP
     assert "send" not in trace
+
+
+def test_guard_interrupt_owns_the_collaborator_hygiene():
+    """A guard's verdict is pure; the bus does the interrupt's side effects.
+
+    A hold is a stream discontinuity — drop gate and smoother state so the
+    resume warm-starts from the live pose. An episode end drops queued chunks
+    so nothing stale fires during teardown. Keeping these here (not in each
+    adapter's guard) is the point: an adapter cannot forget them.
+    """
+    trace = []
+    bus, _ = _drive_bus(trace, frame=None)
+
+    bus.guard_interrupt(TickVerdict.HOLD_NO_CAPTURE)
+    assert trace == ["gate.reset", "filter.reset"]
+
+    trace.clear()
+    bus.guard_interrupt(TickVerdict.END_EPISODE)
+    assert trace == ["flush"]
+
+    trace.clear()
+    bus.guard_interrupt(TickVerdict.PROCEED)
+    assert trace == [], "PROCEED is not an interrupt and must touch nothing"

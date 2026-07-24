@@ -320,11 +320,35 @@ class CommandBus:
         forward = getattr(self._robot, "estop", None)
         if forward is not None and not self._estop_forwarded:
             self._estop_forwarded = True
+            _LOG.warning(
+                "Operator e-stop — SafetyGate latched; forwarding the hardware "
+                "latch via robot.estop()."
+            )
             try:
                 forward()
             except Exception:
+                # Never propagate: the gate latch above already suppresses all
+                # motion, and raising would end the loop — killing the retry
+                # this flag exists for.
                 self._estop_forwarded = False  # retry next tick
-                raise
+                _LOG.error("Hardware e-stop forward failed", exc_info=True)
+
+    def guard_interrupt(self, verdict: TickVerdict) -> None:
+        """Discontinuity bookkeeping when an adapter's ``pre_tick`` guard stops
+        the tick before any motion is arbitrated.
+
+        A hold means the input stream broke (stale telemetry, a supervisor
+        walking its watchdog back): drop the gate and smoother state so the
+        eventual resume warm-starts from the live pose. An episode end drops
+        queued policy chunks so nothing stale fires during teardown. Guards
+        themselves stay pure verdicts — the bus owns the collaborators, so an
+        adapter cannot forget this hygiene.
+        """
+        if verdict is TickVerdict.END_EPISODE:
+            self._flush_schedule()
+        elif verdict is TickVerdict.HOLD_NO_CAPTURE:
+            self._reset_gate()
+            self._reset_filter()
 
     # ------------------------------------------------------------------
     # The motion path

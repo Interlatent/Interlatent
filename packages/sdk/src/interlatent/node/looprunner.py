@@ -82,12 +82,16 @@ def run_control_loop(
             obs = robot.get_observation()
 
             # Robot-specific pre-flight, before any movement is arbitrated.
+            # The bus does the interrupt's discontinuity bookkeeping (flush /
+            # gate + smoother reset) so a guard stays a pure verdict.
             if pre_tick is not None:
                 verdict = pre_tick(obs)
                 if verdict is TickVerdict.END_EPISODE:
+                    bus.guard_interrupt(verdict)
                     _LOG.info("pre_tick ended the episode")
                     return
                 if verdict is TickVerdict.HOLD_NO_CAPTURE:
+                    bus.guard_interrupt(verdict)
                     _pace(loop_start, period)
                     continue
 

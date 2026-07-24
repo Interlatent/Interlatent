@@ -30,10 +30,14 @@ class _StubBus:
             sent=True,
         )
         self.calls = 0
+        self.interrupts: list = []
 
     def drive(self, obs, *, step, now):
         self.calls += 1
         return self._outcome
+
+    def guard_interrupt(self, verdict):
+        self.interrupts.append(verdict)
 
 
 @dataclass
@@ -118,6 +122,9 @@ def test_guard_can_end_the_episode():
     assert captures == []
     assert robot.observations == 1
     assert robot.disconnected is True
+    assert bus.interrupts == [TickVerdict.END_EPISODE], (
+        "the bus must get the interrupt so it can flush queued chunks"
+    )
 
 
 def test_guard_can_hold_without_capturing():
@@ -137,6 +144,10 @@ def test_guard_can_hold_without_capturing():
     assert robot.observations == 3, (
         "the observation read must happen every tick — for a daemon-driven robot "
         "it doubles as the keep-alive liveness proof"
+    )
+    assert bus.interrupts == [TickVerdict.HOLD_NO_CAPTURE] * 2, (
+        "each held tick must hand the interrupt to the bus for gate/smoother "
+        "hygiene"
     )
 
 

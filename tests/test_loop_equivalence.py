@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 from _frozen.lerobot_loop_pre_bus import lerobot_control_loop as frozen_lerobot
+from _frozen.nori_loop_pre_bus import control_loop as frozen_nori
 from _frozen.yam_loop_pre_bus import control_loop as frozen_yam
 from test_loop_contract import FakeChannel, FakeClient, Frame, Trace
 
@@ -78,6 +79,37 @@ class EquivRobot:
         self._trace.sends.append(dict(action) if isinstance(action, dict) else action)
 
 
+class NoriEquivRobot(EquivRobot):
+    """Nori-surfaced double: healthy daemon disclosure plus a traced hardware
+    e-stop forward. Deliberately no ``pre_tick`` — the frozen loop's guard
+    rungs all pass on a healthy daemon, so the migrated side must behave
+    identically *without* a guard; the real ``NoriNativeRobot.pre_tick`` logic
+    has its own unit suite (``packages/sdk/tests/test_nori_guard.py``)."""
+
+    @property
+    def session_dead(self) -> bool:
+        return False
+
+    @property
+    def dead_reason(self):
+        return None
+
+    @property
+    def last_status(self) -> dict:
+        return {"safety": "ok", "watchdog": "ok"}
+
+    @property
+    def telemetry_fresh(self) -> bool:
+        return True
+
+    @property
+    def obs_age_ms(self) -> float:
+        return 0.0
+
+    def estop(self) -> None:
+        self._trace.events.append("robot.estop")
+
+
 @dataclass(frozen=True)
 class LoopPair:
     """One frozen-ancestor / migrated-loop pair under comparison."""
@@ -87,6 +119,7 @@ class LoopPair:
     frozen_fn: Callable
     live_path: str            # "module:function", resolved at test time
     robot_module: str         # module whose *NativeRobot is swapped, "" = lerobot
+    robot_cls: type = EquivRobot
 
     @property
     def live_fn(self) -> Callable:
@@ -108,6 +141,9 @@ PAIRS = [
     LoopPair("yam", "yam", frozen_yam,
              "interlatent.adapters.yam.loop:control_loop",
              "interlatent.adapters.yam.robot"),
+    LoopPair("nori", "nori", frozen_nori,
+             "interlatent.adapters.nori.loop:control_loop",
+             "interlatent.adapters.nori.robot", robot_cls=NoriEquivRobot),
 ]
 
 
@@ -188,7 +224,7 @@ def _run_side(loop_fn, pair: LoopPair, *, frames, policy_enabled: bool,
               ticks: int, client_action: bool) -> Trace:
     keys = pair.action_keys
     trace = Trace()
-    robot = EquivRobot(trace, keys)
+    robot = pair.robot_cls(trace, keys)
     client = FakeClient(trace, len(keys), action=client_action)
     _CURRENT["trace"] = trace
     _CURRENT["robot"] = robot
