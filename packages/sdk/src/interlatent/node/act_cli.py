@@ -171,35 +171,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    # Imported here so --help / arg errors don't pay the adapter import cost.
-    if kind == "nori":
-        # Native daemon kind: TCP NDJSON to the on-Pi daemon; no --port. The
-        # handshake fail-closes on any profile/descriptor mismatch.
-        from ..adapters.nori.config import build_adapter_config as _nori_config
-        from ..adapters.nori.robot import NoriNativeRobot
+    # One resolution path for every kind (the adapters registry) — this CLI
+    # can no longer disagree with the daemon or the behaviors facade about
+    # which robots are native. Imported here so --help / arg errors don't pay
+    # the adapter import cost. For YAM, resolve_adapter defaults auto_home off,
+    # which is exactly what a one-shot CLI move wants (the action() itself
+    # drives the arm; --show must not move it) — pass --robot-arg
+    # auto_home=true to re-enable.
+    from ..adapters import native_kind, resolve_adapter
 
-        adapter = NoriNativeRobot(_nori_config(extra, None))
+    pkg = native_kind(kind)
+    if pkg is None and not args.port:
+        print(
+            f"error: --port is required for robot kind {args.robot!r}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    adapter = resolve_adapter(args.robot, port=args.port, extra=extra, cameras=None)
+    if pkg == "nori":
+        # TCP NDJSON to the on-Pi daemon; the handshake fail-closes on any
+        # profile/descriptor mismatch.
         where = f"tcp://{adapter.config.host}:{adapter.config.port}"
-    elif kind == "yam":
-        # Native CAN kind: build the YAM adapter directly. Default auto_home off for a
-        # one-shot CLI move (the action() itself drives the arm; --show must not move
-        # it) — pass --robot-arg auto_home=true to re-enable.
-        extra.setdefault("auto_home", "false")
-        from ..adapters.yam.config import build_adapter_config
-        from ..adapters.yam.robot import YAMNativeRobot
-
-        adapter = YAMNativeRobot(build_adapter_config(extra, None))
+    elif pkg == "yam":
         where = "CAN (--robot-arg left_channel=/right_channel=)"
+    elif pkg == "axol":
+        where = "CAN (almond_axol)"
     else:
-        if not args.port:
-            print(
-                f"error: --port is required for robot kind {args.robot!r}.",
-                file=sys.stderr,
-            )
-            return 2
-        from ..adapters.lerobot.robot import LeRobotAdapter
-
-        adapter = LeRobotAdapter(args.robot, port=args.port, extra=extra)
         where = args.port
 
     try:

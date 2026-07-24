@@ -92,17 +92,24 @@ genuinely robot-specific.**
 - A new adapter cannot silently miss a safety rung: it has no loop to get
   wrong. `CONTEXT.md`'s "all motion converges on absolute target → SafetyGate
   → send_action" is now enforced by shape.
-- Migration safety is *proven*, not assumed: each pre-migration loop is frozen
-  verbatim under `tests/_frozen/`, and `tests/test_loop_equivalence.py` drives
-  frozen-vs-migrated through nine scenarios asserting the ordered event
-  stream, every sent action vector, and every captured tick match exactly.
-  Delete a frozen copy only after its robot has soaked on hardware.
+- Migration safety was *proven*, not assumed: each pre-migration loop was
+  frozen verbatim, and an equivalence harness drove frozen-vs-migrated through
+  nine scenarios asserting the ordered event stream, every sent action vector,
+  and every captured tick matched exactly. The harness and frozen copies were
+  retired after the 2026-07-23 hardware verification — keeping them would have
+  frozen behavior permanently, blocking intentional improvements to `drive()`.
+  `tests/test_loop_contract.py` remains the ongoing guard.
 - Deliberate behavioral deltas, all additive, rode in with unification: YAM
   gained the teleop seq echo and the 5s latency window; Nori gained the
   per-second profiler and a uniform teardown flush; latched ticks still tee
   operator previews everywhere.
 - ADR 0011's "a native adapter brings its own control loop" is superseded;
   its packaging/registry story (`--robot <kind>`, optional extras, lazy
-  imports) stands. `_NATIVE_LOOPS` now points at shims and is owed a collapse
-  onto `resolve_adapter` once PRs 4–6 pass hardware verification.
+  imports) stands. The four `robot_kind` maps that had grown around it
+  (`daemon._NATIVE_LOOPS`, an inline ladder in `act_cli`, a yam-only check in
+  `resolve_adapter`) are collapsed onto one table in
+  `interlatent.adapters._NATIVE_KINDS`; `resolve_adapter` constructs every
+  native kind, and the daemon derives a canonical kind's session loop from the
+  same table. `teleop/robot_profile._PROFILES` stays separate — it is the
+  teleop-embodiment map and also covers LeRobot kinds.
 - `--loop module:function` remains the public escape hatch, unchanged.

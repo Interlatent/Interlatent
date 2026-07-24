@@ -15,9 +15,9 @@ than human-driven motion. Wiring Axol teleop later is exactly one step —
 register a RobotProfile and stop dropping the channel; the bus already owns the
 rest of the path.
 
-Tick-for-tick equivalence with the pre-migration inline loop is pinned by
-``tests/test_loop_equivalence.py`` against the frozen copy in
-``tests/_frozen/axol_loop_pre_bus.py``.
+Tick-for-tick equivalence with the pre-migration inline loop was proven by a
+frozen-copy harness (retired after the 2026-07 hardware soak; see ADR 0022);
+``tests/test_loop_contract.py`` remains the ongoing guard.
 """
 
 from __future__ import annotations

@@ -18,9 +18,9 @@ inline rungs:
   (``command{name:"estop"}``, ADR 0016), called once per latch (with
   retry-on-failure) by ``CommandBus.observe_estop``.
 
-Tick-for-tick equivalence with the pre-migration inline loop is pinned by
-``tests/test_loop_equivalence.py`` against the frozen copy in
-``tests/_frozen/nori_loop_pre_bus.py``.
+Tick-for-tick equivalence with the pre-migration inline loop was proven by a
+frozen-copy harness (retired after the 2026-07 hardware soak; see ADR 0022);
+``tests/test_loop_contract.py`` remains the ongoing guard.
 """
 from __future__ import annotations
 

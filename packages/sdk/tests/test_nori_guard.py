@@ -5,8 +5,8 @@ carried (session death, the daemon safety FSM, telemetry staleness) into one
 ``TickVerdict``. It is pure disclosure → verdict, so it is tested unbound
 against a stub carrying the same properties: no daemon, no sockets.
 
-The healthy path's *equivalence* with the old loop is covered by
-``tests/test_loop_equivalence.py``; this suite covers the verdicts themselves,
+The healthy path's equivalence with the old loop was proven by the (since
+retired) frozen-copy harness; this suite covers the verdicts themselves,
 including the startup-recovery window (an idle daemon is ALWAYS
 watchdog-stopped when a session begins — the keep-alive pump must get a
 bounded grace period to feed it back to ok).
