@@ -53,7 +53,6 @@ _VEL_EPS = 1e-6
 # topology share a file; kinds with no file still get a generated ``home``.
 _BUILTIN_DATA: dict[str, str] = {
     "so101": "so101",
-    "so101_follower": "so101",
 }
 
 # ---------------------------------------------------------------------------

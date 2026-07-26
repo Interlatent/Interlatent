@@ -82,3 +82,7 @@ loudly. Exit status is nonzero on any failure.
 The directory name **is** the `robot_kind` and **is** the kind's subpackage name — it must equal
 the string the live node reports. `nori` is the dual-SO-101 rig (historically also
 mis-labelled `so101_bimanual` in an early S3 upload; that name is retired).
+`so101` is the standalone single arm: same URDF as nori's chains, one `right`
+chain (the VR producer drives it with the right controller) over the 6-dim
+action vector. It is the only spelling — the old `so101_follower` alias is
+retired (`--robot so101_follower` now errors and points here).

@@ -609,7 +609,13 @@ def _make_lerobot_robot(
     cam_configs = _build_camera_configs(cameras or {})
 
     kind_norm = kind.lower().strip()
-    if kind_norm in ("so101", "so101_follower"):
+    if kind_norm == "so101_follower":
+        # Retired alias: the robot_kind also names the interlatent_robots/
+        # data dir and the behavior file, so one spelling only.
+        raise ValueError(
+            "--robot so101_follower was retired: use --robot so101."
+        )
+    if kind_norm == "so101":
         # lerobot consolidated its per-robot modules: SO101FollowerConfig
         # now lives in the shared `so_follower` module (covers SO100 +
         # SO101). Older lerobot shipped a dedicated `so101_follower`
@@ -633,7 +639,7 @@ def _make_lerobot_robot(
         return make_robot_from_config(cfg)
 
     raise ValueError(
-        f"Unsupported --robot {kind!r}. Built-in support: so101_follower, "
+        f"Unsupported --robot {kind!r}. Built-in support: so101, "
         f"koch_follower. For other LeRobot robots, write a thin adapter and "
         f"pass --loop module:fn."
     )
