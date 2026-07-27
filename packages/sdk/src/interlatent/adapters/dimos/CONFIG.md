@@ -16,6 +16,24 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image
 ```
 
+The reference blueprint includes DIMOS's `ManipulationModule` with **Viser as
+its default visualization backend**. Viser serves its browser UI at
+`http://127.0.0.1:8095` by default (the DIMOS log also prints the URL).
+
+With no `xarm7_ip` configured, DIMOS selects its in-memory mock xArm adapter.
+This is the recommended hardware-free path: run the same two commands, omit
+`--camera` if the test does not need images, and watch policy/manual commands
+move the mock robot in Viser. This exercises the real
+Interlatent → `joint_command` → servo task → coordinator path without relying
+on the MuJoCo simulation.
+
+The manipulation module is intentionally **preview-only** in this session
+blueprint. It provides the robot model, collision world, planning, trajectory
+preview, and live Viser state, but does not execute through a second DIMOS
+trajectory task. Adding that task would make it compete with Interlatent's
+servo task for the same joints, violating the strict-exclusivity contract
+below.
+
 ## `--robot-arg` reference
 
 | key | default | meaning |
@@ -66,13 +84,16 @@ operator-authored blueprint is equally valid iff it provides:
 
 1. a `ControlCoordinator` with the kind's hardware (and `publish_joint_state`
    left on — the default),
-2. a **servo task** claiming **exactly** the kind's joints — arm joints AND
+2. optionally, a manipulation planner/visualizer that does not add another
+   task claiming the session joints (the reference blueprint uses
+   `ManipulationModule` + Viser),
+3. a **servo task** claiming **exactly** the kind's joints — arm joints AND
    gripper — with a **non-zero timeout**. Without a servo task, dimos
    **silently ignores** streamed `joint_command` (stock dimos coordinator
    blueprints configure only a trajectory task, which is the trap); with the
    gripper unclaimed, the per-tick hardware write stomps it back to its
    startup value the moment streaming starts,
-3. **no other task claiming any of those joints** (strict exclusivity, v1):
+4. **no other task claiming any of those joints** (strict exclusivity, v1):
    dimos arbitration is priority-based with first-writer-wins ties, and a
    competing claimant would fight the policy invisibly — including corrupting
    the recorded `control_source`. Embedding the session into agentic/teleop
