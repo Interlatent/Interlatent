@@ -42,6 +42,28 @@ def test_dimos_blueprint_entry_point_declared():
     assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
 
 
+def test_dimos_extra_covers_the_shipped_blueprint():
+    """`pip install 'interlatent[dimos]'` must be able to RUN `dimos run
+    interlatent.xarm7`, not just import the adapter. That takes dimos's
+    [manipulation] extra (Viser/ManipulationModule in the blueprint) plus three
+    packages dimos 0.0.14b1's websocket_vis module imports but never declares
+    (python-socketio, starlette, uvicorn). A bare `dimos` pin shipped once and
+    the blueprint entry point died on ImportError for every fresh install."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    extra = data["project"]["optional-dependencies"]["dimos"]
+
+    assert any(req.startswith("dimos[manipulation]") for req in extra), extra
+    for undeclared in ("python-socketio", "starlette", "uvicorn"):
+        assert any(req.startswith(undeclared) for req in extra), (
+            f"{undeclared} missing from the [dimos] extra — it is an undeclared "
+            "import of dimos's camera/websocket_vis modules (as of 0.0.14b1)"
+        )
+
+
 def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
     """The reference stack must retain the hardware-free visual test path:
     DIMOS's planner/manipulation module renders mock coordinator state in

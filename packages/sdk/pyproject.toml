@@ -131,7 +131,16 @@ nori = [
 # HEAVY: dimos unconditionally pulls open3d, rerun-sdk, opencv-contrib,
 # numba, and pinocchio. Expect a multi-GB environment.
 dimos = [
-  "dimos>=0.0.14b1; python_version < '3.13'",
+  # [manipulation] is required by the shipped session blueprint (ManipulationModule
+  # + Viser preview — ROBOT.md "Special case: the dimos adapter"), not by the
+  # adapter itself: without it `dimos run interlatent.xarm7` fails at import.
+  "dimos[manipulation]>=0.0.14b1; python_version < '3.13'",
+  # Undeclared imports of dimos 0.0.14b1's camera module (pulled in by the
+  # blueprint off-sim): dimos/web/websocket_vis imports all three at module
+  # scope but its pyproject declares none of them. Drop when dimos fixes it.
+  "python-socketio; python_version < '3.13'",
+  "starlette; python_version < '3.13'",
+  "uvicorn; python_version < '3.13'",
 ]
 
 [project.scripts]
