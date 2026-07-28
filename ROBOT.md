@@ -225,7 +225,11 @@ reinterpreted:
 - `--camera <name>=<topic>` maps observation keys to bus topics instead of
   devices.
 - The dimos side needs a **session blueprint** satisfying that contract; this
-  SDK ships one per kind via dimos's entry-point registry:
+  SDK ships one per kind via dimos's entry-point registry. The xArm7 reference
+  blueprint also includes DIMOS's manipulation module with Viser as the
+  default viewer; without an `xarm7_ip`, the coordinator uses DIMOS's
+  in-memory mock adapter, so commands can be inspected in a browser without
+  physical hardware or MuJoCo:
 
 ```bash
 dimos run interlatent.xarm7          # terminal 1: the dimos session stack

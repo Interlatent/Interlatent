@@ -42,6 +42,41 @@ def test_dimos_blueprint_entry_point_declared():
     assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
 
 
+def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
+    """The reference stack must retain the hardware-free visual test path:
+    DIMOS's planner/manipulation module renders mock coordinator state in
+    Viser, while the exclusive servo task remains the only execution task."""
+    import ast
+
+    blueprint = (
+        REPO
+        / "packages"
+        / "sdk"
+        / "src"
+        / "interlatent"
+        / "adapters"
+        / "dimos"
+        / "blueprints.py"
+    )
+    tree = ast.parse(blueprint.read_text(encoding="utf-8"))
+    planner_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "planner"
+    ]
+    assert len(planner_calls) == 1
+
+    keywords = {keyword.arg: keyword.value for keyword in planner_calls[0].keywords}
+    visualization = ast.literal_eval(keywords["visualization"])
+    assert visualization == {"backend": "viser"}
+
+    source = blueprint.read_text(encoding="utf-8")
+    assert "make_xarm7_model_config" in source
+    assert 'update={"coordinator_task_name": None}' in source
+
+
 def test_dimos_native_loop_registered():
     from interlatent.node.daemon import NodeDaemon
 

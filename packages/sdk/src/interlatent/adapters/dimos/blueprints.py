@@ -6,6 +6,9 @@ stack in one command. Each blueprint is the OTHER half of the adapter's
 connect-time contract (ADR 0018, verified fail-closed either way):
 
 - a ``ControlCoordinator`` with the kind's hardware,
+- a ``ManipulationModule`` carrying the robot model and a Viser viewer — the
+  mock hardware path therefore gives developers a useful, browser-visible
+  robot without requiring either physical hardware or MuJoCo,
 - a **servo task** claiming exactly the kind's joints with a non-zero timeout —
   the piece stock dimos coordinator blueprints lack, without which dimos
   SILENTLY IGNORES streamed ``joint_command``,
@@ -30,9 +33,13 @@ try:
     from dimos.core.coordination.blueprints import autoconnect
     from dimos.core.global_config import global_config
     from dimos.hardware.sensors.camera.module import CameraModule
-    from dimos.robot.manipulators.common.blueprints import coordinator
+    from dimos.robot.manipulators.common.blueprints import coordinator, planner
     from dimos.robot.manipulators.common.sim import mujoco_if_sim
-    from dimos.robot.manipulators.xarm.config import XARM7_SIM_PATH, xarm7_hardware
+    from dimos.robot.manipulators.xarm.config import (
+        XARM7_SIM_PATH,
+        make_xarm7_model_config,
+        xarm7_hardware,
+    )
 except ImportError as exc:  # pragma: no cover - exercised only when half-installed
     raise ImportError(
         "interlatent's dimos session blueprints require the dimos stack: "
@@ -77,7 +84,22 @@ def _camera_if_real() -> tuple:
 # integration tests (and first-time operators) use.
 _xarm7_hw = xarm7_hardware("arm", gripper=True, mock_without_address=True)
 
+# Follow dimos's own xarm7_planner_coordinator composition, but keep execution
+# on the session's exclusive servo task. The ManipulationModule supplies the
+# planning model, collision world, live-state rendering, and trajectory
+# previews; it deliberately has no coordinator trajectory task because adding
+# one would claim the same joints and violate this adapter's strict-exclusivity
+# safety contract. Interlatent commands still move the mock adapter's in-memory
+# state, so Viser displays the exact command path used on hardware.
+_xarm7_model = make_xarm7_model_config(name="arm", add_gripper=True).model_copy(
+    update={"coordinator_task_name": None}
+)
+
 xarm7 = autoconnect(
+    planner(
+        robots=[_xarm7_model],
+        visualization={"backend": "viser"},
+    ),
     coordinator(
         hardware=[_xarm7_hw],
         tasks=[_servo_task(_xarm7_hw)],
