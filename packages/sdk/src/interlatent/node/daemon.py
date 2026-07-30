@@ -587,6 +587,10 @@ class NodeDaemon:
             policy_backend=("echo" if is_recording
                             else session.get("policy_backend", "lerobot")),
             task=session.get("task", ""),
+            # Durable Task link (both assignment kinds carry it) — travels
+            # via OpenSession metadata so the recorder can attribute the
+            # episode's catalog row to the exact Task.
+            task_id=session.get("task_id") or None,
             chunk_size=int(session.get("chunk_size", 50) or 50),
             action_dim=int(session.get("action_dim", 6) or 6),
             fps=float(session.get("fps", 30.0) or 30.0),
