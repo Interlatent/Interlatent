@@ -141,8 +141,10 @@ independent.
 
 **Teleop receiver stub**:
 The node-side half of hosted VR teleop (`interlatent.node.teleop`) — remote
-human demonstration today; mid-policy takeover (live intervention) is coming in
-a future release. A
+human demonstration, and mid-policy takeover (live **intervention**: engaging
+teleop while a policy session runs preempts the policy and records
+`control_source="intervention"`; the node shadow-steps the client so handback
+is ≈1 control tick — ADR 0034 in the platform repo). A
 `TeleopChannel` opens a channel to the hosted relay and decodes `TeleopFrame`s;
 the control loop applies engaged `mode="targets"` frames (absolute joint vectors
 the **platform** already computed) through the **SafetyGate** before driving the

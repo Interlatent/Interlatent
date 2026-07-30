@@ -446,12 +446,31 @@ def test_policy_path_sends_are_clamped(spec, monkeypatch):
 
 @pytest.mark.parametrize("spec", [s for s in LOOPS if s.teleop_capable], ids=_ids)
 def test_teleop_path_sends_are_clamped(spec, monkeypatch):
+    """Human motion on a policy-less recording is TELEOP-labeled and clamped."""
     n = len(_action_keys_for(spec))
     frames = [Frame(joint_targets=[0.1] * n)] * _TICKS
-    trace = _drive(spec, monkeypatch, frames=frames, ticks=_TICKS)
+    trace = _drive(
+        spec, monkeypatch, frames=frames, policy_enabled=False, ticks=_TICKS
+    )
 
     assert "send" in trace.events, "%s never sent on the teleop path" % spec.name
     _assert_each_send_preceded_by(trace, "clamp:teleop", spec.name)
+
+
+@pytest.mark.parametrize("spec", [s for s in LOOPS if s.teleop_capable], ids=_ids)
+def test_intervention_path_sends_are_clamped(spec, monkeypatch):
+    """A human overriding a running policy is INTERVENTION (ADR 0034) — same
+    gate, same last-line clamp, distinct label."""
+    n = len(_action_keys_for(spec))
+    frames = [Frame(joint_targets=[0.1] * n)] * _TICKS
+    trace = _drive(
+        spec, monkeypatch, frames=frames, policy_enabled=True, ticks=_TICKS
+    )
+
+    assert "send" in trace.events, (
+        "%s never sent on the intervention path" % spec.name
+    )
+    _assert_each_send_preceded_by(trace, "clamp:intervention", spec.name)
 
 
 def _assert_each_send_preceded_by(trace: Trace, guard: str, name: str) -> None:

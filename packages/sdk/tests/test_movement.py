@@ -9,9 +9,10 @@ boolean cascade, extended by the latch:
     engaged = frame and frame.engaged and frame.deadman
     teleop_ok = engaged and gate is not None and action_keys \\
                 and len(action_keys) == len(profile.joint_names)
-    -> TELEOP if teleop_ok
-    -> HOLD   if (not teleop_ok) and (not policy_enabled)
-    -> POLICY otherwise
+    -> INTERVENTION if teleop_ok and policy_enabled (ADR 0034)
+    -> TELEOP       if teleop_ok (policy-less recording)
+    -> HOLD         if (not teleop_ok) and (not policy_enabled)
+    -> POLICY       otherwise
 
 Note on imports: an earlier revision loaded ``movement.py`` in isolation via
 ``importlib`` to avoid importing ``interlatent.node``, because the module was
@@ -80,7 +81,9 @@ class _FakeChannel:
 
 
 def _reference_decision(*, frame, gate, profile, action_keys, policy_enabled):
-    """The original control-loop cascade, verbatim (pre-ESTOP-rung)."""
+    """The original control-loop cascade, extended by the INTERVENTION split:
+    an engaged human overriding a *running policy* is an intervention, an
+    engaged human on a policy-less recording is teleop (ADR 0034)."""
     engaged = bool(frame and frame.engaged and frame.deadman)
     teleop_ok = (
         engaged
@@ -89,7 +92,9 @@ def _reference_decision(*, frame, gate, profile, action_keys, policy_enabled):
         and len(action_keys) == len(profile.joint_names)
     )
     if teleop_ok:
-        return MovementSource.TELEOP
+        return (
+            MovementSource.INTERVENTION if policy_enabled else MovementSource.TELEOP
+        )
     if not policy_enabled:
         return MovementSource.HOLD
     return MovementSource.POLICY
@@ -246,17 +251,19 @@ def test_source_values_match_legacy_labels():
     assert MovementSource.TELEOP.value == "teleop"
     assert MovementSource.HOLD.value == "hold"
     assert MovementSource.POLICY.value == "policy"
+    assert MovementSource.INTERVENTION.value == "intervention"
 
 
 def test_estop_is_not_a_dataset_label():
-    """CONTEXT.md pins control_source to exactly three values. ESTOP is a
+    """CONTEXT.md pins control_source to exactly four values. ESTOP is a
     movement source but never a recorded label — e-stop ticks are not captured."""
     recorded = {
         MovementSource.TELEOP.value,
         MovementSource.HOLD.value,
         MovementSource.POLICY.value,
+        MovementSource.INTERVENTION.value,
     }
-    assert recorded == {"teleop", "hold", "policy"}
+    assert recorded == {"teleop", "hold", "policy", "intervention"}
     assert MovementSource.ESTOP.value not in recorded
 
 
@@ -265,7 +272,12 @@ def test_arbiter_is_usable_without_a_bus():
     reusable on its own."""
     ready = TeleopReadiness(engaged=True, gated=True, schema_ok=True)
     a = Arbiter()
-    assert a.decide(teleop_ready=ready, policy_enabled=True) is MovementSource.TELEOP
+    assert a.decide(
+        teleop_ready=ready, policy_enabled=True
+    ) is MovementSource.INTERVENTION
+    assert a.decide(
+        teleop_ready=ready, policy_enabled=False
+    ) is MovementSource.TELEOP
     assert a.decide(
         teleop_ready=ready, policy_enabled=True, estop_latched=True
     ) is MovementSource.ESTOP
@@ -316,13 +328,25 @@ class _TraceSchedule:
     def __init__(self, trace):
         self._t = trace
 
-    def flush(self):
-        self._t.append("flush")
+    def flush(self, barrier_ts=None):
+        self._t.append("flush:barrier" if barrier_ts is not None else "flush")
+
+
+class _TraceClock:
+    """Stands in for the DRTC client's ControlClock (strictly increasing)."""
+
+    def __init__(self):
+        self._n = 0
+
+    def tick(self):
+        self._n += 1
+        return self._n
 
 
 class _TraceClient:
     def __init__(self, trace, action=None):
         self.schedule = _TraceSchedule(trace)
+        self.clock = _TraceClock()
         self._t = trace
         self._action = action
         self.steps = 0
@@ -410,8 +434,8 @@ def test_drive_estop_suppresses_motion_and_capture():
     assert out.sent is False and out.should_record is False
     assert out.control_source is None, "an e-stop tick must carry no dataset label"
     assert "send" not in trace
-    assert trace == ["flush", "filter.reset"], (
-        f"e-stop must flush queued chunks and drop smoother state, got {trace}"
+    assert trace == ["flush:barrier", "filter.reset"], (
+        f"e-stop must barrier-flush queued chunks and drop smoother state, got {trace}"
     )
 
 
@@ -427,8 +451,10 @@ def test_drive_hold_records_without_commanding():
 
 
 def test_drive_teleop_orders_gate_then_clamp_then_send():
+    """Policy-less recording session: an engaged human is TELEOP, with the
+    per-tick flush + smoother reset the pre-INTERVENTION path always had."""
     trace = []
-    bus, _ = _drive_bus(trace, frame=_teleop_frame())
+    bus, _ = _drive_bus(trace, frame=_teleop_frame(), policy_enabled=False)
     out = bus.drive(_OBS, step=0, now=1.0)
 
     assert out.source is MovementSource.TELEOP
@@ -439,6 +465,35 @@ def test_drive_teleop_orders_gate_then_clamp_then_send():
     ], f"teleop ordering changed: {trace}"
     # The commanded (post-gate) action is what gets reported for recording.
     np.testing.assert_allclose(out.action, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+
+
+def test_drive_intervention_shadow_steps_and_flushes_once():
+    """An engaged human over a running policy is INTERVENTION: barrier-flush on
+    the engage edge only, and the DRTC client keeps stepping (shadow inference)
+    while the human's gated action — not the popped policy action — is sent."""
+    trace = []
+    policy_action = np.array([9.0, 9.0, 9.0], dtype=np.float32)
+    bus, _ = _drive_bus(trace, frame=_teleop_frame(), action=policy_action)
+
+    out = bus.drive(_OBS, step=0, now=1.0)
+    assert out.source is MovementSource.INTERVENTION
+    assert out.control_source == "intervention" and out.should_record is True
+    assert out.sent is True
+    assert trace == [
+        "flush:barrier", "filter.reset", "client.step",
+        "gate.submit", "gate.step", "clamp:intervention", "send",
+    ], f"intervention ordering changed: {trace}"
+    # The human's (post-gate) target is executed, never the policy action.
+    np.testing.assert_allclose(out.action, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+
+    # Second engaged tick: no re-flush, shadow stepping continues.
+    trace.clear()
+    out2 = bus.drive(_OBS, step=1, now=2.0)
+    assert out2.source is MovementSource.INTERVENTION
+    assert "flush:barrier" not in trace and "flush" not in trace, (
+        f"per-tick flush would discard the fresh shadow chunks: {trace}"
+    )
+    assert trace[0] == "client.step"
 
 
 def test_drive_policy_smooths_then_clamps_then_sends():
@@ -492,6 +547,170 @@ def test_drive_latches_before_arbitrating():
     assert gate.config.estop_latched is True
     assert out.source is MovementSource.ESTOP
     assert "send" not in trace
+
+
+# ---------------------------------------------------------------------------
+# Intervention lifecycle (ADR 0034): engage → correct → hand back.
+# These are sequence tests — the defects they pin (per-tick flush starving the
+# handback, a policy action firing on a 1-tick frame drop, the unseeded
+# smoother) only show up across ticks, never in a single-tick trace.
+# ---------------------------------------------------------------------------
+
+
+class _MutableChannel:
+    """A channel whose frame the test can swap between ticks."""
+
+    def __init__(self):
+        self.frame = None
+
+    def latest_frame(self):
+        return self.frame
+
+    def consume_estop(self) -> bool:
+        return False
+
+
+class _SeedableFilter:
+    """Tracks primed/seed like the real ButterworthLowPass."""
+
+    def __init__(self, trace):
+        self._t = trace
+        self.primed = False
+        self.seeds = []
+
+    def filter(self, arr):
+        self._t.append("filter")
+        self.primed = True
+        return arr
+
+    def reset(self):
+        self._t.append("filter.reset")
+        self.primed = False
+
+    def seed(self, x):
+        self._t.append("filter.seed")
+        self.seeds.append(np.asarray(x, dtype=np.float32).copy())
+        self.primed = True
+
+
+def _lifecycle_bus(trace, *, grace_ticks=8):
+    channel = _MutableChannel()
+    gate = _TraceGate(trace=trace)
+    client = _TraceClient(trace, action=np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    filt = _SeedableFilter(trace)
+    bus = CommandBus(
+        teleop_channel=channel,
+        teleop_gate=gate,
+        teleop_profile=_FakeProfile(joint_names=tuple(_KEYS)),
+        policy_enabled=True,
+        robot=_TraceRobot(trace),
+        client=client,
+        action_keys=list(_KEYS),
+        helpers=_helpers(trace),
+        max_step=5.0,
+        action_filter=filt,
+        handback_grace_ticks=grace_ticks,
+    )
+    return bus, channel, client, filt
+
+
+def test_intervention_lifecycle_policy_engage_correct_release():
+    """POLICY×2 → engage → INTERVENTION×3 → explicit release → POLICY.
+
+    Asserts the ADR 0034 contract end to end: exactly one barrier flush at the
+    engage edge, client.step() on *every* tick (shadow inference), executed
+    actions during the intervention are gate outputs, the label sequence is
+    policy…intervention…policy, the smoother is seeded from the measured pose
+    at handback, and the first post-release tick already sends a policy action
+    (the ≈1-tick handback, unit level)."""
+    trace = []
+    bus, channel, client, filt = _lifecycle_bus(trace)
+
+    labels = []
+    for step in range(2):  # autonomous rollout
+        labels.append(bus.drive(_OBS, step=step, now=float(step)).control_source)
+
+    channel.frame = _teleop_frame()  # human engages
+    for step in range(2, 5):
+        out = bus.drive(_OBS, step=step, now=float(step))
+        labels.append(out.control_source)
+        assert out.sent is True
+        np.testing.assert_allclose(
+            out.action, np.array([0.1, 0.2, 0.3], dtype=np.float32),
+            err_msg="an intervention tick must execute the human's gated target",
+        )
+
+    # Explicit release: a *fresh* frame with the deadman dropped — instant
+    # handback, no grace hold.
+    channel.frame = _teleop_frame()
+    channel.frame.deadman = False
+    out = bus.drive(_OBS, step=5, now=5.0)
+    labels.append(out.control_source)
+
+    assert labels == [
+        "policy", "policy",
+        "intervention", "intervention", "intervention",
+        "policy",
+    ], f"label sequence broke: {labels}"
+
+    # Exactly one barrier flush, at the engage edge.
+    assert trace.count("flush:barrier") == 1, trace
+    assert trace.count("flush") == 0, "per-tick flush must be gone under ADR 0034"
+
+    # Shadow inference: the client stepped on every one of the 6 ticks.
+    assert client.steps == 6, (
+        f"client.step() must run every tick (shadow inference), got {client.steps}"
+    )
+
+    # ≈1-tick handback: the first post-release tick sent a policy action.
+    assert out.source is MovementSource.POLICY and out.sent is True
+
+    # The smoother was seeded from the *measured* pose (the zeros observation),
+    # not from the policy action, before filtering the handback action.
+    assert filt.seeds, "handback must seed the smoother from the measured pose"
+    np.testing.assert_allclose(filt.seeds[-1], np.zeros(3, dtype=np.float32))
+    assert trace.index("filter.seed") < trace.index("filter"), (
+        "seed must land before the first filtered handback action"
+    )
+
+
+def test_stale_frame_mid_intervention_holds_instead_of_policy():
+    """A dropped/stale teleop frame mid-intervention must NOT execute a policy
+    action (the schedule is full under shadow inference): it holds, keeps the
+    shadow loop warm, records ``hold`` frames, and only hands back after the
+    grace window — while a fresh disengaged frame still hands back instantly."""
+    trace = []
+    bus, channel, client, _ = _lifecycle_bus(trace, grace_ticks=3)
+
+    channel.frame = _teleop_frame()
+    bus.drive(_OBS, step=0, now=0.0)  # engaged INTERVENTION tick
+
+    channel.frame = None  # frames go stale (channel drops >250ms frames)
+    grace_outcomes = [bus.drive(_OBS, step=1 + i, now=1.0 + i) for i in range(3)]
+    for out in grace_outcomes:
+        assert out.source is MovementSource.HOLD, out
+        assert out.control_source == "hold" and out.should_record is True
+        assert out.sent is False, "a grace tick must not command the robot"
+
+    # Grace exhausted, frames still stale: hand back to the policy.
+    out = bus.drive(_OBS, step=4, now=4.0)
+    assert out.source is MovementSource.POLICY and out.sent is True
+
+    # Shadow inference never paused: engage tick + 3 grace ticks + handback.
+    assert client.steps == 5
+
+    # Re-engage during grace must not re-flush (the shadow chunks are fresh).
+    channel.frame = _teleop_frame()
+    bus.drive(_OBS, step=5, now=5.0)
+    channel.frame = None
+    bus.drive(_OBS, step=6, now=6.0)          # grace hold
+    channel.frame = _teleop_frame()
+    flushes_before = trace.count("flush:barrier")
+    out = bus.drive(_OBS, step=7, now=7.0)    # re-engage inside grace
+    assert out.source is MovementSource.INTERVENTION
+    assert trace.count("flush:barrier") == flushes_before, (
+        "re-engaging within the grace window must not discard fresh shadow chunks"
+    )
 
 
 def test_guard_interrupt_owns_the_collaborator_hygiene():

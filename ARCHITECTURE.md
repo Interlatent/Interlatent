@@ -56,8 +56,11 @@ removed in 2.0.0.
 ### Teleop (VR remote demonstration)
 
 A human drives the robot remotely in VR and every human-driven step is recorded
-(`control_source="teleop"`) — today for policy-less demonstration recordings;
-mid-policy takeover (live intervention) is coming in a future release. The split is **engine on
+— `control_source="teleop"` for policy-less demonstration recordings,
+`control_source="intervention"` for a mid-policy takeover during a hosted
+inference session (engaging teleop preempts the policy; the node keeps
+shadow-stepping the inference client so handing control back costs ≈1 control
+tick). The split is **engine on
 the platform, thin stub on the client** (see
 [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md)):
 
