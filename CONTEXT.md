@@ -19,7 +19,8 @@ The long-running `interlatent-node` daemon on the robot. It pairs to the account
 with an API key, polls the dashboard, and converges to whatever inference session
 the dashboard assigns it. The DRTC GPU endpoint is provided per-session by the
 dashboard. _Avoid_: calling this a "coordinator" — there is no self-hosted control
-plane; the dashboard is the control plane.
+plane; the dashboard is the control plane (the *compute* may be self-hosted — see
+**GPU pod** — but session assignment always comes from the dashboard).
 
 **Session**:
 A live binding of a node (or a hand-written `connect_drtc()` loop) to a policy URI
@@ -28,9 +29,13 @@ running on a managed **GPU pod**. Created from the dashboard or via
 DRTC link and triggers any recorded dataset to be built/published.
 
 **GPU pod**:
-A managed cloud GPU that loads a policy and serves action chunks over the DRTC
-gRPC protocol. Pods are provisioned and warm-pooled by the dashboard, not
-self-hosted. List the pods available to your account with `interlatent gpus ls`.
+A GPU box that loads a policy and serves action chunks over the DRTC gRPC
+protocol. Two flavors, one protocol: **managed** pods the dashboard provisions
+and warm-pools, and **self-hosted** pods — your own hardware running
+`interlatent-serve` from the `interlatent-server` dist (`packages/server/`),
+registered to your account with your API key (see `docs/self-hosting.md`).
+Either way the dashboard assigns sessions and the node dials the pod directly.
+List the pods available to your account with `interlatent gpus ls`.
 
 **Preflight**:
 A non-destructive connectivity check (`interlatent-preflight`) that opens a real
