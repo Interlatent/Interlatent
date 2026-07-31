@@ -24,5 +24,99 @@ def test_sdk_wheel_contains_all_entry_point_packages():
         "interlatent.adapters.yam",            # --robot yam native loop
         "interlatent.behaviors",               # interlatent.Robot / behavior ls|run
         "interlatent.adapters.nori",           # --robot nori native loop
+        "interlatent.adapters.dimos",          # --robot dimos native loop
     ):
         assert needed in pkgs, f"{needed} missing from sdk wheel (no __init__.py?)"
+
+
+def test_dimos_blueprint_entry_point_declared():
+    """The dimos.blueprints entry point must stay in pyproject — dimos resolves
+    `dimos run interlatent.xarm7` through it (namespace = distribution name)."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    eps = data["project"]["entry-points"]["dimos.blueprints"]
+    assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
+
+
+def test_dimos_extra_covers_the_shipped_blueprint():
+    """`pip install 'interlatent[dimos]'` must be able to RUN `dimos run
+    interlatent.xarm7`, not just import the adapter. That takes dimos's
+    [manipulation] extra (Viser/ManipulationModule in the blueprint) plus three
+    packages dimos 0.0.14b1's websocket_vis module imports but never declares
+    (python-socketio, starlette, uvicorn). A bare `dimos` pin shipped once and
+    the blueprint entry point died on ImportError for every fresh install."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    extra = data["project"]["optional-dependencies"]["dimos"]
+
+    assert any(req.startswith("dimos[manipulation]") for req in extra), extra
+    for undeclared in ("python-socketio", "starlette", "uvicorn"):
+        assert any(req.startswith(undeclared) for req in extra), (
+            f"{undeclared} missing from the [dimos] extra — it is an undeclared "
+            "import of dimos's camera/websocket_vis modules (as of 0.0.14b1)"
+        )
+
+
+def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
+    """The reference stack must retain the hardware-free visual test path:
+    DIMOS's planner/manipulation module renders mock coordinator state in
+    Viser, while the exclusive servo task remains the only execution task."""
+    import ast
+
+    blueprint = (
+        REPO
+        / "packages"
+        / "sdk"
+        / "src"
+        / "interlatent"
+        / "adapters"
+        / "dimos"
+        / "blueprints.py"
+    )
+    tree = ast.parse(blueprint.read_text(encoding="utf-8"))
+    planner_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "planner"
+    ]
+    assert len(planner_calls) == 1
+
+    keywords = {keyword.arg: keyword.value for keyword in planner_calls[0].keywords}
+    visualization = ast.literal_eval(keywords["visualization"])
+    assert visualization == {"backend": "viser"}
+
+    source = blueprint.read_text(encoding="utf-8")
+    assert "make_xarm7_model_config" in source
+    assert 'update={"coordinator_task_name": None}' in source
+
+
+def test_dimos_native_loop_registered():
+    from interlatent.node.daemon import NodeDaemon
+
+    assert (
+        NodeDaemon._NATIVE_LOOPS["dimos"]
+        == "interlatent.adapters.dimos:control_loop"
+    )
+
+
+def test_dimos_config_imports_without_dimos_installed():
+    """config/kinds (and the adapter package itself) must never require the
+    [dimos] extra at import time — the daemon imports lazily, and base
+    installs list the loop in _NATIVE_LOOPS unconditionally."""
+    import importlib
+
+    for mod in (
+        "interlatent.adapters.dimos",
+        "interlatent.adapters.dimos.config",
+        "interlatent.adapters.dimos.kinds",
+        "interlatent.adapters.dimos.episode",
+    ):
+        importlib.import_module(mod)

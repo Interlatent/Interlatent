@@ -197,6 +197,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         where = "CAN (--robot-arg left_channel=/right_channel=)"
     elif pkg == "axol":
         where = "CAN (almond_axol)"
+    elif kind == "dimos":
+        # Native bus-peer kind: binds to a RUNNING dimos stack; no --port. Requires
+        # --robot-arg kind=<embodiment> (verified fail-closed at connect). Cameras
+        # are bus topics and a manual move needs none, so none are passed here.
+        from ..adapters.dimos.config import build_adapter_config as _dimos_config
+        from ..adapters.dimos.robot import DimosNativeRobot
+
+        adapter = DimosNativeRobot(_dimos_config(extra, None))
+        where = "the dimos bus (is `dimos run ...` up, same DIMOS_TRANSPORT?)"
     else:
         where = args.port
 
