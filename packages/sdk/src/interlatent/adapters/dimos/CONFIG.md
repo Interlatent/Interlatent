@@ -6,6 +6,12 @@ adapter streams `joint_command` to a dimos servo task, reads
 `coordinator_joint_state` + camera `Image` topics, and calls the coordinator's
 gripper RPC. See ADR 0018.
 
+Two embodiments (`--robot-arg kind=...`) are supported today: `xarm7` (used in
+the walkthrough below) and `a1z` (Galaxea A1Z — same shape and same
+hardware-free-by-default UX; read
+["Units and conventions (a1z)"](#units-and-conventions-a1z) for its gripper
+unit divergence before using it).
+
 ```bash
 # Terminal 1 — the dimos side (reference session blueprint, shipped by this SDK):
 dimos run interlatent.xarm7
@@ -14,6 +20,14 @@ dimos run interlatent.xarm7
 interlatent-node run --robot dimos \
   --robot-arg kind=xarm7 \
   --camera wrist=/color_image
+```
+
+Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
+are options on `dimos` itself, not on `dimos run` — they go **before** `run`:
+
+```bash
+dimos --can-port can0 run interlatent.a1z     # correct
+dimos run interlatent.a1z --can-port can0     # fails: "No such option: --can-port"
 ```
 
 The reference blueprint includes DIMOS's `ManipulationModule` with **Viser as
@@ -38,7 +52,7 @@ below.
 
 | key | default | meaning |
 |---|---|---|
-| `kind` | **required** | Declared embodiment (`xarm7`). Verified against the live stack at connect — a mismatch fail-closes with every problem listed. |
+| `kind` | **required** | Declared embodiment (`xarm7` \| `a1z`). Verified against the live stack at connect — a mismatch fail-closes with every problem listed. |
 | `transport` | follow `DIMOS_TRANSPORT`/.env | `lcm` \| `zenoh`. Both processes MUST agree or they silently cannot see each other. |
 | `joint_state_topic` | `/coordinator_joint_state` | Joint state subscription. |
 | `joint_command_topic` | `/joint_command` | Servo command publish. |
@@ -76,6 +90,104 @@ fail-closed by design.
   last commanded gripper value.
 - Timestamps: staleness is gated on local arrival time, not the producer `ts`
   (same-host loopback; immune to clock skew).
+
+## Units and conventions (a1z)
+
+Galaxea A1Z, `dimos run interlatent.a1z`:
+
+- Arm joints: **radians**, dimos names `arm/joint1..arm/joint6` mapped to
+  feature keys `arm_joint1.pos..arm_joint6.pos` (`/`→`_`), gripper last.
+- Gripper: **a normalized `[0, 1]` fraction, NOT meters** — the opposite
+  convention from xarm7. dimos's `a1z_hardware()` always configures
+  `gripper_open_position`/`gripper_closed_position`, which activates dimos's
+  generic hardware-normalization layer, so the wire value the adapter reads/
+  writes is already 0 (closed) .. 1 (open). Verify the open/closed direction
+  once against a live or mocked stack before trusting it in a policy.
+- **Hardware-free path, same UX as xarm7.** dimos's own `a1z_hardware()` has
+  no `mock_without_address`-style knob (without `--simulation` it always
+  attempts a real `galaxea_a1z` CAN connection), so this blueprint builds its
+  own mock `HardwareComponent` directly whenever `--can-port` is not
+  configured — `dimos run interlatent.a1z` (no flags) now gives a hardware-free
+  session, exactly like xarm7's default. `--simulation` still works too (routes
+  through `a1z_hardware()`'s own mock branch instead). Only when `--can-port`
+  IS configured does this blueprint attempt the real `galaxea_a1z` CAN adapter.
+- **No MuJoCo visualization path.** dimos ships no MuJoCo scene for A1Z, so
+  `--simulation` here selects the generic in-memory mock adapter (not a
+  physics sim). Viser (via the `ManipulationModule`) still renders the mock
+  adapter's live state, so this remains a useful hardware-free path — it is
+  just not a physically simulated one.
+- Position limits are transcribed verbatim from dimos's A1Z URDF, which
+  matches the vendor SDK's own joint-limit table exactly. Velocity caps are
+  NOT taken verbatim from either the URDF's `<limit velocity=...>` tags or the
+  vendor adapter's own cap (they disagree with each other by roughly 2x); see
+  the comment above `DIMOS_A1Z_PROFILE` in `robot_profile.py` for the derivation.
+
+## Adding a kind
+
+A dimos kind's declaration (`DimosKind`: dimos wire joint names, gripper
+joint/hardware id) and its teleop safety profile (`RobotProfile`: position
+limits, velocity caps, rest pose) both load at import time from
+[`adapters/dimos/robots/<kind>.toml`](robots/) — one file per kind, not
+Python literals. `kinds.py` scans that directory; `robot_profile.py` lazily
+loads a TOML's `[profile]` table the first time `get_profile("dimos_<kind>")`
+is called (cached after). Adding a kind's declaration is "add a TOML file,"
+not "edit `kinds.py`/`robot_profile.py`."
+
+A `[profile]` section is optional: if a kind's TOML omits it,
+`robot_profile.py` synthesizes a conservative default (±2π position bound, a
+small fixed velocity fraction, zero rest pose) and logs a loud warning every
+time it's used. This unblocks a kind moving at all without hand-tuning being
+a hard prerequisite — but an auto-derived profile is unaudited by
+construction; tune it before trusting it in a policy.
+
+Two scripts make the transcription step mechanical instead of manual, both
+reading the vendor's URDF directly (dimos bundles it as local package data —
+no live RPC exists to fetch limits/URDF from a *running* stack):
+
+- `packages/sdk/scripts/dimos_profile_gen.py` — joint position limits, for a
+  `[profile]` section.
+- `packages/sdk/scripts/dimos_kinematic_spec_gen.py` — the full joint chain
+  (origin/axis/limits), for VR teleop's `kinematic_spec.json` (see below).
+
+Neither is imported by any runtime path (`robot_profile.py`/`kinds.py` stay
+dimos-import-free either way); their output is reviewed and committed like
+any other robot's transcribed literals, not generated fresh each run.
+Velocity caps and rest pose are never auto-derived from these scripts — a
+URDF's velocity tag is typically a motor max, not a safe per-tick streaming
+cap, and a rest pose isn't a URDF property at all.
+
+The blueprint side (`adapters/dimos/blueprints.py`) is a shared, generic
+composition (`_streaming_blueprint`/`_mock_hardware`/`_resolve_hardware`) plus
+a few kind-specific lines binding that vendor's own hardware/model factory via
+`functools.partial`. Every kind gets the same hardware-free dev path this way,
+regardless of whether the vendor's own factory happens to support one
+directly.
+
+Full recipe: [`ROBOT.md`](../../../../../../ROBOT.md#special-case-the-dimos-adapter-the-robot-is-a-running-stack).
+
+## VR/QUIC teleoperation
+
+Driving a dimos kind from the VR/QUIC path (not just manual/policy joint
+actions) needs a separate data bundle the adapter's own kind/profile TOML does
+not supply: `interlatent_robots/<kind>/` — a browser-side IK descriptor
+(`kinematic_spec.json`) and its tuning surface (`ik_config.json`), see
+[`interlatent_robots/README.md`](../../../interlatent_robots/README.md).
+`a1z` ships one; `xarm7` does not yet.
+
+The lookup is keyed by the specific embodiment, not `--robot`: for
+`--robot dimos` sessions, `node/daemon.py` resolves `--robot-arg kind=` (since
+`--robot dimos` alone can't say which kinematically distinct arm is live) —
+without this a QUIC session logs `no local kinematic_spec for
+robot_kind='dimos'` and teleop simply doesn't start (everything else about the
+session is unaffected; this only disables the VR channel).
+
+`a1z`'s bundle was built without the SDK's canonical generator (a pod-side
+MuJoCo tool this SDK doesn't carry) — the joint-chain geometry is independently
+verified (`packaging/verify_urdf.py` passes: FK parity to ~1e-16 m across 256
+random configs), but the IK-solver tuning fields (`damping`, `webxr_to_base_R`,
+reach limits) are copied from YAM as an unverified starting point, not tuned
+for A1Z specifically. Verify against real VR hardware before trusting motion
+feel/direction.
 
 ## The blueprint contract
 

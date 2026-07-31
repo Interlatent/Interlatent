@@ -1,0 +1,55 @@
+# Galaxea A1Z behind a dimos ControlCoordinator.
+#
+# Joint names come from dimos's `make_joints("arm", 6)` (dimos/control/
+# components.py) with the hardware id the reference blueprint uses; the
+# gripper is declared separately (`gripper_joints=["arm/gripper"]`) same
+# shape as xarm7, but note the wire convention differs: A1Z's gripper is a
+# normalized [0,1] fraction (dimos's a1z_hardware() always sets
+# gripper_open_position/gripper_closed_position, activating generic
+# normalization), not xarm7's raw meters. See CONFIG.md for the full
+# unit writeup.
+name = "a1z"
+profile_name = "dimos_a1z"
+dimos_arm_joints = [
+    "arm/joint1", "arm/joint2", "arm/joint3",
+    "arm/joint4", "arm/joint5", "arm/joint6",
+]
+dimos_gripper_joint = "arm/gripper"
+gripper_hardware_id = "arm"
+
+# --- teleop safety profile (node/teleop/robot_profile.py, registered as
+# "dimos_a1z") ---
+#
+# Same safety posture as dimos_xarm7: dimos applies NO limits to the
+# joint_command stream, so this profile is the only envelope in the path.
+# Units: RADIANS for the arm (dimos's A1Z SDK is native radians/rad-s
+# throughout, unlike xarm7's internal deg<->rad conversion).
+#
+# Position limits transcribed verbatim from dimos's A1Z URDF
+# (a1z_description/A1Z_G1Z/urdf/A1Z_G1Z.urdf <limit> tags), which match the
+# vendor SDK's own _JOINT_LIMITS (dimos/hardware/manipulators/galaxea_a1z/
+# adapter.py) exactly. J2/J3 rest at their own lower/upper mechanical stop
+# (0 rad) -- same YAM-style edge case as YAM_PROFILE's joint_1/joint_2, not
+# a bug. Generated/verified with packages/sdk/scripts/dimos_profile_gen.py.
+#
+# Velocity caps: the URDF's own <limit velocity=...> tags (5.65 J1-3, 3.77
+# J4, 10.47 J5-6) and the vendor adapter's separate _VELOCITY_MAX
+# ([12,12,12,7,20,20], "~70% of motor hardware max" per its own comment)
+# disagree with each other by roughly 2x despite both claiming rad/s --
+# neither is trustworthy as a per-tick streaming cap. These start well below
+# the smaller of the two per joint (heavier base joints J1-J3 tighter) and
+# should only widen after reading real-hardware logs.
+[profile]
+joint_limits = [
+    [-2.094, 2.094],   # arm_joint1
+    [0.0, 3.142],       # arm_joint2 (lower stop = 0)
+    [-3.142, 0.0],      # arm_joint3 (upper stop = 0)
+    [-1.309, 1.309],    # arm_joint4
+    [-1.484, 1.484],    # arm_joint5
+    [-2.007, 2.007],    # arm_joint6
+    # Gripper: unlike xarm7's meters convention, this is a normalized
+    # fraction, 0 closed .. 1 open. Verify direction on first hardware/mock run.
+    [0.0, 1.0],
+]
+max_velocity = [1.0, 1.0, 1.0, 1.5, 1.5, 1.5, 2.0]
+rest_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]

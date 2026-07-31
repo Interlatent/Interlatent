@@ -110,3 +110,49 @@ against dimos `0.0.14b1`):
 - No vendored wire fixtures: the "protocol" is dimos's Python API, pinned by
   the extra's version bound; a snapshot would drift instantly. Conformance is
   the integration suite against `dimos run interlatent.xarm7` (mock/sim).
+
+## Amendment (2026-07-31): a second kind, and kind declarations move to data
+
+**A1Z added.** Galaxea A1Z (`--robot-arg kind=a1z`) shipped following the
+identical contract in this ADR — no new decision, just a second instance of
+it. Two divergences from xArm7 worth recording as facts, not decisions: A1Z's
+gripper wire value is a normalized `[0,1]` fraction (xArm7's is raw meters —
+dimos's own hardware-normalization layer activates or not per-kind depending
+on whether the vendor's `HardwareComponent` factory sets
+`gripper_open_position`/`gripper_closed_position`), and A1Z's vendor hardware
+factory has no address-optional mock fallback the way xArm7's does.
+
+**Per-kind declarations and profiles moved from Python literals to
+`adapters/dimos/robots/<kind>.toml`.** Confirmed adding A1Z that the two-file
+pattern (a `DimosKind` block in `kinds.py`, a `RobotProfile` block in
+`robot_profile.py`) doesn't scale as *decisions* — it's *data* duplicated
+across two Python modules for every kind. `kinds.py` now scans its `robots/`
+directory at import; `robot_profile.py` lazily loads a TOML's `[profile]`
+table per kind (falling back to a conservative, loudly-logged auto-derived
+profile if absent — a hand-tuned profile is now optional, not a hard
+blocker). Neither module gained a dimos import doing this — both stay
+importable without the `[dimos]` extra, same invariant as before.
+
+**The per-kind blueprint duplication (decision 4) is now a shared, generic
+composition** (`_streaming_blueprint`/`_mock_hardware`/`_resolve_hardware` in
+`blueprints.py`) plus a few kind-specific lines binding that vendor's
+hardware/model factory via `functools.partial`. The generic mock-hardware
+path is a genuine behavior improvement, not just deduplication: every kind
+now gets a hardware-free dev path regardless of whether its own vendor
+factory happens to support one (confirmed live: `dimos run interlatent.a1z`
+with zero flags now works, where it previously required `--simulation`).
+
+**Decision 2's fallback caveat is still live** — the `get_task_info`-style RPC
+this ADR flagged as "worth contributing upstream" was scoped concretely (a
+handful of small, mechanical `ControlCoordinator` additions: joint↔hardware
+topology, per-hardware limits, gripper units, a lock-free task-timeout
+summary) but deliberately **not pursued** — dimos is not this team's software
+to change. Every kind added under this contract inherits the same
+probe-fallback verification gap until that changes upstream.
+
+**VR/QUIC teleoperation is a separate concern this ADR never covered.** It
+needs its own per-kind data bundle (`interlatent_robots/<kind>/`, ADR 0017)
+that a `DimosKind`/`RobotProfile` does not supply, and the lookup keys off
+the specific embodiment (`--robot-arg kind=`), not `--robot dimos` — a gap
+fixed in `node/daemon.py` alongside A1Z's bundle. `xarm7` does not have one
+yet.
