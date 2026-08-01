@@ -295,10 +295,15 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image        # terminal 2: the node
 ```
 
-Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
-are options on `dimos` itself, not on `dimos run` — they go *before* `run`
-(`dimos --can-port can0 run interlatent.a1z`), not after; `dimos run ...
---can-port can0` fails with "No such option."
+Global dimos-process flags (`--simulation`, `--xarm7-ip`, ...) are options on
+`dimos` itself, not on `dimos run` — they go *before* `run`
+(`dimos --xarm7-ip 192.168.1.185 run interlatent.xarm7`), not after; `dimos run
+... --xarm7-ip ...` fails with "No such option." Note that the shipped `a1z`
+blueprint is **mock-only**: dimos 0.0.14b1 ships A1Z as a planning model with no
+Galaxea driver in its hardware registry, so no flag makes it reach real motors.
+Real A1Z hardware is driven by pointing `--robot dimos --robot-arg kind=a1z` at
+a stack started some other way — the adapter is a bus peer and does not care
+whose blueprint built the session. See `adapters/dimos/CONFIG.md`.
 
 **VR/QUIC teleoperation** needs a separate data bundle per kind
 (`interlatent_robots/<kind>/`, see

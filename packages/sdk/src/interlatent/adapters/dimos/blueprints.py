@@ -53,7 +53,10 @@ try:
     from dimos.hardware.sensors.camera.module import CameraModule
     from dimos.robot.manipulators.common.blueprints import coordinator, planner
     from dimos.robot.manipulators.common.sim import mujoco_if_sim
-    from dimos.robot.manipulators.a1z.config import a1z_hardware, make_a1z_model_config
+    from dimos.robot.manipulators.a1z.config import (
+        make_a1z_hardware,
+        make_a1z_model_config,
+    )
     from dimos.robot.manipulators.xarm.config import (
         XARM7_SIM_PATH,
         make_xarm7_model_config,
@@ -98,14 +101,7 @@ def _camera_if_real() -> tuple:
     return (CameraModule.blueprint(),)
 
 
-def _mock_hardware(
-    hw_id: str,
-    dof: int,
-    *,
-    has_gripper: bool,
-    gripper_open_position: float | None = None,
-    gripper_closed_position: float | None = None,
-) -> HardwareComponent:
+def _mock_hardware(hw_id: str, dof: int, *, has_gripper: bool) -> HardwareComponent:
     """Vendor-independent hardware-free dev path.
 
     Built directly from dimos's own uniform primitives (``HardwareComponent``,
@@ -116,6 +112,13 @@ def _mock_hardware(
     own differently-defaulted knob; openyam is always mock) — this gives every
     kind the same hardware-free path regardless of what its vendor factory
     happens to support.
+
+    No gripper open/closed positions: ``HardwareComponent`` (dimos 0.0.14b1,
+    ``dimos/control/components.py``) is a plain dataclass with no such fields,
+    so passing them was a ``TypeError`` on every hardware-free start. The
+    gripper's real range lives SDK-side in ``robots/<kind>.toml`` anyway — that
+    profile is what the adapter clamps against, and it is the only limit in the
+    path, so nothing is lost by dropping them here.
     """
     return HardwareComponent(
         hardware_id=hw_id,
@@ -123,8 +126,6 @@ def _mock_hardware(
         joints=make_joints(hw_id, dof),
         adapter_type="mock",
         gripper_joints=make_gripper_joints(hw_id) if has_gripper else [],
-        gripper_open_position=gripper_open_position,
-        gripper_closed_position=gripper_closed_position,
     )
 
 
@@ -135,8 +136,6 @@ def _resolve_hardware(
     *,
     has_gripper: bool,
     address_configured: bool,
-    gripper_open_position: float | None = None,
-    gripper_closed_position: float | None = None,
 ) -> HardwareComponent:
     """Real hardware if an address is configured, or if ``--simulation`` is set
     (the vendor's own factory already knows how to build its own sim/mock
@@ -144,16 +143,16 @@ def _resolve_hardware(
     :func:`_mock_hardware` — the vendor-independent hardware-free fallback,
     given uniformly regardless of whether the vendor's own factory supports an
     address-optional mock knob.
+
+    ``real_factory`` must be a vendor *policy* wrapper (one that reads
+    ``global_config`` and picks its own adapter_type/address, like
+    ``xarm7_hardware``), not a raw component builder — a raw builder returns a
+    mock no matter what this branch decides. Not every vendor ships one; see
+    the A1Z block below.
     """
     if global_config.simulation or address_configured:
         return real_factory(hw_id)
-    return _mock_hardware(
-        hw_id,
-        dof,
-        has_gripper=has_gripper,
-        gripper_open_position=gripper_open_position,
-        gripper_closed_position=gripper_closed_position,
-    )
+    return _mock_hardware(hw_id, dof, has_gripper=has_gripper)
 
 
 def _without_coordinator_task(model):
@@ -216,24 +215,22 @@ xarm7 = _streaming_blueprint(
 # Galaxea A1Z + gripper
 # ---------------------------------------------------------------------------
 
-_a1z_real_hardware = partial(a1z_hardware, has_gripper=True)
-
+# A1Z does NOT go through _resolve_hardware, because dimos 0.0.14b1 (the newest
+# release; nothing newer exists on PyPI) ships no real A1Z adapter to resolve
+# TO. Unlike xarm7, A1Z has no vendor policy wrapper -- only the raw builder
+# `make_a1z_hardware`, which defaults to adapter_type="mock", address=None. Both
+# of dimos's own A1Z blueprints (a1z/blueprints/basic.py) call it bare for the
+# same reason, and `global_config.can_port` -- which this used to gate on -- is
+# piper's knob, not A1Z's: nothing in the A1Z path reads it. Gating a "real"
+# branch on it produced a mock component wearing a real-hardware label.
+#
+# Calling dimos's own builder (rather than _mock_hardware) means we inherit real
+# support automatically if a later dimos teaches this factory an adapter/address
+# -- that is the seam to revisit, along with a sim_path once dimos ships a
+# MuJoCo scene for A1Z.
 a1z = _streaming_blueprint(
-    _resolve_hardware(
-        _a1z_real_hardware,
-        "arm",
-        6,
-        has_gripper=True,
-        address_configured=bool(global_config.can_port),
-        # A1Z's own gripper convention: normalized [0,1] fraction (both set) --
-        # matches a1z_hardware()'s own gripper_open_position/closed_position.
-        gripper_open_position=1.0,
-        gripper_closed_position=0.0,
-    ),
+    make_a1z_hardware("arm", has_gripper=True),
     model=make_a1z_model_config(name="arm", has_gripper=True),
-    # No sim_path: dimos ships no MuJoCo scene for A1Z today. Unlike before,
-    # A1Z now gets a hardware-free dev path WITHOUT --simulation too (just
-    # don't configure --can-port) -- see _resolve_hardware above.
 )
 
 

@@ -139,6 +139,7 @@ class FakeBus:
         self.images = {}
         self.commands = []
         self.markers = []
+        self.markers_seen_closed = []
         self.opened = False
         self.closed = False
 
@@ -170,6 +171,10 @@ class FakeBus:
 
     def publish_episode_marker(self, marker):
         self.markers.append(marker)
+        # A marker published after close() would be dropped on the real bus
+        # (DimosBus.publish_episode_marker returns early once the transport is
+        # gone). Recorded so tests can assert the ordering, not just the count.
+        self.markers_seen_closed.append(self.closed)
 
 
 class FakeCoordinator:
@@ -334,19 +339,53 @@ def test_publish_marker_best_effort_never_raises():
     publish_marker(ExplodingBus(), "ep-1", "stop", "dimos_xarm7")  # must not raise
 
 
-def test_loop_publishes_start_and_stop_markers(monkeypatch):
-    """The native loop brackets every episode with bus markers (ADR 0018)."""
+def test_robot_brackets_the_episode_with_markers_before_the_bus_closes():
+    """The robot owns the ADR 0018 markers, and "stop" beats ``bus.close()``.
+
+    Ownership sits on connect/disconnect rather than in the loop because the
+    shared runner (``looprunner.run_control_loop``) disconnects the robot in its
+    own ``finally``, and ``disconnect()`` closes the bus. A "stop" published
+    from the loop's finally would therefore land on a closed transport and be
+    silently dropped — the dimos-side memory2 recorder would never learn the
+    episode ended. ``markers_seen_closed`` is what pins that ordering.
+    """
+    robot, bus, *_ = make_robot()
+    robot.episode_id = "ep-42"
+
+    robot.connect()
+    assert [(m.episode_id, m.event) for m in bus.markers] == [("ep-42", "start")]
+
+    robot.disconnect()
+    assert [(m.episode_id, m.event) for m in bus.markers] == [
+        ("ep-42", "start"), ("ep-42", "stop"),
+    ]
+    assert bus.closed
+    assert bus.markers_seen_closed == [False, False], (
+        "an episode marker was published after the bus closed"
+    )
+    assert all(m.robot_kind == "dimos_xarm7" for m in bus.markers)
+
+
+def test_robot_publishes_no_markers_without_an_episode():
+    """``interlatent-act`` / behaviors open the same adapter but bracket no
+    episode; an unset ``episode_id`` must stay silent on the bus."""
+    robot, bus, *_ = make_robot()
+    robot.connect()
+    robot.disconnect()
+    assert bus.markers == []
+
+
+def test_loop_hands_the_episode_id_to_the_robot(monkeypatch):
+    """The shim's half of the marker contract: set ``episode_id`` BEFORE
+    connect(), so connect() can publish "start" (ADR 0018)."""
     import interlatent.adapters.dimos.robot as robot_mod
     from interlatent.adapters.dimos.loop import control_loop
 
-    bus = FakeBus()
-    bus.joint_state = fresh_joint_state()
+    seen = {}
 
     class LoopFakeRobot:
         robot_kind = "dimos_xarm7"
-        _bus = bus
-        telemetry_fresh = True
-        obs_age_ms = 0.0
+        episode_id = ""
         action_features = [f"arm_joint{i}.pos" for i in range(1, 8)] + [
             "arm_gripper.pos"
         ]
@@ -355,7 +394,7 @@ def test_loop_publishes_start_and_stop_markers(monkeypatch):
             pass
 
         def connect(self):
-            pass
+            seen["episode_id_at_connect"] = self.episode_id
 
         def disconnect(self):
             pass
@@ -388,6 +427,25 @@ def test_loop_publishes_start_and_stop_markers(monkeypatch):
         robot_extra={"kind": "xarm7"},
         robot_cameras={},
     )
-    events = [(m.episode_id, m.event) for m in bus.markers]
-    assert events[0] == ("ep-42", "start")
-    assert events[-1] == ("ep-42", "stop")
+    assert seen["episode_id_at_connect"] == "ep-42"
+
+
+def test_pre_tick_holds_on_stale_joint_state_and_recovers():
+    """Staleness is a ``pre_tick`` verdict now, not an inline loop branch: the
+    bus does the gate/smoother reset a hold owes (ADR 0022)."""
+    from interlatent.node.movement import TickVerdict
+
+    robot, bus, *_ = make_robot(staleness_ms="50")
+    robot.connect()
+
+    assert robot.pre_tick({}) is TickVerdict.PROCEED
+
+    # Age the cached joint state past the threshold.
+    bus.joint_state = CachedMsg(
+        bus.joint_state.msg, time.monotonic() - 1.0, bus.joint_state.producer_ts
+    )
+    assert robot.pre_tick({}) is TickVerdict.HOLD_NO_CAPTURE
+    assert robot.pre_tick({}) is TickVerdict.HOLD_NO_CAPTURE  # stays held
+
+    bus.joint_state = fresh_joint_state()
+    assert robot.pre_tick({}) is TickVerdict.PROCEED

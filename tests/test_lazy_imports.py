@@ -40,6 +40,7 @@ EXTRAS_ONLY = [
     "pyzmq",            # [nori]
     "zmq",              # [nori]  (pyzmq's import name)
     "pyzed",            # host-installed ZED SDK, not on PyPI
+    "dimos",            # [dimos]
 ]
 
 # Modules that legitimately require an extra and make no extras-free claim.
@@ -53,6 +54,16 @@ EXEMPT = {
     # process never touches it. Exempting it is the point of the file, not a
     # concession - the modules around it are what this suite protects.
     "interlatent.node.teleop._quic_client",
+    # THE isolation boundary for [dimos]: this module is not code the SDK ever
+    # imports. It exists only as the target of the `dimos.blueprints` entry
+    # points (pyproject), which dimos itself resolves lazily — so a base install
+    # never touches it, and `dimos run interlatent.xarm7` on a half-installed box
+    # gets one actionable error instead of a deep stack. It cannot defer its
+    # imports: the entry points name module-level blueprint OBJECTS
+    # (`blueprints:xarm7`), built by calling into dimos at import time. Every
+    # other adapters/dimos module imports dimos inside functions and is covered
+    # by this suite as normal.
+    "interlatent.adapters.dimos.blueprints",
 }
 
 # Declared in [project].dependencies — always present in a real install, so a

@@ -9,6 +9,7 @@ build time.
 """
 from pathlib import Path
 
+import pytest
 from setuptools import find_packages
 
 REPO = Path(__file__).resolve().parent.parent
@@ -39,6 +40,37 @@ def test_dimos_blueprint_entry_point_declared():
         data = tomllib.load(fh)
     eps = data["project"]["entry-points"]["dimos.blueprints"]
     assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
+
+
+def test_dimos_blueprints_actually_build_against_the_installed_dimos():
+    """Every declared entry point must RESOLVE, not merely parse.
+
+    The rest of the dimos-blueprint coverage here is ``ast``-only (it reads the
+    source and never imports it), which is how ``blueprints.py`` shipped
+    importing ``a1z_hardware`` — a name no released dimos exports; the real one
+    is ``make_a1z_hardware`` — and calling ``HardwareComponent`` with
+    ``gripper_open_position``/``gripper_closed_position``, fields that dataclass
+    does not have. Both kinds live in one module, so the A1Z failure also took
+    ``dimos run interlatent.xarm7`` down: the only visible symptom was the
+    tier-2 integration test failing on an *xarm7* stack.
+
+    Skipped without the [dimos] extra; the import guard in ``blueprints.py``
+    means a base install can never run this.
+    """
+    import importlib
+    import tomllib
+
+    pytest.importorskip("dimos", reason="[dimos] extra not installed")
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        eps = tomllib.load(fh)["project"]["entry-points"]["dimos.blueprints"]
+
+    assert eps, "no dimos.blueprints entry points declared"
+    for name, target in eps.items():
+        mod_name, _, attr = target.partition(":")
+        blueprint = getattr(importlib.import_module(mod_name), attr)
+        assert blueprint is not None, f"entry point {name!r} resolved to None"
 
 
 def test_dimos_extra_covers_the_shipped_blueprint():
@@ -99,18 +131,32 @@ def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
 
 
 def test_dimos_native_loop_registered():
-    from interlatent.node.daemon import NodeDaemon
+    """`--robot dimos` must reach the dimos shim, not the LeRobot wrapper.
 
+    This asserted ``NodeDaemon._NATIVE_LOOPS`` — one of the four disagreeing
+    maps ADR 0022 collapsed into ``adapters._NATIVE_KINDS`` — so it broke open
+    on the attribute rather than on the registration, and hid the fact that
+    dimos was never added to the surviving table: ``native_loop_path("dimos")``
+    returned None and the daemon fell through to ``lerobot_control_loop``.
+    """
+    from interlatent.adapters import native_kind, native_loop_path
+
+    assert native_kind("dimos") == "dimos"
     assert (
-        NodeDaemon._NATIVE_LOOPS["dimos"]
-        == "interlatent.adapters.dimos:control_loop"
+        native_loop_path("dimos") == "interlatent.adapters.dimos.loop:control_loop"
     )
+    # The `dimos_<embodiment>` sugar resolves as a native kind (so the act CLI
+    # does not demand a --port) but carries NO session loop: the shim builds its
+    # config straight from --robot-arg, so a driving session names the canonical
+    # kind. Same rule as the yam_left/yam_right variants.
+    assert native_kind("dimos_xarm7") == "dimos"
+    assert native_loop_path("dimos_xarm7") is None
 
 
 def test_dimos_config_imports_without_dimos_installed():
     """config/kinds (and the adapter package itself) must never require the
     [dimos] extra at import time — the daemon imports lazily, and base
-    installs list the loop in _NATIVE_LOOPS unconditionally."""
+    installs list the loop in _NATIVE_KINDS unconditionally."""
     import importlib
 
     for mod in (

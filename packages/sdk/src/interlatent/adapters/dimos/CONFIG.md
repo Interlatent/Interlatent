@@ -26,9 +26,12 @@ Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go **before** `run`:
 
 ```bash
-dimos --can-port can0 run interlatent.a1z     # correct
-dimos run interlatent.a1z --can-port can0     # fails: "No such option: --can-port"
+dimos --xarm7-ip 192.168.1.185 run interlatent.xarm7   # correct
+dimos run interlatent.xarm7 --xarm7-ip 192.168.1.185   # fails: "No such option"
 ```
+
+(`--can-port` is `piper`'s knob and does **not** reach A1Z motors — see the
+A1Z notes below.)
 
 The reference blueprint includes DIMOS's `ManipulationModule` with **Viser as
 its default visualization backend**. Viser serves its browser UI at
@@ -97,20 +100,33 @@ Galaxea A1Z, `dimos run interlatent.a1z`:
 
 - Arm joints: **radians**, dimos names `arm/joint1..arm/joint6` mapped to
   feature keys `arm_joint1.pos..arm_joint6.pos` (`/`→`_`), gripper last.
-- Gripper: **a normalized `[0, 1]` fraction, NOT meters** — the opposite
-  convention from xarm7. dimos's `a1z_hardware()` always configures
-  `gripper_open_position`/`gripper_closed_position`, which activates dimos's
-  generic hardware-normalization layer, so the wire value the adapter reads/
-  writes is already 0 (closed) .. 1 (open). Verify the open/closed direction
-  once against a live or mocked stack before trusting it in a policy.
-- **Hardware-free path, same UX as xarm7.** dimos's own `a1z_hardware()` has
-  no `mock_without_address`-style knob (without `--simulation` it always
-  attempts a real `galaxea_a1z` CAN connection), so this blueprint builds its
-  own mock `HardwareComponent` directly whenever `--can-port` is not
-  configured — `dimos run interlatent.a1z` (no flags) now gives a hardware-free
-  session, exactly like xarm7's default. `--simulation` still works too (routes
-  through `a1z_hardware()`'s own mock branch instead). Only when `--can-port`
-  IS configured does this blueprint attempt the real `galaxea_a1z` CAN adapter.
+- Gripper: the SDK-side range in `robots/a1z.toml` is the contract. An earlier
+  version of this section described `gripper_open_position`/
+  `gripper_closed_position` fields activating a dimos normalization layer;
+  `HardwareComponent` (dimos 0.0.14b1, `dimos/control/components.py`) has no
+  such fields. Verify the open/closed direction once against a live or mocked
+  stack before trusting it in a policy.
+- **This blueprint is mock-only, and that is a dimos limitation, not a
+  choice.** dimos 0.0.14b1 — the newest release; nothing newer exists on PyPI —
+  ships A1Z as a *planning model* only: `dimos/robot/manipulators/a1z/config.py`
+  is URDF paths, joint names, and collision pairs, and its only hardware
+  helper, `make_a1z_hardware`, is a raw builder that defaults to
+  `adapter_type="mock", address=None`. There is no Galaxea driver to bind to:
+  the manipulator registry
+  (`dimos.hardware.manipulators.registry.adapter_registry.available()`) holds
+  exactly `a750, mock, openarm, piper, sim_mujoco, xarm`. Both of dimos's own
+  A1Z blueprints (`a1z/blueprints/basic.py`) call `make_a1z_hardware("arm")`
+  bare for the same reason. `--can-port` does NOT reach A1Z motors through this
+  blueprint — that flag is `piper`'s knob, and nothing in the A1Z path reads
+  it; a previous version of this blueprint gated a "real hardware" branch on it
+  and produced a mock component wearing a real-hardware label.
+  **Driving real A1Z hardware does not require this blueprint.** The adapter is
+  a bus peer: point `--robot dimos --robot-arg kind=a1z` at any running stack
+  that satisfies the ADR 0018 session contract (servo task, non-zero timeout,
+  exclusive joint claim) — a dimos-side or vendor-side blueprint is equally
+  valid. If your dimos build *does* expose a Galaxea driver, wiring it here is
+  one line: pass that registry name as `adapter_type=` plus the CAN port as
+  `address=` in `blueprints.py`'s `a1z` block.
 - **No MuJoCo visualization path.** dimos ships no MuJoCo scene for A1Z, so
   `--simulation` here selects the generic in-memory mock adapter (not a
   physics sim). Viser (via the `ManipulationModule`) still renders the mock

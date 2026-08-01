@@ -28,14 +28,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:  # import-weight: movement.py is base-install-safe, but the
+    # runtime import stays inside pre_tick to match the nori precedent.
+    from ...node.movement import TickVerdict
 
 from ..._clamp_log import warn_clamp
 from ..base import JointSpec, ManualActionInterface
 from .bus import DimosBus, image_to_rgb
 from .config import DimosAdapterConfig
+from .episode import publish_marker
 
 _logger = logging.getLogger(__name__)
 
@@ -90,7 +95,16 @@ class DimosNativeRobot(ManualActionInterface):
         self._last: Optional[np.ndarray] = None  # last-accepted arm command
         self._drop_count = 0
         self._stale_warned: set[str] = set()
+        self._stale_hold_warned = False
         self._connected = False
+        #: Episode of record, set by the session shim (``loop.py``) BEFORE
+        #: ``connect()``. Empty for one-shot CLI / behaviors use, which brackets
+        #: no episode and publishes no markers. Owning this here rather than in
+        #: the loop is what keeps the ADR 0018 markers inside the bus's own
+        #: lifetime: the shared runner disconnects the robot in its ``finally``
+        #: (looprunner.py), so a loop-published "stop" would land on a bus that
+        #: ``disconnect()`` had already closed.
+        self.episode_id: str = ""
 
     # ------------------------------------------------------------------
     # metadata
@@ -146,6 +160,8 @@ class DimosNativeRobot(ManualActionInterface):
             self.kind.name, len(self._keys), list(self.config.cameras),
             self._max_step,
         )
+        if self.episode_id:
+            publish_marker(self._bus, self.episode_id, "start", self.robot_kind)
 
     def _apply_transport_override(self) -> None:
         if self.config.transport is None:
@@ -201,6 +217,9 @@ class DimosNativeRobot(ManualActionInterface):
             )
 
     def disconnect(self) -> None:
+        # First, while the bus is still open (best-effort; never raises).
+        if self.episode_id:
+            publish_marker(self._bus, self.episode_id, "stop", self.robot_kind)
         if self._coordinator is not None:
             try:
                 self._coordinator.stop_rpc_client()
@@ -277,6 +296,38 @@ class DimosNativeRobot(ManualActionInterface):
         """False when joint state has gone stale — the loop must hold (no
         motion, no capture) rather than act on old joints."""
         return self._connected and self.obs_age_ms <= self.config.staleness_ms
+
+    def pre_tick(self, obs: dict) -> "TickVerdict":
+        """dimos's episode guard: joint state that has gone stale (ADR 0022).
+
+        Stale joints must not drive the SafetyGate, feed the policy, or be
+        recorded as live state — a gap in the dataset beats a poisoned one — so
+        a stale tick holds: no motion, no capture, episode continues. The dimos
+        servo task's own non-zero ``timeout`` owns the robot meanwhile
+        (hold-last semantics), which is exactly why the blueprint contract
+        refuses a zero timeout.
+
+        Pure disclosure → verdict. The discontinuity hygiene a hold owes (gate
+        reset, smoother reset) is done by ``CommandBus.guard_interrupt``, so it
+        cannot be forgotten here. ``obs`` is unused: staleness is a property of
+        the bus cache's arrival clock, not of the observation's contents.
+        """
+        from ...node.movement import TickVerdict
+
+        if self.telemetry_fresh:
+            if self._stale_hold_warned:
+                self._stale_hold_warned = False
+                _logger.info("dimos joint state recovered — resuming.")
+            return TickVerdict.PROCEED
+
+        if not self._stale_hold_warned:
+            self._stale_hold_warned = True
+            _logger.warning(
+                "dimos joint state stale (%.0f ms > %.0f ms) — holding (no "
+                "motion, no capture) until the stream recovers.",
+                self.obs_age_ms, self.config.staleness_ms,
+            )
+        return TickVerdict.HOLD_NO_CAPTURE
 
     # ------------------------------------------------------------------
     # action
