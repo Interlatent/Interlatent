@@ -227,7 +227,7 @@ a1z = _streaming_blueprint(
         address_configured=bool(global_config.can_port),
         # A1Z's own gripper convention: normalized [0,1] fraction (both set) --
         # matches a1z_hardware()'s own gripper_open_position/closed_position.
-        gripper_open_position=0.1,
+        gripper_open_position=1.0,
         gripper_closed_position=0.0,
     ),
     model=make_a1z_model_config(name="arm", has_gripper=True),
