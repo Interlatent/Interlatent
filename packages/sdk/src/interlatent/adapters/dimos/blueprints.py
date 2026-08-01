@@ -40,6 +40,18 @@ from __future__ import annotations
 
 import inspect
 from functools import partial
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Declared, not assigned: at runtime these are produced on demand by this
+    # module's PEP 562 ``__getattr__`` (see the bottom of the file). Without
+    # the declarations, static tools read ``__all__`` as exporting undefined
+    # names (ruff F822). Typed ``Any`` rather than dimos's Blueprint on
+    # purpose — the two dimos lineages this module supports do not agree on
+    # every vendor type path, and a type-only import is not worth reintroducing
+    # that coupling.
+    xarm7: Any
+    a1z: Any
 
 try:
     from dimos.control.components import (
