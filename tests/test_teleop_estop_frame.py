@@ -36,39 +36,29 @@ def test_legacy_frames_unchanged():
 
 
 # --------------------------------------------------------------------------- #
-# Sticky channel latch (WS + QUIC share the semantics)                         #
+# Sticky latch — the shared store both the decode seam and QUIC channel use     #
 # --------------------------------------------------------------------------- #
 
 
-def _ws_channel():
-    from interlatent.node.teleop.channel import TeleopChannel
+def test_frame_store_sticky_latch_survives_frame_drop():
+    # The sticky e-stop lives in LatestFrameStore (shared by every transport),
+    # so a latched estop must survive the disconnect frame-drop / stale-frame
+    # rule that clears the held frame.
+    from interlatent.node.teleop._frame_store import LatestFrameStore
 
-    # Construct without connecting; we drive the decode seam directly.
-    return TeleopChannel.__new__(TeleopChannel)
+    store = LatestFrameStore()
 
-
-def test_ws_channel_sticky_latch_survives_frame_drop():
-    import threading
-
-    from interlatent.node.teleop.channel import TeleopChannel
-
-    ch = TeleopChannel.__new__(TeleopChannel)
-    ch._lock = threading.Lock()
-    ch._latest = None
-    ch._estop_seen = False
-
-    # Simulate the receive path: estop frame decoded, then the disconnect
-    # handler drops _latest (the stale-frame rule would do the same).
+    # Simulate the receive path: estop frame decoded (latched at decode), then
+    # the disconnect handler drops the held frame (the stale-frame rule would
+    # do the same).
     frame = TeleopFrame.from_json('{"estop": true, "seq": 9}')
-    with ch._lock:
-        ch._latest = frame
-        if frame.estop:
-            ch._estop_seen = True
-    with ch._lock:
-        ch._latest = None  # disconnect drop — must NOT clear the latch
+    store._store_frame(frame)
+    if frame.estop:
+        store._latch_estop()
+    store._drop_frame()  # disconnect drop — must NOT clear the latch
 
-    assert ch.consume_estop() is True, "estop lost to the frame drop"
-    assert ch.consume_estop() is False, "consume must clear exactly once"
+    assert store.consume_estop() is True, "estop lost to the frame drop"
+    assert store.consume_estop() is False, "consume must clear exactly once"
 
 
 def test_quic_channel_estop_latches_before_dedupe():

@@ -175,6 +175,25 @@ class NodeDaemon:
             _LOG.info(
                 "Node host addresses: %s (hostname=%s)", ", ".join(_ips), _host
             )
+        # Surface tick spools left behind by a crashed run (ADR 0023).
+        # A spool whose session gets re-assigned resumes draining
+        # automatically (TickSpool is keyed by session id); anything else
+        # is retained for the GC retention window, then removed loudly.
+        try:
+            from ..inference.client import spool as tick_spool
+
+            for orphan in tick_spool.orphan_sessions():
+                if orphan["pending_count"]:
+                    _LOG.warning(
+                        "orphan tick spool: session=%s has %d unsent ticks "
+                        "(%.0f MB) at %s — resumes automatically if the "
+                        "session is re-assigned; GC'd after retention",
+                        orphan["session_id"], orphan["pending_count"],
+                        orphan["pending_bytes"] / 1e6, orphan["dir"],
+                    )
+            tick_spool.gc_orphans()
+        except Exception:
+            _LOG.warning("orphan spool scan failed (non-fatal)", exc_info=True)
         # Best-effort: tell the dashboard what hardware is attached so
         # the user can examine it (robot type, USB port, cameras). Never
         # fatal — a failed report just leaves the panel empty.
@@ -218,12 +237,39 @@ class NodeDaemon:
     # Heartbeat
     # ------------------------------------------------------------------
 
+    def _recording_state(self) -> dict:
+        """Spool/drain telemetry for the heartbeat (ADR 0023).
+
+        ``blocked`` is the active session's hard-stop state; the spool
+        totals cover every session dir on disk (active + retained), so
+        the backend can see un-drained backlog and gate the next launch
+        on drain-done instead of the old blind ~5s flush.
+        """
+        state: dict = {"blocked": False, "spool_pending": 0, "spool_bytes": 0}
+        h = self._active
+        if h is not None:
+            try:
+                state["blocked"] = bool(getattr(h.client, "recording_blocked", False))
+            except Exception:
+                pass
+        try:
+            from ..inference.client import spool as tick_spool
+
+            sessions = tick_spool.orphan_sessions()
+            state["spool_pending"] = sum(o["pending_count"] for o in sessions)
+            state["spool_bytes"] = sum(o["pending_bytes"] for o in sessions)
+        except Exception:
+            pass
+        state["drain_done"] = state["spool_pending"] == 0
+        return state
+
     async def _heartbeat_loop(self) -> None:
         backoff = self.cfg.reconnect_backoff_s
         while True:
             try:
                 r = await self._http.post(
-                    f"/api/v1/nodes/{self.cfg.node_id}/heartbeat"
+                    f"/api/v1/nodes/{self.cfg.node_id}/heartbeat",
+                    json={"recording": self._recording_state()},
                 )
                 if r.status_code >= 400:
                     _LOG.warning("Heartbeat %s: %s", r.status_code, r.text)
@@ -355,6 +401,29 @@ class NodeDaemon:
             self._active_endpoint = ""
             return
 
+        # Spool hard-stop gate (ADR 0023): refuse an assignment that would
+        # immediately hard-stop on capture — full disk or a spool backlog
+        # already at the cap. The poll loop keeps retrying, so the node
+        # auto-resumes once the pressure clears (backlog drained/GC'd or
+        # disk freed); nothing is silently dropped to make room.
+        try:
+            from ..inference.client.spool import disk_pressure
+
+            pressure = disk_pressure()
+        except Exception:
+            pressure = None
+        if pressure:
+            _LOG.error(
+                "Refusing session %s: %s. Drain or GC the spool "
+                "(~/.interlatent/spool), or free disk; the node will "
+                "retry on the next poll.",
+                desired_id, pressure,
+            )
+            self._known_session_id = ""
+            self._known_endpoint = ""
+            self._active_endpoint = ""
+            return
+
         try:
             self._start_loop(session, kind=kind)
             self._known_session_id = desired_id
@@ -373,35 +442,24 @@ class NodeDaemon:
     # Control-loop lifecycle
     # ------------------------------------------------------------------
 
-    # Robot kinds that ship their own native (non-LeRobot) control loop, mapped
-    # to the "module:function" the daemon imports. A native loop talks to its
-    # robot's own SDK and reuses only the LeRobot-free DRTC wire helpers — so the
-    # bundled LeRobot wrapper (and lerobot itself) is never imported for it. This
-    # is the single place a vendor robot registers a native loop.
-    # See docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md.
-    _NATIVE_LOOPS: dict[str, str] = {
-        "axol": "interlatent.adapters.axol:control_loop",
-        "yam": "interlatent.adapters.yam:control_loop",
-        "nori": "interlatent.adapters.nori:control_loop",
-        "dimos": "interlatent.adapters.dimos:control_loop",
-    }
-
     def _resolve_loop_fn(self) -> Callable[..., None]:
         """Pick the control-loop function exactly once.
 
-        --loop module:fn wins. Else a robot kind with a registered native loop
-        uses that. Else the bundled LeRobot wrapper.
+        --loop module:fn wins. Else a native robot kind (the adapters registry,
+        ADR 0011/0022) uses its shim over the shared runner. Else the bundled
+        LeRobot wrapper.
         """
         if self._loop_fn is not None:
             return self._loop_fn
 
+        from ..adapters import native_loop_path
         from .control import import_callable
 
-        kind = (self.cfg.robot_kind or "").lower().strip()
+        native_loop = native_loop_path(self.cfg.robot_kind)
         if self.cfg.loop_override:
             self._loop_fn = import_callable(self.cfg.loop_override)
-        elif kind in self._NATIVE_LOOPS:
-            self._loop_fn = import_callable(self._NATIVE_LOOPS[kind])
+        elif native_loop is not None:
+            self._loop_fn = import_callable(native_loop)
         else:
             if not self.cfg.robot_kind:
                 raise RuntimeError(
@@ -529,6 +587,10 @@ class NodeDaemon:
             policy_backend=("echo" if is_recording
                             else session.get("policy_backend", "lerobot")),
             task=session.get("task", ""),
+            # Durable Task link (both assignment kinds carry it) — travels
+            # via OpenSession metadata so the recorder can attribute the
+            # episode's catalog row to the exact Task.
+            task_id=session.get("task_id") or None,
             chunk_size=int(session.get("chunk_size", 50) or 50),
             action_dim=int(session.get("action_dim", 6) or 6),
             fps=float(session.get("fps", 30.0) or 30.0),
@@ -543,16 +605,16 @@ class NodeDaemon:
             synchronous=self.cfg.synchronous,
         )
 
-        # Hosted teleop receiver. The TeleopChannel owns a background WS
-        # to the GPU-box relay for the session lifetime (idle when no producer
-        # is engaged); the control loop reads the latest frame and overrides the
-        # policy when engaged. We use ``drtc_api_key`` because the teleop-token
-        # endpoint is owned by the user, not the node — the node token is
-        # rejected by the relay's auth. Skipped (teleop disabled) when no user
-        # key or session id is available.
-        # The factory picks WS vs QUIC/WebTransport from the backend's
-        # ``transport`` flag (returned in the teleop-token response). Both
-        # channels expose the same surface, so the control loop is unchanged.
+        # Hosted teleop receiver. The QUIC channel owns a background
+        # WebTransport session to the co-located relay for the session lifetime
+        # (idle when no producer is engaged); the control loop reads the latest
+        # frame and overrides the policy when engaged. We use ``drtc_api_key``
+        # because the teleop-token endpoint is owned by the user, not the node —
+        # the node token is rejected by the relay's auth. Skipped (teleop
+        # disabled) when no user key or session id is available.
+        # The factory returns a QUIC channel when the deployment is
+        # QUIC-configured, else None (teleop unavailable — the control loop
+        # handles a None channel).
         from .teleop.factory import make_teleop_channel
 
         teleop_channel = None
@@ -572,10 +634,11 @@ class NodeDaemon:
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
                 api_key=teleop_api_key,
-                # Recordings mint against their own route (the relay lives
-                # in the Modal container behind a TLS tunnel, not on a
-                # tailnet box). 409s while the pod provisions are absorbed
-                # by the channel's retry loop.
+                # Recordings mint against their own route. Recording tokens
+                # are QUIC-only (ADR 0020): the factory reads transport
+                # "quic" off the token and builds the QUIC channel. 409s
+                # while the pod provisions are absorbed by the channel's
+                # retry loop.
                 token_path=(
                     f"/api/v1/teleop-recordings/{session['id']}/teleop-token"
                     if is_recording else None
@@ -585,7 +648,8 @@ class NodeDaemon:
                 # browser from the installed interlatent[<kind>] data.
                 robot_kind=teleop_robot_kind,
             )
-            teleop_channel.start()
+            if teleop_channel is not None:
+                teleop_channel.start()
 
         loop_fn = self._resolve_loop_fn()
         handle = _ControlLoopHandle(client=client, teleop_channel=teleop_channel)

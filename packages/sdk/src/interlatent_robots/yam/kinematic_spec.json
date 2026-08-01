@@ -186,7 +186,7 @@
           ],
           "action_index": 5,
           "affine": {
-            "scale": 1.0,
+            "scale": -1.0,
             "offset": 0.0
           },
           "q_rest": 0.0,
@@ -238,8 +238,8 @@
           0.0
         ]
       ],
-      "scale_translation": 1.0,
-      "scale_rotation": 1.0,
+      "scale_translation": 2.0,
+      "scale_rotation": 1.5,
       "pos_reach_limit": 0.25,
       "rot_reach_limit": 0.9
     },
@@ -428,7 +428,7 @@
           ],
           "action_index": 12,
           "affine": {
-            "scale": 1.0,
+            "scale": -1.0,
             "offset": 0.0
           },
           "q_rest": 0.0,
@@ -480,8 +480,8 @@
           0.0
         ]
       ],
-      "scale_translation": 1.0,
-      "scale_rotation": 1.0,
+      "scale_translation": 2.0,
+      "scale_rotation": 1.5,
       "pos_reach_limit": 0.25,
       "rot_reach_limit": 0.9
     }

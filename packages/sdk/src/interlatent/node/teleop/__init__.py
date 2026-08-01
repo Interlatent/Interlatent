@@ -1,30 +1,38 @@
-"""Node-side teleop: the thin client receiver stub for the hosted teleop path.
+"""Node-side teleop: a thin client that receives absolute joint targets and
+drives the robot through the single `SafetyGate`-gated path in `control.py`.
+The node never solves IK itself — teleop runs over QUIC/WebTransport, and the
+IK runs in the **browser**:
 
-The teleop *engine* (pose IK, retargeting) runs on the
-Interlatent platform; the node keeps only a receiver stub plus the last-hop
-safety clamp. The node connects to the GPU-box relay
-(`interlatent.inference.server.teleop_relay`), receives ``mode="targets"`` frames
-(absolute joint vectors the platform already computed), and drives the robot
-through the single `SafetyGate`-gated path in `control.py`.
+- **QUIC/WebTransport** (`quic_channel.QuicTeleopChannel`) — the low-latency
+  path (VR/WebXR). The browser solves IK against a kinematic_spec the node
+  serves, and streams ``mode="targets"`` datagrams; the node also tees a live
+  JPEG preview back to the browser. The aioquic connection is isolated in a
+  child process so a busy robot-driver GIL can't starve its timers (ADR 0021).
 
-- `channel`        — WS client to the relay; surfaces the latest frame.
+`factory.make_teleop_channel` builds the channel (or returns ``None`` when the
+deployment isn't QUIC-configured) behind the surface the control loop uses
+(`start`/`stop`/`latest_frame`/`send_state`/`connected`). The safety-critical
+latest-frame + sticky-estop store (`_frame_store`, ADR 0016) and the wire-frame
+parser (`frame`) live in one place.
+
+- `factory`        — builds the channel; the control loop sees one interface.
+- `quic_channel`   — the QUIC/WebTransport transport.
 - `frame`/`TeleopFrame` — the authoritative wire-frame parser (keys/pose/targets).
 - `safety`         — `SafetyGate`: the node's authoritative velocity/workspace clamp.
 - `robot_profile`  — static per-robot limits/velocity/rest-pose (lerobot can't supply these).
 
-See docs/adr/0012-teleop-receiver-stub-open-core-boundary.md. The keyboard/pose
-modality compute (`keyboard`, `kinematics`, `retarget`) lives on the platform and
-is intentionally absent here.
+See ADR 0012 (receiver-stub / open-core boundary) and ADR 0021 (QUIC child
+process). The pose modality compute lives upstream (in the browser), not here.
 """
 from __future__ import annotations
 
-from .channel import TeleopChannel
+from .factory import make_teleop_channel
 from .frame import TeleopFrame
 from .robot_profile import RobotProfile, SO101_PROFILE, get_profile
 from .safety import SafetyConfig, SafetyGate, TargetSample
 
 __all__ = [
-    "TeleopChannel",
+    "make_teleop_channel",
     "TeleopFrame",
     "RobotProfile",
     "SO101_PROFILE",

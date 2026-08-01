@@ -20,14 +20,20 @@ from interlatent import robots
 
 
 def _plant_kind(root: Path, kind: str, *, urdf="arm.urdf",
-                ik=None, spec=None, meshes_lock=None) -> None:
-    """Write a data-only ``interlatent_robots/<kind>/`` under ``root`` (a sys.path entry)."""
+                ik=None, spec=None, meshes_lock=None,
+                include_ik: bool = True) -> None:
+    """Write a data-only ``interlatent_robots/<kind>/`` under ``root`` (a sys.path entry).
+
+    ``include_ik=True`` mimics a source checkout; ``False`` mimics a wheel
+    install, where ik_config.json is excluded from package data (ADR 0017).
+    """
     pkg = root / "interlatent_robots" / kind
     pkg.mkdir(parents=True)
     # No interlatent_robots/__init__.py: it must stay a namespace package.
     (pkg / "__init__.py").write_text(f"KIND = {kind!r}\n", encoding="utf-8")
     (pkg / urdf).write_text("<robot/>", encoding="utf-8")
-    (pkg / "ik_config.json").write_text(json.dumps(ik or {"chains": {}}), encoding="utf-8")
+    if include_ik:
+        (pkg / "ik_config.json").write_text(json.dumps(ik or {"chains": {}}), encoding="utf-8")
     (pkg / "kinematic_spec.json").write_text(json.dumps(spec or {"version": 1}), encoding="utf-8")
     if meshes_lock is not None:
         (pkg / "meshes.lock").write_text(json.dumps(meshes_lock), encoding="utf-8")
@@ -58,6 +64,25 @@ def test_discovery_and_load(planted):
     assert data.urdf_path.name == "arm.urdf"
     assert list(data.ik_config["chains"]) == ["left", "right"]
     assert data.kinematic_spec["version"] == 1
+
+
+def test_wheel_install_without_ik_config(tmp_path, monkeypatch):
+    """A wheel install has no ik_config.json (repo-only curation source):
+    load() degrades to ik_config=None, the spec still resolves, and
+    load_ik_config raises with a pointer at the source repo."""
+    site = tmp_path / "site"
+    site.mkdir()
+    _plant_kind(site, "wheelarm", include_ik=False)
+    monkeypatch.syspath_prepend(str(site))
+    for mod in [m for m in sys.modules if m.startswith("interlatent_robots")]:
+        del sys.modules[mod]
+    importlib.invalidate_caches()
+
+    data = robots.load("wheelarm")
+    assert data.ik_config is None
+    assert data.kinematic_spec["version"] == 1
+    with pytest.raises(robots.RobotDataError, match="repo-only"):
+        robots.load_ik_config("wheelarm")
 
 
 def test_missing_kind_names_the_extra(planted):
@@ -156,7 +181,7 @@ def _source_kinds() -> list[Path]:
 def test_source_tree_has_kinds():
     """Guard the guard: if the layout moves, the checks below must not silently
     pass by iterating an empty dir."""
-    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "yam"]
+    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "yam", "so101"]
 
 
 @pytest.mark.parametrize("kind_dir", _source_kinds(), ids=lambda p: p.name)
@@ -164,7 +189,9 @@ def test_shipped_kind_is_complete(kind_dir):
     assert _KIND_RE.match(kind_dir.name), f"{kind_dir.name!r} must match {_KIND_RE.pattern}"
     names = {f.name for f in kind_dir.iterdir()}
     # A kind without kinematic_spec.json installs clean and then makes the arms
-    # do nothing — the browser cannot build a solver from it.
+    # do nothing — the browser cannot build a solver from it. ik_config.json is
+    # required in the repo tree (the curation source the spec is generated
+    # from) even though it is excluded from the wheel (ADR 0017 amendment).
     for required in ("ik_config.json", "kinematic_spec.json", "__init__.py"):
         assert required in names, f"{kind_dir.name}/: missing {required}"
     urdfs = [f for f in kind_dir.iterdir() if f.suffix == ".urdf"]
@@ -199,9 +226,28 @@ def test_resolver_imports_clean_in_a_fresh_interpreter():
 def test_real_nori_data_resolves():
     """Robot data ships in the SDK wheel, so every kind resolves wherever the SDK
     is installed — no extra, no skip. `interlatent[nori]` adds the nori *driver*
-    deps; the data is there either way."""
+    deps; the data is there either way. Install-agnostic: ik_config is absent on
+    wheel installs, so the chains assertion reads the source tree directly."""
     assert robots.is_installed("nori")
     data = robots.load("nori")
-    assert list(data.ik_config["chains"]) == ["left", "right"]
+    assert data.kinematic_spec
     # nori is kinematics-only: no meshes shipped or needed for IK.
     assert not robots.has_meshes("nori")
+    src_ik = json.loads((_SRC_KINDS_DIR / "nori" / "ik_config.json").read_text(encoding="utf-8"))
+    assert list(src_ik["chains"]) == ["left", "right"]
+
+
+def test_real_so101_data_resolves():
+    """so101 is the single-arm kind: one 'right' chain (the VR producer prefers
+    the right controller) mapped onto the 6-dim action vector (joints 0-4,
+    gripper 5). The URDF is the same single-arm so101_new_calib.urdf the nori
+    (dual-SO101) kind solves both of its chains from."""
+    assert robots.is_installed("so101")
+    data = robots.load("so101")
+    assert not robots.has_meshes("so101")
+    chains = data.kinematic_spec["chains"]
+    assert list(chains) == ["right"]
+    assert [j["action_index"] for j in chains["right"]["joints"]] == [0, 1, 2, 3, 4]
+    assert chains["right"]["gripper"]["action_index"] == 5
+    src_ik = json.loads((_SRC_KINDS_DIR / "so101" / "ik_config.json").read_text(encoding="utf-8"))
+    assert list(src_ik["chains"]) == ["right"]

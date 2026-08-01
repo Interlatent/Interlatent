@@ -5,6 +5,9 @@
 - Amended: 2026-07-16 — robot data ships **in the `interlatent` wheel**, not as a
   separate `interlatent-robot-<kind>` distribution per kind. See "Amendment" below.
   The rest of the decision (public, per-kind, in-repo, mesh-free) is unchanged.
+- Amended: 2026-07-18 — `ik_config.json` no longer ships in the wheel; it stays in
+  the repo (and sdist) as the curation source. Runtime installs carry only the URDF
+  + `kinematic_spec.json`. See "Amendment (2026-07-18)" below.
 - Supersedes part of: [0012](0012-teleop-receiver-stub-open-core-boundary.md) (the open-core boundary — see below)
 - Extends: [0011](0011-vendor-robot-subpackage-via-robot-kind.md) (vendor subpackage selected by robot kind)
 
@@ -113,6 +116,24 @@ Reversing is cheap to undo. Because point 1 keeps `interlatent_robots` an unowne
 420 namespace, splitting a kind back into its own distribution is a packaging change
 with no import changes — worth doing **if** a pod ever needs to `pip install` robot
 data, and not before.
+
+## Amendment (2026-07-18): ik_config.json is a repo-only curation source
+
+The only production consumer of *installed* robot data is the node's
+`robots.load_kinematic_spec` (`node/teleop/quic_channel.py`), which serves the
+spec to the browser over QUIC. `ik_config.json` is input to the MuJoCo exporter
+(point 4), consumed at curation time from the repo tree — shipping it in the
+wheel bought nothing at runtime while duplicating the tuning surface into every
+install. With live intervention (whose pod-side retarget reads a separate S3
+copy) deferred, the wheel now carries only the URDF + `kinematic_spec.json`.
+The file remains public in the repo, so point 3's "tuning is public" trade is
+unchanged, as is the PR-onboarding flow (a contributor still authors it in-tree).
+
+Mechanism: `[tool.setuptools.exclude-package-data]` drops it from wheels and
+installs; a `MANIFEST.in` re-include keeps it in the sdist.
+`robots.load_ik_config` raises `RobotDataError` on a wheel install,
+`RobotData.ik_config` is `Optional` (`None` there), and the CI wheel guard now
+asserts the file's *absence* from the wheel.
 
 ## Consequences
 

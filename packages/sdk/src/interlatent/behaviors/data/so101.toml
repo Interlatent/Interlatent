@@ -1,4 +1,4 @@
-# Built-in behaviors shipped for the SO-101 (robot kind `so101` / `so101_follower`).
+# Built-in behaviors shipped for the SO-101 (robot kind `so101`).
 #
 # Units follow the SO-101 adapter/profile: arm joints in DEGREES, gripper 0..100.
 # `home` is NOT listed here — it is generated from the profile's rest_pose so it can

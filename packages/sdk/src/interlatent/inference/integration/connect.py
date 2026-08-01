@@ -66,6 +66,7 @@ def connect_drtc(
     record: bool = False,
     episode_id: Optional[str] = None,
     env_id: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> DRTCClient:
     """Open a DRTC session against Interlatent's hosted server.
 
@@ -117,6 +118,10 @@ def connect_drtc(
             md.setdefault("env_slug", environment)
         if env_id:
             md.setdefault("env_id", env_id)
+        # Durable Task link — the recorder echoes it back when registering
+        # the episode so the catalog row attributes without a lookup.
+        if task_id:
+            md.setdefault("task_id", task_id)
         # ``fps`` is a float here but the server expects an integer
         # string; round to the nearest control rate.
         md.setdefault("fps", str(int(round(fps)) if fps > 0 else 30))

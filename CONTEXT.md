@@ -55,9 +55,10 @@ hatch, not a kind.
 
 **Robot data**:
 A robot kind's teleop embodiment files — a kinematics-only URDF, `ik_config.json`,
-and `kinematic_spec.json` — shipped **in the `interlatent` wheel** under the
-top-level namespace `interlatent_robots` (one subpackage per kind, read via
-`interlatent.robots`). Under `interlatent_robots`, not `interlatent`, on purpose:
+and `kinematic_spec.json` — living in the SDK repo under the top-level namespace
+`interlatent_robots` (one subpackage per kind, read via `interlatent.robots`).
+The wheel ships the URDF + `kinematic_spec.json`; `ik_config.json` is a repo-only
+curation source, excluded from wheels (ADR 0017, amended 2026-07-18). Under `interlatent_robots`, not `interlatent`, on purpose:
 the SDK and the internal engine are both the `interlatent` import package and would
 collide on install. Every kind ships with every install (~18 KB each); the per-kind
 extras carry that robot's **driver** deps, not its data. Meshes are **not** part of
@@ -68,7 +69,8 @@ artifact, a path being retired; robot data in the SDK is the operator-installabl
 source of the same files.
 
 **IK config** (`ik_config.json`):
-The hand-authored half of **Robot data**: the robot-specific tuning the
+The hand-authored half of **Robot data**, kept in the repo but not in the wheel:
+the robot-specific tuning the
 retarget/IK stage reads — solver damping, per-joint `max_dq`, reach limits,
 translation/rotation scales, `webxr_to_base_R`, gripper range, unit affines. The
 five browser-mapper fields are surfaced to the headset as `ik_hints`. Editing it
@@ -99,7 +101,8 @@ overloading "adapter" for a server-side policy backend, a collection `--loop`
 adapter, or a LoRA adapter. Vendor adapters today: **axol** (Almond Axol, native
 async SDK), **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
 directly — not raiden — joint-space only, configurable left/right/both followers),
-**nori** (see **Nori adapter**), and **dimos** (see **Dimos adapter**).
+and **nori** (bimanual arms behind a supervising daemon reached over an NDJSON
+wire protocol, with a liveness-tied keep-alive pump and a robot-side safety latch).
 See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md).
 
 **Action interface**:
@@ -159,12 +162,39 @@ A source-agnostic execution-safety guard that caps the per-tick joint jump for
 or `max_step_rad` for axol/dimos). Configured as part of the **adapter**. Together with
 the SafetyGate this is the **layered client-side safety model**: the delta clamp
 bounds single-tick slams from any source; the SafetyGate adds workspace/velocity/
-deadman limits on the teleop path. Both run client-side as the last hand that
-touches a command before the motor path — what that means varies per adapter:
-for yam it is literal (same process as the CAN driver); for nori the daemon
-re-clamps robot-side regardless; for **dimos** the adapter's clamp is the ONLY
-clamp anywhere in the path (dimos applies no limits to streamed joint commands),
-one process hop from the motors on the same host.
+deadman limits on the teleop path. Both run next to the motors. Two distinct
+clamps carry the name and both are load-bearing: the shared, measured-pose-anchored
+clamp the **command bus** runs before every send, and each adapter's own clamp
+inside `send_action` (anchored to the last *accepted* command, gripper-exempt).
+_Avoid_: "simplifying" them into one — different anchors, different scopes.
+
+**Command bus**:
+`interlatent.node.movement.CommandBus` — the one point of access where every
+physical movement is decided *and produced* (ADR 0022). Its **Arbiter** picks
+who drives each tick on a fixed ladder — `ESTOP > TELEOP > HOLD > POLICY`, the
+e-stop rung read from **SafetyGate** *state* (level), never from the arriving
+event (edge) — and `drive()` then runs the whole motion path in a fixed order:
+produce → SafetyGate → delta clamp → the single `send_action` sink →
+flush/smoother bookkeeping, returning a **TickOutcome** (what was commanded,
+what to record, what to instrument). **MovementSource** is the vocabulary:
+str-valued so a member's value doubles as the dataset `control_source` label
+(`{"policy","teleop","hold"}`); `ESTOP` is deliberately never a recorded label.
+_Avoid_: adding a movement decision anywhere else — an `if` above the bus is
+how the pre-2026-07 loop drift started.
+
+**Tick runner / pre-tick guard**:
+`interlatent.node.looprunner.run_control_loop` — the one robot-agnostic tick
+skeleton every loop shares: observation first (for a daemon-driven robot it is
+the keep-alive liveness proof), then the optional guard, then `bus.drive()`,
+then capture/tees/reporting/profiling/pacing. An adapter with per-robot
+pre-flight conditions implements `pre_tick(obs) -> TickVerdict` (`PROCEED`,
+`HOLD_NO_CAPTURE` — no motion *and no capture*, e.g. stale telemetry, worse to
+record than to gap — or `END_EPISODE`), discovered via `getattr`, never
+declared on the `RobotAdapter` Protocol body. Guards are pure verdicts: the
+bus's `guard_interrupt` does the interrupt's hygiene so an adapter cannot
+forget it. The former per-adapter `loop.py` files are thin shims over this
+runner; equivalence with each frozen ancestor is pinned by
+`tests/test_loop_equivalence.py`.
 
 **Nori adapter**:
 Vendor adapter `interlatent.adapters.nori` (`--robot nori`, `interlatent[nori]`)
@@ -180,9 +210,9 @@ safety enforcement robot-side (range clamping, e-stop hard latch, watchdog
 safe-stop); the adapter discloses that state, never re-enforces it, and
 fail-closes at connect if the live ack descriptor disagrees with the static
 `nori` **robot profile** — accumulating every mismatch into one raise. A
-daemon-reported latch/safe-stop is a hard episode boundary: the native loop
-ends the session, freeing the daemon's single control-client slot for
-`interlatent-act --robot nori --reset-latch`. While the Node holds that slot,
+daemon-reported latch/safe-stop is a hard episode boundary: the adapter's
+**pre-tick guard** ends the episode, freeing the daemon's single
+control-client slot for `interlatent-act --robot nori --reset-latch`. While the Node holds that slot,
 Nori's own browser/VR teleop cannot connect — interlatent teleop rides the
 interlatent relay instead. _Avoid_: "Nori teleop" for interlatent
 teleop — Nori's own teleop stack is a separate system that is
@@ -202,9 +232,14 @@ adapter's session client; the control loop and DRTC client never see it.
 
 **E-stop ingress (teleop)**:
 An additive `estop: true` field on the teleop wire frame — the operator's hard
-stop. On receipt the control loop latches the **SafetyGate** (all robots); the
-Nori loop additionally sends the daemon's `command{name:"estop"}`, which
-hard-latches robot-side. Clearing is never automatic and never the control
+stop. On receipt the **command bus** (`observe_estop`) latches the
+**SafetyGate**, and arbitration thereafter re-reads that **latch** (not the
+frame flag) every tick: the flag is transient and the channel's sticky latch is
+one-shot, so branching on the event would resume driving on the next tick.
+This lives in exactly one place now (ADR 0022); Axol has no `RobotProfile`
+yet, so it has no gate to latch (ADR 0011). For robots exposing a hardware
+latch (`robot.estop()` — Nori's daemon `command{name:"estop"}`), the bus
+forwards it once per latch, retrying on failure without ending the episode. Clearing is never automatic and never the control
 loop's job: for Nori it is an explicit `--reset-latch` act on `--robot nori`,
 which sends the daemon's token-gated `reset_latch` (token from
 `/etc/nori/agent.token` on the Pi) and then clears the gate latch — daemon

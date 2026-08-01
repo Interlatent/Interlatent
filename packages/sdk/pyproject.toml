@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interlatent"
-version = "1.1.0"
+version = "2.0.0"
 description = "Interlatent SDK — one open interface to control robots: drive them, run policies, and collect data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,18 +32,30 @@ dependencies = [
   # Node-side teleop receiver stub (node/teleop/channel.py) opens a sync
   # connection to the hosted teleop relay. Small, pure-Python.
   "websockets>=12",
+  "cmake",
 ]
 
 [project.optional-dependencies]
 # pip install 'interlatent[lerobot]'
-# Required for LeRobotDataset upload format and HuggingFace repo-based checkpoint
-# naming in the lerobot integration. lerobot >= 0.4.0 ships the v3.0 dataset writer
-# that powers the SDK's upload-time rebuild path.
+# The LeRobot-native robot/teleop stack used by the node's generic control
+# loop and `interlatent-act`. (Datasets are built server-side by the hosted
+# recorder — ADR 0022 — so this extra no longer powers any on-device build.)
 lerobot = [
   "huggingface_hub>=0.20",
   "lerobot>=0.4.0",
   "pyarrow>=14",
   "Pillow>=9",
+]
+
+# pip install 'interlatent[turbo]'
+# Fast CPU JPEG encoding for the node capture path (node/jpeg.py): libjpeg-turbo
+# via PyTurboJPEG is several times faster than PIL — the difference between the
+# capture thread keeping up or not at 3 cameras x 720p x 30fps (ADR 0023).
+# Host requirement NOT installed here: the libturbojpeg shared library
+# (apt install libturbojpeg0-dev / brew install jpeg-turbo); without it the
+# encoder resolver silently falls back to cv2/PIL.
+turbo = [
+  "PyTurboJPEG>=1.7",
 ]
 
 # pip install 'interlatent[teleop-quic]'
@@ -101,6 +113,18 @@ yam = [
   "numpy",
 ]
 
+# pip install 'interlatent[so101]'
+# Drives a single SO-101 follower arm via lerobot's SO101Follower (robot kind
+# "so101"; resolved in node/control.py::_make_lerobot_robot). The driver stack
+# is exactly the [lerobot] extra — keep the two lists in sync; this alias
+# exists so `interlatent[<kind>]` works for every kind that ships robot data.
+so101 = [
+  "huggingface_hub>=0.20",
+  "lerobot>=0.4.0",
+  "pyarrow>=14",
+  "Pillow>=9",
+]
+
 # pip install 'interlatent[nori]'
 # Drives the Nori robot through its on-Pi daemon (NoriCoreAgent) over the
 # Nori-Protocol v1 NDJSON contract on TCP localhost:7777 (robot kind "nori";
@@ -156,9 +180,8 @@ interlatent-act = "interlatent.node.act_cli:main"
 # Thin CLI client for the Interlatent dashboard: list pods/nodes and
 # start/stop cloud inference sessions. `interlatent gpus ls`, `session start`, ...
 interlatent = "interlatent.cli.main:main"
-# Drop-in replacement for `lerobot-record` that captures policy activations
-# during recording and uploads them for interpretability. Needs `interlatent[lerobot]`.
-interlatent-sync-rollout = "interlatent.adapters.lerobot.sync_inference.sync_rollout:main"
+# (interlatent-sync-rollout was removed with client-side collection —
+# ADR 0022: recording is streaming-first through a hosted session.)
 
 # Reference dimos session blueprints, discovered by dimos's external-blueprint
 # registry (namespace = this distribution's name): `dimos run interlatent.xarm7`.
@@ -195,9 +218,19 @@ namespaces = true
 # Robot embodiment data, one subpackage per kind (interlatent_robots.<kind>).
 # ~18 KB of JSON/XML per robot — small enough to ship for every kind rather than
 # gate behind the per-kind extras, which carry the *driver* deps, not the data.
+# Note ik_config.json is carved back out below — see exclude-package-data.
 "interlatent_robots.yam" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.nori" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.a1z" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.so101" = ["*.urdf", "*.json", "*.lock"]
+
+[tool.setuptools.exclude-package-data]
+# ik_config.json is the hand-authored curation source for the MuJoCo
+# kinematic-spec exporter, not a runtime file: the node consumes only
+# kinematic_spec.json (node/teleop/quic_channel.py). It stays in the repo
+# (and sdist, via MANIFEST.in) but is excluded from wheels/installs.
+# ADR 0017, amendment 2026-07-18. Keyed "*" so a new kind can't ship it.
+"*" = ["ik_config.json"]
 
 # ---------------------------------------------------------------------------
 # CPU-only torch wheels.

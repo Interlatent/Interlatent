@@ -72,8 +72,8 @@ reference; [Supported robots](#supported-robots) lists the arms that work today.
 Four layers, bottom to top. Each only knows about the layer directly beneath it.
 
 ```
-   behaviors        VLA policy (cloud)        teleop            collection
-   act("home")      DRTC action chunks        joint targets     watch()/tick()
+   behaviors        VLA policy (cloud)        teleop            recording
+   act("home")      DRTC action chunks        joint targets     RecordTicks
         │                    │                     │                  │
         └────────────────────┴──────────┬──────────┴──────────────────┘
                                         │
@@ -122,10 +122,12 @@ schedule. The result is smooth 30 Hz control on top of a multi-second model. Det
 polls the dashboard and converges to whatever inference session is assigned to it. It
 resolves the control loop for your `--robot` kind, opens the DRTC client, and runs.
 
-**Collection is local-first.** `watch()` / `tick()` / `collect()` stage per-step
-observations, actions, and rewards into local SQLite plus JPEGs. Building a LeRobot v3.0
-dataset from that works fully offline with no account; uploading it is a separate, optional
-step.
+**Collection is streaming-first.** The control loop JPEG-encodes each camera frame per
+tick and streams `RecordTick`s to the hosted recorder, which builds and uploads the
+LeRobot v3.0 dataset server-side. A node-side disk spool with delete-after-ack keeps the
+uplink lossless — a link drop never silently thins an episode. (The old on-device
+`watch()`/`tick()`/`upload()` build was removed in 2.0.0; existing datasets enter via
+the dashboard's HF import.)
 
 ## Quickstart
 
@@ -299,6 +301,8 @@ Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
 | `INTERLATENT_IMAGE_RESIZE` | Resize camera frames to this square edge (px) before JPEG-encoding. `256` suits MolmoAct2. |
 | `INTERLATENT_NODE_CONFIG` | Path to the node config TOML (default `~/.interlatent/node.toml`). |
 | `INTERLATENT_CALIB_PRESET` | Force or disable a joint-calibration preset (e.g. `so101_pre777`, or `none`). |
+| `INTERLATENT_JPEG_BACKEND` | Force the frame encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). See [node encoding](docs/node-encoding.md). |
+| `INTERLATENT_PREVIEW_HZ` | Live teleop preview push rate (1-30, default 30). Competes with recording/teleop for uplink — see [node encoding](docs/node-encoding.md). |
 
 ## Supported robots
 
@@ -307,7 +311,7 @@ host requirements, `--robot-arg` knobs, camera declarations, and worked examples
 
 | Robot | `--robot` | Joints and units | Extra | Config doc |
 |---|---|---|---|---|
-| **SO-101** (reference) | `so101`, `so101_follower` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **SO-101** (reference) | `so101` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
@@ -388,6 +392,7 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 - [Concepts](docs/concepts.md) - DRTC, sessions, chunks, the node
 - [Supported robots & policies](docs/robots-and-policies.md)
 - [Teleoperation](docs/teleop.md) - drive the robot in VR to collect demonstrations, safety, recordings
+- [Node encoding & GPU acceleration](docs/node-encoding.md) - the JPEG backend chain, Jetson GPUJPEG setup, bandwidth budgeting
 - [Going to cloud](docs/going-to-cloud.md)
 - [Architecture](ARCHITECTURE.md) - for contributors
 
@@ -425,34 +430,41 @@ of them exist only because we haven't closed the abstraction.
   (`connect` / `read() -> RGB` / `disconnect`) with lazily-imported RealSense, ZED, and UVC
   backends behind it. That is the right shape, but it is *local to that adapter* - others
   open their cameras inside `robot.py`, so there is no single camera seam across the SDK.
-- **The control loop is copy-pasted, not factored.** There are three
-  ([`node/control.py`](packages/sdk/src/interlatent/node/control.py) for LeRobot robots,
-  plus a `loop.py` per native adapter). They share the observe → decide → clamp →
-  `send_action` → record skeleton and the same wire helpers, and diverge only on whether
-  teleop is wired, which safety composition applies, and which calibration preset is
-  active. Those differences are *configuration wearing the costume of code*.
+- **The control loop is factored** (ADR 0022). There is one tick skeleton
+  ([`node/looprunner.py`](packages/sdk/src/interlatent/node/looprunner.py)) and one motion
+  path (`CommandBus.drive()` in
+  [`node/movement.py`](packages/sdk/src/interlatent/node/movement.py) — arbitrate →
+  SafetyGate → delta clamp → `send_action` → flush/smoother bookkeeping). Each `loop.py`
+  is now a thin shim that constructs the robot and its per-session collaborators and hands
+  the tick over; per-robot pre-flight lives in an optional `pre_tick(obs) -> TickVerdict`
+  guard on the robot itself. A new adapter cannot silently miss a safety rung — it has no
+  per-tick code to get wrong.
 
 **Direction:** a new robot should be one `robot.py` plus a `RobotProfile`.
 
 1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
    `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
    template, so promoting it to a shared module is mostly a move, not a design.
-2. **One universal control loop**, parametrized instead of duplicated. The per-adapter
-   variation becomes explicit capabilities the robot *declares* (does it support teleop? does
-   it have an e-stop latch? which calibration applies?) rather than a forked copy of the loop.
-3. **A smaller adapter.** Once cameras and the loop are shared, `config.py` shrinks to a
-   schema and `loop.py` disappears.
+2. ~~One universal control loop~~ **Done** (ADR 0022): the shared runner + command bus own
+   every tick; adapters declare guard hooks (`pre_tick`, `estop`) discovered off the robot,
+   and inject their coerce/calibration policy — hooks won over capability flags because
+   Nori's "end the episode and free the daemon slot" is a verdict, not a boolean.
+3. **A smaller adapter.** Once cameras are shared too, `config.py` shrinks to a schema and
+   the remaining `loop.py` shim (~80 lines of construction, no per-tick logic) can fold
+   into the registry.
 
 The test for whether we've done this right: **adding an arm should be one file and a
 profile.** Anything more is a seam we haven't closed yet.
 
 **Open design questions (resolve before building):**
-- What is the unit of variation for the universal loop - capability flags the robot declares,
-  a strategy object per driving source, or hooks the adapter can override? Flags are simplest
-  until a robot needs a genuinely different tick shape.
-- Some robots need per-tick work that isn't "send an action" (liveness proofs, keep-alive
-  pumps, watchdog feeds for arms driven through a daemon). Does that belong in
-  `get_observation`, in an explicit `tick()` on the contract, or outside the loop entirely?
+- ~~The unit of variation for the universal loop~~ Answered (ADR 0022): optional guard
+  hooks on the existing `RobotAdapter` Protocol, discovered by `getattr` — Nori needed a
+  verdict (`END_EPISODE` frees the daemon's control-client slot), which no capability flag
+  can express.
+- ~~Per-tick work that isn't "send an action"~~ Answered: the liveness proof rides
+  `get_observation` (first and unconditionally every tick), and everything else a robot
+  must check pre-arbitration is `pre_tick(obs) -> TickVerdict`. No `tick()` on the
+  contract.
 - Cameras behind a network transport rather than a local SDK still have to satisfy
   `read() -> uint8 HxWx3 RGB`. Does the shared Camera protocol need a staleness/async story,
   or is latest-wins-plus-decode enough?

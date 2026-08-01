@@ -49,15 +49,20 @@ analysis.
 ## Datasets
 
 Everything records to **LeRobot v3.0 datasets** — parquet frames + MP4 video + JSON
-metadata, the lingua franca of open robot learning. Two recording paths:
+metadata, the lingua franca of open robot learning. Recording is **streaming-first**:
+your node JPEG-encodes each camera frame per control tick and streams `RecordTick`s to
+the hosted recorder (the session's GPU pod, or a teleop recorder pod), which persists
+every tick and builds the dataset at session close. The finished dataset is published to
+a **destination**: the hosted inbox (Cloud), a local directory, or an S3-compatible
+bucket. The local/S3 destinations *merge-on-stop* — each session is appended into one
+flat, training-ready LeRobot dataset.
 
-- **Client-side** (`watch()`/`tick()` in the SDK): steps stage to local SQLite + JPEGs;
-  `LeRobotRebuilder` emits the dataset on your disk. Fully offline, no account.
-- **Pod-side** (`RecordTick` RPC): the GPU pod persists each control tick and builds the
-  dataset at session close. The finished dataset is published to a **destination**: the
-  hosted inbox (Cloud), a local directory, or an S3-compatible bucket. The local/S3
-  destinations *merge-on-stop* — each session is appended into one flat, training-ready
-  LeRobot dataset.
+The uplink is lossless by design: ticks journal to a disk spool on the node and are
+deleted only after the server acknowledges them, so a link drop or node crash never
+silently thins an episode. (The old client-side path — staging to SQLite and building
+the dataset on-device with `watch()`/`tick()`/`upload()` — was removed in SDK 2.0.0.
+Datasets you already have on disk can enter the platform through the dashboard's
+HF import.)
 
 ## The node
 

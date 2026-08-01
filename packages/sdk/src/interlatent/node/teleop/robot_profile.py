@@ -114,7 +114,7 @@ class RobotProfile:
 
 
 SO101_PROFILE = RobotProfile(
-    name="so101_follower",
+    name="so101",
     joint_names=SO101_JOINT_NAMES,
     joint_limits=SO101_JOINT_LIMITS,
     max_velocity=SO101_MAX_VELOCITY,
@@ -465,7 +465,6 @@ _2PI = 6.283185307179586
 # here -- `get_profile` resolves any `dimos_*` key via `_load_dimos_profile`.
 _PROFILES: dict[str, RobotProfile] = {
     "so101": SO101_PROFILE,
-    "so101_follower": SO101_PROFILE,
     "koch": KOCH_PROFILE,
     "koch_follower": KOCH_PROFILE,
     "yam": YAM_PROFILE,

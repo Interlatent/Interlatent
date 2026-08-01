@@ -6,7 +6,9 @@ and the pure `_motor_targets` action-writing seam (gripper post-step + delta cla
 """
 from __future__ import annotations
 
+import logging
 import queue
+import sys
 import time
 
 import numpy as np
@@ -189,6 +191,115 @@ def test_camera_device_parsing():
         parse_camera_device("x", "uvc:")
     with pytest.raises(ValueError, match="camera must be a vendor type"):
         parse_camera_device("x", "potato")
+
+
+def test_camera_device_extras_parsing():
+    spec = parse_camera_device(
+        "f", "/dev/video2,pixel_format=yuyv,width=1280,height=720,fps=15"
+    )
+    assert spec == CameraSpec(
+        "f", "uvc", "/dev/video2",
+        width=1280, height=720, fps=15, pixel_format="yuyv",
+    )
+    # Bare devices keep the MJPG default (USB bandwidth, see CameraSpec).
+    assert parse_camera_device("f", "/dev/video2").pixel_format == "mjpg"
+    # Extras also apply to vendor cameras (width/height/fps only in practice).
+    assert parse_camera_device("w", "realsense:123,width=848").width == 848
+    with pytest.raises(ValueError, match="unknown camera option"):
+        parse_camera_device("x", "/dev/video2,zoom=3")
+    with pytest.raises(ValueError, match="pixel_format must be one of"):
+        parse_camera_device("x", "/dev/video2,pixel_format=raw")
+    with pytest.raises(ValueError, match="width must be an integer"):
+        parse_camera_device("x", "/dev/video2,width=big")
+
+
+class _StubCap:
+    """Records property sets; negotiates FOURCC like a V4L2 driver."""
+
+    def __init__(self, mod: "_StubCV2") -> None:
+        self._mod = mod
+        self.sets: list[tuple[int, float]] = []
+        self.target = None
+        self.backend = None
+        self._fourcc = _StubCV2.VideoWriter_fourcc(*"YUYV")  # driver default
+
+    def set(self, prop, val):
+        self.sets.append((prop, val))
+        if prop == _StubCV2.CAP_PROP_FOURCC and self._mod.accept_fourcc:
+            self._fourcc = int(val)
+        return True
+
+    def get(self, prop):
+        if prop == _StubCV2.CAP_PROP_FOURCC:
+            return float(self._fourcc)
+        return 0.0
+
+    def isOpened(self):
+        return True
+
+    def release(self):  # pragma: no cover - not exercised
+        pass
+
+
+class _StubCV2:
+    """Just enough of the cv2 module surface for UVCCamera.connect()."""
+
+    CAP_V4L2 = 200
+    CAP_PROP_FOURCC = 6
+    CAP_PROP_FPS = 5
+    CAP_PROP_FRAME_WIDTH = 3
+    CAP_PROP_FRAME_HEIGHT = 4
+    CAP_PROP_BUFFERSIZE = 38
+
+    def __init__(self, accept_fourcc: bool = True) -> None:
+        self.accept_fourcc = accept_fourcc
+        self.caps: list[_StubCap] = []
+
+    @staticmethod
+    def VideoWriter_fourcc(*chars):
+        return sum(ord(c) << (8 * i) for i, c in enumerate(chars))
+
+    def VideoCapture(self, target, backend=None):
+        cap = _StubCap(self)
+        cap.target = target
+        cap.backend = backend
+        self.caps.append(cap)
+        return cap
+
+
+def _connect_uvc(monkeypatch, spec: CameraSpec, accept_fourcc: bool = True) -> _StubCap:
+    stub = _StubCV2(accept_fourcc=accept_fourcc)
+    monkeypatch.setitem(sys.modules, "cv2", stub)
+    UVCCamera(spec).connect()
+    return stub.caps[0]
+
+
+def test_uvc_connect_sets_mjpg_fourcc_before_dims(monkeypatch):
+    cap = _connect_uvc(monkeypatch, CameraSpec("f", "uvc", "2"))
+    assert cap.backend == _StubCV2.CAP_V4L2
+    assert cap.target == 2  # numeric index coerced to int
+    props = [p for p, _ in cap.sets]
+    fourcc_at = props.index(_StubCV2.CAP_PROP_FOURCC)
+    assert fourcc_at < props.index(_StubCV2.CAP_PROP_FRAME_WIDTH)
+    assert fourcc_at < props.index(_StubCV2.CAP_PROP_FPS)
+    assert cap.sets[fourcc_at][1] == _StubCV2.VideoWriter_fourcc(*"MJPG")
+
+
+def test_uvc_connect_mjpg_refused_warns_and_continues(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger="interlatent.adapters.yam.cameras"):
+        _connect_uvc(
+            monkeypatch,
+            CameraSpec("f", "uvc", "/dev/video2"),
+            accept_fourcc=False,
+        )
+    assert any("not accepted by the driver" in r.getMessage() for r in caplog.records)
+
+
+def test_uvc_connect_default_pixel_format_skips_fourcc(monkeypatch):
+    cap = _connect_uvc(
+        monkeypatch, CameraSpec("f", "uvc", "2", pixel_format="default")
+    )
+    assert _StubCV2.CAP_PROP_FOURCC not in [p for p, _ in cap.sets]
 
 
 def test_invalid_arms_and_gripper_mode_rejected():

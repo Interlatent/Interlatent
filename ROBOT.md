@@ -118,12 +118,13 @@ An adapter is one directory under
 | `robot.py` | **The robot.** Implements the contract. Owns the vendor driver (CAN bus, serial, motor SDK) and the cameras. The only file that has to exist. |
 | `config.py` | Turns the daemon's flat CLI passthrough (`--robot-arg key=value`, `--camera name=device`) into a typed config dataclass. Deliberately import-light, so importing the adapter never drags in its heavy extra. |
 | `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
-| `loop.py` | A per-robot control loop, registered so `--robot <kind>` resolves to it. |
+| `loop.py` | A thin session shim: constructs the robot + its collaborators and hands the tick to the shared runner (`node/looprunner.py`) and command bus (ADR 0022). No per-tick logic lives here. |
 
 A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
-the rest is plumbing that exists because a robot needs configuring and looking at. Two of
-those four exist only because the abstraction isn't closed yet, which is why folding them
-into the robot class is a [future direction](README.md#fold-the-adapters-into-the-robot-class).
+the rest is plumbing that exists because a robot needs configuring and looking at. The
+per-tick logic is gone from the adapter entirely (ADR 0022); folding the remaining
+construction plumbing into the robot class is a
+[future direction](README.md#fold-the-adapters-into-the-robot-class).
 
 ```python
 class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py
@@ -186,6 +187,37 @@ it becomes the `observation.images.<name>` the model sees.
 
 Full references: [SO-101 config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) ·
 [YAM config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md).
+
+### USB bandwidth on multi-camera rigs
+
+`--camera` accepts comma-separated capture extras after the device:
+
+```bash
+--camera front=/dev/video0,width=1280,height=720,fps=15,pixel_format=yuyv
+```
+
+UVC webcams default to **MJPG** wire format. Uncompressed YUYV at 640×480@30
+reserves ~147 Mbit/s of USB isochronous bandwidth *per camera*; MJPG is
+~20–40 Mbit/s. That matters because every USB2-class device shares **one
+480 Mbit/s domain per host controller** (on a Jetson Orin Nano, that is all
+the type-A ports together) — the failure mode is not slowness but a camera
+or CAN adapter **refusing to open/enumerate only when the others are
+active**, because xHCI cannot reserve the bandwidth upfront. Rules of thumb:
+
+- Keep the MJPG default unless the rig is CPU-bound (MJPG costs a per-frame
+  JPEG decode in OpenCV; `pixel_format=yuyv` or `=default` trades bandwidth
+  for CPU on an uncongested USB3 bus).
+- Give a RealSense its own USB3 port — its color stream over a USB2 link
+  starves everything else on the domain.
+- Keep USB-CAN adapters (the YAM arm links) off camera hubs; camera
+  isochronous traffic adds latency to the latency-sensitive arm channel.
+- The node logs the negotiated format per camera at connect
+  (`UVC front connected (... negotiated MJPG 640x480@30)`) and warns when
+  the driver refuses the requested format.
+
+Once frames are captured, the *encoding* side (JPEG backend chain, GPU
+acceleration on Jetson, network bandwidth budgeting) is covered in
+[docs/node-encoding.md](docs/node-encoding.md).
 
 ## 4. `node.toml`: who this machine is
 
@@ -333,13 +365,18 @@ Putting the four files together, the whole job for a new *non-dimos* arm is:
    methods) so importing the package never requires your extra.
 3. **Make sure `action_features` order matches the profile's `joint_names`.** `base.py`
    raises if they diverge, and a policy binds to order.
-4. **Register a control loop** if your robot cannot use the bundled LeRobot one: add an
-   entry to `_NATIVE_LOOPS` in [`node/daemon.py`](packages/sdk/src/interlatent/node/daemon.py),
-   or pass `--loop module:fn`. (This step is the one we are trying to
-   [delete](README.md#future-directions).)
+4. **Register the kind** if your robot cannot use the bundled LeRobot wrapper: add it to
+   `_NATIVE_KINDS` in [`adapters/__init__.py`](packages/sdk/src/interlatent/adapters/__init__.py)
+   (the one registry — CLI, daemon, and behaviors facade all resolve through it) and add a
+   thin `loop.py` shim (copy YAM's: ~80 lines of construction, no per-tick logic — the
+   shared runner and command bus own the tick, ADR 0022). Robots with per-tick pre-flight
+   the generic path can't know (a supervising daemon, staleness) implement
+   `pre_tick(obs) -> TickVerdict` on the robot class; nothing else to wire. `--loop
+   module:fn` remains the no-registry escape hatch.
 5. **Optionally ship behaviors** as `behaviors/data/<robot>.toml`. You get `home` for free
    from the profile either way.
 
 Adding robots is the contribution we most want. See
-[CONTRIBUTING.md](CONTRIBUTING.md), and note that steps 3-4 exist only because the adapter
-layer isn't finished; the goal is for a new arm to cost you steps 1 and 2 and nothing else.
+[CONTRIBUTING.md](CONTRIBUTING.md). Steps 3-4 are small and mechanical; the remaining goal
+is folding the shim's construction into the registry so a new arm costs steps 1 and 2 and
+nothing else.

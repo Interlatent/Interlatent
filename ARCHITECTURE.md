@@ -43,11 +43,15 @@ Key properties:
 | Node daemon | `node/` (cli, daemon, control) | `interlatent-node` — long-running daemon that pairs to your account, polls the dashboard, and runs assigned inference sessions on real hardware (LeRobot robot classes) |
 | Teleop stub | `node/teleop/` (channel, frame, safety, robot_profile) | Thin receiver for hosted VR teleop (remote human demonstration) — see below |
 | Dashboard CLI | `cli/` | `interlatent` — thin client over the dashboard API: `gpus ls`, `nodes ls`, `session ls\|start\|stop` |
-| Collection | `_client.py`, `_watcher.py`, `_db.py`, `_step_source.py` | `watch()/tick()/collect()` — stage per-step state/action/reward into local SQLite |
-| Dataset build | `storage/lerobot_rebuild.py`, `_dataset.py` | Turn the staging cache into a LeRobot v3.0 dataset on disk |
+| Tick spool | `inference/client/spool.py` | Write-through disk journal for the RecordTick uplink: delete-after-ack, drain-done at close, hard-stop when full (ADR 0023) |
+| JPEG encode | `node/jpeg.py` | Capability-adaptive frame encoder: PyTurboJPEG → OpenCV → PIL, resolved at runtime (`interlatent[turbo]`) |
+| HTTP client | `_client.py` | `Interlatent` — environments/episodes API surface used by the daemon and CLI |
 
-Collection is **local-first**: `watch()`/`tick()` write only to local SQLite + JPEG staging.
-Uploading to the hosted platform is a separate, optional step.
+Collection is **streaming-first** (ADR 0022): the node JPEG-encodes each camera
+frame per control tick and streams `RecordTicks` to the hosted recorder, which
+builds and uploads the LeRobot dataset server-side. Devices never build
+datasets; the old client-side `watch()`/`tick()`/`upload()` staging path was
+removed in 2.0.0.
 
 ### Teleop (VR remote demonstration)
 
@@ -88,6 +92,8 @@ all work — the client merges chunks the same way regardless of the path's late
 Inference runs on managed GPU pods through the [Interlatent dashboard](https://interlatent.com).
 The client and node speak the gRPC contract in `proto/messages.proto` to the pod, and
 authenticate to the dashboard with an API key (`ilat_…`) to discover pods, pair nodes, and
-drive sessions. Local LeRobot dataset collection still runs with zero account. Cloud-only
+drive sessions. Episode recording happens through those hosted sessions (ADR 0022), so
+collection requires an account; the client, node, and protocol themselves stay Apache-2.0.
+Existing stock LeRobot datasets can be imported through the dashboard's HF import. Cloud-only
 capabilities (managed warm GPUs, hosted datasets and dashboard, Robometer reward labeling)
 live in a separate private codebase.

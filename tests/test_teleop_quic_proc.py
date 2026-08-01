@@ -1,6 +1,6 @@
 """QUIC child-process isolation for the node teleop channel.
 
-Covers the three offline-testable layers of the design (ADR 0017 amendment):
+Covers the three offline-testable layers of the design (ADR 0021):
 the ``_quic_ipc`` loopback framing, ``QuicTeleopChannel``'s child supervision
 and datagram handling (with a fake child played by the test over a real
 loopback UDP socket), and a real ``-m interlatent.node.teleop._quic_proc``
@@ -478,6 +478,80 @@ def test_governor_ttl_resets_stale_streams():
     assert gov.reset_ttl == 1
 
 
+# ---------------------------------------------------------------------------
+# aioquic send-only-uni-stream leak GC (_UniStreamGC), owned by the connection
+# (ADR 0020). Pure: is_finished/discard are injected, so no aioquic needed.
+# ---------------------------------------------------------------------------
+
+def test_uni_gc_discards_finished_streams():
+    # The aioquic leak: send-only uni streams are never collected by aioquic's
+    # own sweep, so the connection must actively discard each stream once its
+    # send side acks — otherwise per-packet cost grows with session age and
+    # delivered fps decays monotonically.
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
+    finished: set = set()
+    discarded: list = []
+    gc = UniStreamGC(
+        is_finished=lambda sid: sid in finished,
+        discard=discarded.append,
+    )
+    gc.add(1)
+    gc.add(2)
+    gc.sweep()  # neither acked yet
+    assert discarded == []
+    assert gc.pending_count() == 2
+
+    finished.add(1)
+    gc.sweep()  # sid 1's send side acked -> discarded, sid 2 parked
+    assert discarded == [1]
+    assert gc.pending_count() == 1
+
+    finished.add(2)
+    gc.sweep()
+    assert discarded == [1, 2]
+    assert gc.pending_count() == 0
+    gc.sweep()  # nothing left; a discarded stream is never revisited
+    assert discarded == [1, 2]
+
+
+def test_uni_gc_parks_reset_stream_until_acked():
+    # A TTL-RESET stream can't be discarded until its RESET frame is acked
+    # (discard-before-send would strand the peer's receive side). It parks and
+    # retries each sweep; once its send side reports finished it discards once.
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
+    acked = {"ok": False}
+    discarded: list = []
+    gc = UniStreamGC(
+        is_finished=lambda sid: acked["ok"],
+        discard=discarded.append,
+    )
+    gc.add(7)
+    gc.sweep()  # RESET unacked -> parked
+    gc.sweep()
+    assert discarded == []
+    assert gc.pending_count() == 1
+
+    acked["ok"] = True
+    gc.sweep()  # RESET acked -> discard once
+    assert discarded == [7]
+    gc.sweep()  # never retried again
+    assert discarded == [7]
+
+
+def test_uni_gc_clear_and_runaway_guard():
+    from interlatent.node.teleop._quic_uni_gc import UniStreamGC
+
+    gc = UniStreamGC(is_finished=lambda sid: False, discard=lambda sid: None)
+    for sid in range(400):  # nothing ever acks (a dying connection)
+        gc.add(sid)
+    gc.sweep()
+    assert gc.pending_count() <= UniStreamGC._MAX_PENDING
+    gc.clear()
+    assert gc.pending_count() == 0
+
+
 def test_parent_link_video_dispatch():
     link = _quic_proc._ParentLink()
     got: list = []
@@ -486,15 +560,13 @@ def test_parent_link_video_dispatch():
         _quic_ipc.encode_video("cam0", b"WIREBYTES"), ("127.0.0.1", 1)
     )
     assert got == [("cam0", b"WIREBYTES")]
-    assert link.rx_video_from_parent == 1
 
-    # No sender (no session up) → dropped silently, not counted.
+    # No sender (no session up) → dropped silently.
     link.set_video_sender(None)
     link.datagram_received(
         _quic_ipc.encode_video("cam0", b"MORE"), ("127.0.0.1", 1)
     )
     assert got == [("cam0", b"WIREBYTES")]
-    assert link.rx_video_from_parent == 1
 
     # Garbage payload with a sender set → ignored.
     link.set_video_sender(lambda cam, wire: got.append((cam, wire)))
@@ -677,3 +749,223 @@ def test_quic_proc_hello_and_stdin_eof_exit():
         else:
             proc.stderr.read()  # drain
         proc.stderr.close()
+
+
+# ---------------------------------------------------------------------------
+# Congestion-adaptive preview: PreviewBackoff + vstats wiring
+# ---------------------------------------------------------------------------
+
+def test_preview_backoff_pure():
+    b = qc.PreviewBackoff()
+    base = 0.1  # 10 Hz configured
+    assert b.period(base) == pytest.approx(base)
+
+    # A single TTL reset is a stray WiFi burp — the dead band holds.
+    b.on_window(stale=1, base_period_s=base)
+    assert b.period(base) == pytest.approx(base)
+    # Two frames stale in flight in one window -> halve.
+    b.on_window(stale=2, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2)
+
+    # A fully fresh window decays /1.25 back toward the configured rate.
+    b.on_window(stale=0, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2 / 1.25)
+    # Dead band again: exactly one stale frame holds steady.
+    b.on_window(stale=1, base_period_s=base)
+    assert b.period(base) == pytest.approx(0.2 / 1.25)
+
+
+def test_preview_backoff_clamp_and_recovery():
+    b = qc.PreviewBackoff()
+    base = 0.1
+
+    # Backoff clamps exactly at the 1s period ceiling (1 Hz floor rate),
+    # never overshooting past it (overshoot would only slow recovery).
+    for _ in range(10):
+        b.on_window(stale=50, base_period_s=base)
+    assert b.period(base) == pytest.approx(1.0)
+    assert b.mult == pytest.approx(10.0)  # 1.0s / 0.1s, not 2**n
+
+    # Recovery decays back to the configured rate with no undershoot,
+    # in ~10-11 clean windows from the floor (log1.25(10) ~= 10.3).
+    clean = 0
+    while b.mult > 1.0:
+        b.on_window(stale=0, base_period_s=base)
+        clean += 1
+    assert 10 <= clean <= 12
+    assert b.period(base) == pytest.approx(base)
+
+
+def test_preview_backoff_base_slower_than_floor():
+    # A configured rate at/below 1 Hz never gets slowed further.
+    b = qc.PreviewBackoff()
+    b.on_window(stale=100, base_period_s=1.0)
+    assert b.period(1.0) == pytest.approx(1.0)
+
+
+def _vstats(drop_cap: int, reset_ttl: int = 0, open_ct: int = 0) -> dict:
+    # open_ct is accepted for call-site readability but no longer on the wire —
+    # the trimmed payload carries only what the parent consumes.
+    return {"t": "vstats", "drop_cap": drop_cap, "reset_ttl": reset_ttl}
+
+
+def test_vstats_cap_drops_never_back_off(channel):
+    # The regression: with the in-flight cap, admission denials
+    # (drop_cap) are the pacing mechanism — the timer over-offers, the
+    # governor discards the excess for free. Punishing them strangled
+    # the timer below the link's completion rate and recovery never
+    # fired (a paced link always shows collisions). Any amount of
+    # cap-pacing must hold the rate; only TTL resets back off.
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    base = chan._preview_period_s
+
+    sim.ctrl(_vstats(drop_cap=0, open_ct=0))           # baseline sample
+    sim.ctrl(_vstats(drop_cap=60, open_ct=30))         # heavy cap pacing
+    # Give the supervisor thread a beat to process, then assert no backoff.
+    time.sleep(0.2)
+    assert chan._preview_backoff.mult == pytest.approx(1.0)
+    assert chan._effective_preview_period_s() == pytest.approx(base)
+
+    # Two frames going stale in flight (TTL resets) does back off.
+    sim.ctrl(_vstats(drop_cap=60, open_ct=60, reset_ttl=2))
+    _wait_for(lambda: chan._preview_backoff.mult == pytest.approx(2.0),
+              what="backoff on stale frames")
+
+
+def test_vstats_backoff_and_deadline(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    base = chan._preview_period_s
+
+    sim.ctrl(_vstats(0))                 # baseline sample
+    sim.ctrl(_vstats(0, reset_ttl=5))    # +5 stale in one window -> back off
+    _wait_for(lambda: chan._effective_preview_period_s()
+              == pytest.approx(2 * base), what="backoff engaged")
+
+    # The credit deadline advances by the EFFECTIVE period, not the base.
+    now = time.monotonic()
+    chan._next_preview_due = now
+    chan.send_preview({"cam": b"\xff\xd8jpeg"}, ts_ns=1_000_000_000)
+    assert chan._next_preview_due == pytest.approx(now + 2 * base)
+
+
+def test_vstats_recovery_logs_once(channel, caplog):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl(_vstats(0, reset_ttl=4))
+    _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
+    with caplog.at_level(logging.INFO, logger="interlatent.node.teleop.quic_channel"):
+        # Repeated clean windows (cumulative counters unchanged) decay back.
+        for _ in range(12):
+            sim.ctrl(_vstats(0, reset_ttl=4))
+        _wait_for(lambda: chan._preview_backoff.mult == 1.0, what="recovery")
+    recovered = [r for r in caplog.records if "recovered" in r.getMessage()]
+    assert len(recovered) == 1
+
+
+def test_vstats_malformed_and_stray_ignored(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl({"t": "vstats", "drop_cap": "many"})  # malformed -> ignored
+    sim.ctrl({"t": "bogus", "x": 1})  # unknown type -> ignored
+    stray = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        stray.sendto(_quic_ipc.encode_ctrl(_vstats(0, reset_ttl=999)),
+                     sim.parent_addr)
+        time.sleep(0.2)
+        assert chan._preview_backoff.mult == 1.0
+    finally:
+        stray.close()
+
+
+def test_vstats_reconnect_resets_baseline(channel):
+    chan, sim, _ = channel
+    _make_viewer_present(chan, sim)
+    sim.ctrl(_vstats(0))
+    sim.ctrl(_vstats(0, reset_ttl=100))
+    _wait_for(lambda: chan._preview_backoff.mult > 1.0, what="backoff")
+    mult = chan._preview_backoff.mult
+
+    # Reconnect: the child's governor counters restart from zero. The
+    # first vstats after "connected" must be treated as a baseline (a
+    # negative delta), not a spurious extra backoff.
+    sim.ctrl({"t": "disconnected", "reason": "test"})
+    _wait_for(lambda: not chan.connected, what="disconnected")
+    sim.ctrl({"t": "connected"})
+    _wait_for(lambda: chan.connected, what="reconnected")
+    sim.ctrl(_vstats(0, reset_ttl=2))
+    time.sleep(0.2)
+    assert chan._preview_backoff.mult == pytest.approx(mult)
+
+
+def test_vstats_adaptive_kill_switch(monkeypatch):
+    monkeypatch.setenv("INTERLATENT_PREVIEW_ADAPTIVE", "0")
+    spawned: list[FakePopen] = []
+    monkeypatch.setattr(
+        qc.subprocess, "Popen",
+        lambda argv, **kw: spawned.append(FakePopen(argv, **kw)) or spawned[-1],
+    )
+    chan = QuicTeleopChannel(
+        session_id="sess-noadapt", api_base="http://api.example",
+        api_key="ilat_test",
+    )
+    chan.start()
+    sim = ChildSim(spawned[0].env)
+    try:
+        _make_viewer_present(chan, sim)
+        sim.ctrl(_vstats(0))
+        sim.ctrl(_vstats(0, reset_ttl=500))
+        time.sleep(0.2)
+        assert chan._effective_preview_period_s() == chan._preview_period_s
+        assert chan._preview_backoff.mult == 1.0
+    finally:
+        sim.close()
+        chan.stop()
+
+
+def test_vstats_payload_pure():
+    # Trimmed to exactly what the parent's PreviewBackoff consumes: drop_cap
+    # (diagnostic) + reset_ttl (the backoff signal). The qs/dg_drop gauges ride
+    # the 5s stats log line, not this IPC. None while no governor exists.
+    assert _quic_proc._vstats_payload(None) is None
+
+    class _Gov:
+        opened, finished, dropped_cap, reset_ttl = 7, 6, 3, 1
+
+    msg = _quic_proc._vstats_payload(_Gov())
+    assert msg == {"t": "vstats", "drop_cap": 3, "reset_ttl": 1}
+    kind, payload = _quic_ipc.parse(_quic_ipc.encode_ctrl(msg))
+    assert kind == _quic_ipc.TYPE_CTRL
+    assert _quic_ipc.parse_ctrl(payload) == msg
+
+
+def test_video_inflight_env_parse(monkeypatch):
+    # Valid override, clamping, and garbage falling back to the default.
+    from interlatent.node import _env
+
+    monkeypatch.setenv("X_INFLIGHT", "4")
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 4
+    monkeypatch.setenv("X_INFLIGHT", "99")
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 16
+    monkeypatch.setenv("X_INFLIGHT", "0")
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 1
+    monkeypatch.setenv("X_INFLIGHT", "many")
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 2
+    monkeypatch.delenv("X_INFLIGHT")
+    assert _env.env_int("X_INFLIGHT", 2, 1, 16) == 2
+
+
+def test_video_governor_honors_raised_cap(monkeypatch):
+    monkeypatch.setattr(_quic_proc, "_VIDEO_INFLIGHT_PER_CAM", 4)
+    monkeypatch.setattr(_quic_proc, "_VIDEO_INFLIGHT_GLOBAL", 12)
+    gov = _quic_proc._VideoGovernor(
+        now=lambda: 0.0, is_finished=lambda sid: False, reset=lambda sid: None
+    )
+    for i in range(4):
+        assert gov.admit("cam")
+        gov.note_open(i, "cam")
+    assert not gov.admit("cam")  # 5th per-cam frame hits the raised cap
+    assert gov.dropped_cap == 1

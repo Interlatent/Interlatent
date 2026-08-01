@@ -54,5 +54,7 @@ interlatent session stop  <session-id>
 ## What stays true either way
 
 - The client, node, CLI, and wire protocol in this repo are Apache-2.0.
-- Local LeRobot dataset collection runs with zero account.
+- Datasets are standard LeRobot v3.0 in both directions: hosted recordings are
+  exportable, and datasets you collected elsewhere can be imported — no lock-in.
+  (Recording itself happens through a hosted session, so it needs an account.)
 - The cloud consumes these same packages from PyPI — the OSS is the product, not a demo.
