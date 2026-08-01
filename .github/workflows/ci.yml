@@ -118,7 +118,10 @@ jobs:
           # works on a machine where torch is not yet importable. Dependency
           # declarations are validated by the resolve step below instead.
           pip install --no-deps -e ./packages/server
-          pip install grpcio protobuf numpy pillow httpx huggingface_hub pytest ruff
+          # pytest-timeout: the test step below passes --timeout, which is a
+          # plugin flag, not core pytest. Without it pytest exits 4 on the
+          # unrecognized argument before running a single test.
+          pip install grpcio protobuf numpy pillow httpx huggingface_hub pytest pytest-timeout ruff
       - name: Import surface + auth/CLI tests
         run: |
           pytest packages/server/tests/ -v --timeout=120
@@ -251,7 +254,18 @@ jobs:
           # moves under us) and gates pyrealsense2 to x86_64, so a red here is
           # usually upstream churn rather than a defect in our declaration.
           # Keep the signal, drop the gate.
-          ADVISORY = {"yam"}
+          #
+          # [axol] is advisory for a different reason: almond-axol depends on
+          # dimos[manipulation], which requires a750-control under
+          # `sys_platform == "linux" and platform_machine == "x86_64"`. That
+          # package is not published on PyPI, so the resolve fails on the x86
+          # runners (ARM skips it — the marker is false there). Nothing in this
+          # repo can fix that; the durable fix is upstream, either publishing
+          # a750-control or dropping it from dimos's manipulation extra. Until
+          # then this is a real user-facing break for `pip install
+          # 'interlatent[axol]'` on linux/x86_64, so it stays visible as a
+          # WARN rather than being silenced or removed.
+          ADVISORY = {"yam", "axol"}
 
           PYPROJECT = Path("packages/sdk/pyproject.toml")
           project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
