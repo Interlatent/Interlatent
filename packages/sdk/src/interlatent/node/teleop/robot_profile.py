@@ -11,17 +11,11 @@ LeRobot reports SO-101 follower joints as `<motor>.pos` scalars in *degrees*
 limits and velocity caps here are in degrees and degrees/second.
 
 Adding a new robot = add a `RobotProfile` and register it in `_PROFILES`. This
-is the single place the multi-robot teleop goal expands -- except dimos-mediated
-kinds, whose profiles are loaded from adapters/dimos/robots/<kind>.toml instead
-(see the "dimos-mediated kinds" section below); a new dimos kind's profile is a
-TOML file, not a change to this module.
+is the single place the multi-robot teleop goal expands.
 """
 from __future__ import annotations
 
-import logging
-import tomllib
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 
@@ -351,118 +345,73 @@ NORI_PROFILE = _nori_profile()
 
 
 # ---------------------------------------------------------------------------
-# dimos-mediated kinds (see interlatent.adapters.dimos) -- loaded, not hand-
-# transcribed
+# UFACTORY xArm7 behind a dimos ControlCoordinator (see interlatent.adapters.dimos)
 # ---------------------------------------------------------------------------
 #
 # The dimos adapter binds to a running dimos stack as an external bus peer and
 # streams `joint_command` to a dimos servo task. dimos applies NO limits to that
-# stream (its coordinator writes commands straight to hardware), so a kind's
-# profile is the ONLY safety envelope anywhere in the path -- unlike nori,
-# nothing re-clamps robot-side.
+# stream (its coordinator writes commands straight to hardware), so this profile
+# is the ONLY safety envelope anywhere in the path — unlike nori, nothing
+# re-clamps robot-side.
 #
-# Every dimos kind's joint names/limits/velocity caps/rest pose live in
-# adapters/dimos/robots/<kind>.toml (co-located with that kind's DimosKind
-# declaration, kinds.py) rather than as Python literals here -- adding a new
-# dimos kind's profile is "add a TOML file", not "add a block to this module".
-# Units are RADIANS unless the TOML says otherwise; joint order is the dimos
-# kind's `dimos_arm_joints` order (mapped `/`->`_`), gripper last -- this must
-# equal `DimosNativeRobot.action_features` order; `base.py` raises if they
-# diverge. This module intentionally does NOT import `interlatent.adapters.dimos`
-# (dependency direction stays adapter -> teleop, not the reverse) -- it just
-# reads the same TOML files directly, so no dimos install is required.
-_DIMOS_ROBOTS_DIR = Path(__file__).resolve().parents[2] / "adapters" / "dimos" / "robots"
-
-_dimos_profile_cache: dict[str, Optional[RobotProfile]] = {}
-
-
-def _load_dimos_profile(kind_name: str) -> Optional[RobotProfile]:
-    """Load ``dimos_<kind_name>``'s profile from ``adapters/dimos/robots/<kind_name>.toml``.
-
-    Returns ``None`` if no such file exists, or if it declares a kind with no
-    ``[profile]`` section (see the auto-derived-default fallback below) --
-    matching :func:`get_profile`'s "no static safety envelope" contract.
-    """
-    if kind_name in _dimos_profile_cache:
-        return _dimos_profile_cache[kind_name]
-
-    path = _DIMOS_ROBOTS_DIR / f"{kind_name}.toml"
-    profile: Optional[RobotProfile] = None
-    if path.is_file():
-        data = tomllib.loads(path.read_text())
-        profile_data = data.get("profile")
-        if profile_data is None:
-            profile = _auto_derived_dimos_profile(kind_name, data)
-        else:
-            dimos_names = list(data["dimos_arm_joints"])
-            gripper = data.get("dimos_gripper_joint")
-            if gripper:
-                dimos_names.append(gripper)
-            joint_names = tuple(n.replace("/", "_") for n in dimos_names)
-            profile = RobotProfile(
-                name=f"dimos_{kind_name}",
-                joint_names=joint_names,
-                joint_limits=tuple(
-                    (float(lo), float(hi)) for lo, hi in profile_data["joint_limits"]
-                ),
-                max_velocity=tuple(float(v) for v in profile_data["max_velocity"]),
-                rest_pose=tuple(float(v) for v in profile_data["rest_pose"]),
-            )
-    _dimos_profile_cache[kind_name] = profile
-    return profile
-
-
-# Fixed, deliberately conservative velocity-cap fraction applied when a kind
-# has no hand-tuned `[profile]` in its TOML -- NOT a substitute for real
-# tuning (see the dimos_xarm7/dimos_a1z TOML comments on why a URDF's raw
-# velocity_limit is not trustworthy verbatim), just a safe-by-construction
-# starting point so a new kind isn't blocked on profile-authoring to move at
-# all. Loudly logged; see ROBOT.md "Adding a robot".
-_AUTO_PROFILE_VELOCITY_SCALE = 0.1
-
-
-def _auto_derived_dimos_profile(kind_name: str, kind_data: dict) -> Optional[RobotProfile]:
-    """Synthesize a conservative default profile from a kind's declared joints
-    when no hand-tuned ``[profile]`` exists -- position limits default to a
-    wide, software-only bound (dimos itself enforces none), velocity caps to a
-    small fixed fraction of that bound, rest pose to zero (clamped into
-    range). Logged loudly: this is meant to unblock first light, not to be
-    trusted for production tuning.
-    """
-    dimos_names = list(kind_data.get("dimos_arm_joints", ()))
-    gripper = kind_data.get("dimos_gripper_joint")
-    if gripper:
-        dimos_names.append(gripper)
-    if not dimos_names:
-        return None
-    joint_names = tuple(n.replace("/", "_") for n in dimos_names)
-    bound = _2PI
-    joint_limits = tuple((-bound, bound) for _ in joint_names)
-    max_velocity = tuple(bound * _AUTO_PROFILE_VELOCITY_SCALE for _ in joint_names)
-    rest_pose = tuple(0.0 for _ in joint_names)
-    logging.getLogger(__name__).warning(
-        "dimos_%s has no hand-tuned profile (adapters/dimos/robots/%s.toml has "
-        "no [profile] section) -- using an auto-derived, UNAUDITED conservative "
-        "default (+-2pi position bound, %.0f%% velocity scale, zero rest pose). "
-        "Tune before production use.",
-        kind_name, kind_name, _AUTO_PROFILE_VELOCITY_SCALE * 100,
-    )
-    return RobotProfile(
-        name=f"dimos_{kind_name}",
-        joint_names=joint_names,
-        joint_limits=joint_limits,
-        max_velocity=max_velocity,
-        rest_pose=rest_pose,
-    )
-
+# Joint names are the dimos names (`arm/joint1`..`arm/joint7`, gripper last)
+# mapped `/`->`_` per interlatent.adapters.dimos.kinds; the order equals
+# `DimosNativeRobot.action_features` (dimos hardware order) — `base.py` raises
+# if they diverge. Units are RADIANS (dimos JointState convention; dimos's xarm
+# adapter converts deg<->rad internally).
+#
+# Limits are the UFACTORY xArm7 datasheet joint ranges (matching the
+# xarm_description URDF's <limit> tags; dimos ships that URDF as an LFS asset —
+# re-verify against it on first sim/hardware run). NOT dimos's
+# `XArmAdapter.get_limits()` +-2pi placeholder, which is wrong for J2/J4/J6.
+_DIMOS_XARM7_JOINT_NAMES: tuple[str, ...] = tuple(
+    f"arm_joint{i}" for i in range(1, 8)
+) + ("arm_gripper",)
 
 _2PI = 6.283185307179586
+
+# Radians (gripper in dimos gripper units, see below).
+_DIMOS_XARM7_LIMITS: tuple[tuple[float, float], ...] = (
+    (-_2PI, _2PI),          # arm_joint1  (J1, full rotation)
+    (-2.059, 2.0944),       # arm_joint2  (J2: -118 deg .. 120 deg)
+    (-_2PI, _2PI),          # arm_joint3  (J3, full rotation)
+    (-0.19198, 3.927),      # arm_joint4  (J4: -11 deg .. 225 deg)
+    (-_2PI, _2PI),          # arm_joint5  (J5, full rotation)
+    (-1.69297, 3.14159),    # arm_joint6  (J6: -97 deg .. 180 deg)
+    (-_2PI, _2PI),          # arm_joint7  (J7, full rotation)
+    # Gripper: dimos maps the xArm SDK's 0-850 pulse scale (~85 mm stroke)
+    # x0.001 into its "meters" convention, so the dimos-side range is [0, 0.85].
+    # 0 closed, 0.85 open. Verify on hardware.
+    (0.0, 0.85),            # arm_gripper
+)
+
+# rad/sec. The URDF declares 3.14 rad/s (motor max) on every joint; that is far
+# too fast for a per-tick clamp that is the only limit in the path, so we cap
+# well below (heavier proximal joints tighter) and widen only after reading the
+# `DRTC-DEBUG joints` log on real hardware.
+_DIMOS_XARM7_MAX_VELOCITY: tuple[float, ...] = (
+    1.0, 1.0, 1.0, 1.0,   # J1-J4
+    1.5, 1.5, 1.5,        # J5-J7 (lighter distal joints)
+    2.0,                  # gripper (dimos gripper units/s)
+)
+
+# dimos's own xarm7 initial pose (`_XARM7_INITIAL_JOINTS_DEG` in
+# dimos/hardware/manipulators/xarm/adapter.py): zeros with J6 = -0.7 rad, which
+# keeps the elbow-up configuration off the J4 lower stop. Gripper open.
+_DIMOS_XARM7_REST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, -0.7, 0.0, 0.85)
+
+DIMOS_XARM7_PROFILE = RobotProfile(
+    name="dimos_xarm7",
+    joint_names=_DIMOS_XARM7_JOINT_NAMES,
+    joint_limits=_DIMOS_XARM7_LIMITS,
+    max_velocity=_DIMOS_XARM7_MAX_VELOCITY,
+    rest_pose=_DIMOS_XARM7_REST,
+)
 
 
 # Registry keyed by robot kind. Keys match the `--robot` kinds resolved in
 # `control.py._make_lerobot_robot` (and their aliases). Each new teleop-capable
-# native/LeRobot robot adds an entry here; dimos-mediated kinds are NOT listed
-# here -- `get_profile` resolves any `dimos_*` key via `_load_dimos_profile`.
+# robot adds an entry here.
 _PROFILES: dict[str, RobotProfile] = {
     "so101": SO101_PROFILE,
     "koch": KOCH_PROFILE,
@@ -472,6 +421,7 @@ _PROFILES: dict[str, RobotProfile] = {
     "yam_left": YAM_LEFT_PROFILE,
     "yam_right": YAM_RIGHT_PROFILE,
     "nori": NORI_PROFILE,
+    "dimos_xarm7": DIMOS_XARM7_PROFILE,
 }
 
 
@@ -482,19 +432,7 @@ def get_profile(robot_kind: str) -> Optional[RobotProfile]:
     must refuse to run the gated teleop path rather than command an unclamped
     robot.
     """
-    key = str(robot_kind).lower().strip()
-    if key in _PROFILES:
-        return _PROFILES[key]
-    if key.startswith("dimos_"):
-        return _load_dimos_profile(key[len("dimos_"):])
-    return None
-
-
-# Backward-compatible aliases for the two shipped dimos kinds (existing call
-# sites/tests may import these by name; both resolve through the same TOML
-# loader as `get_profile("dimos_xarm7")`/`get_profile("dimos_a1z")`).
-DIMOS_XARM7_PROFILE = get_profile("dimos_xarm7")
-DIMOS_A1Z_PROFILE = get_profile("dimos_a1z")
+    return _PROFILES.get(str(robot_kind).lower().strip())
 
 
 __all__ = [
@@ -506,6 +444,5 @@ __all__ = [
     "YAM_RIGHT_PROFILE",
     "NORI_PROFILE",
     "DIMOS_XARM7_PROFILE",
-    "DIMOS_A1Z_PROFILE",
     "get_profile",
 ]

@@ -12,20 +12,12 @@ registry (``dimos_xarm7`` — the bare ``xarm7`` name stays free for a possible
 future direct-xArm adapter). Profile ``joint_names`` order must equal
 ``feature_keys`` order minus ``.pos``; ``base.py`` raises if they diverge.
 
-Every known kind is declared in ``robots/<kind>.toml`` (co-located with that
-kind's teleop profile, loaded separately by
-:mod:`~interlatent.node.teleop.robot_profile`) and loaded here at import
-time — adding a new dimos-mediated robot is "add a TOML file", not "add a
-``DimosKind(...)`` block to this module".
-
 No dimos imports here — this module must stay importable without the ``[dimos]``
 extra.
 """
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 def feature_key_for(dimos_name: str) -> str:
@@ -86,41 +78,22 @@ class DimosKind:
         return dict(zip(self.feature_keys, self.dimos_joint_names))
 
 
-_ROBOTS_DIR = Path(__file__).parent / "robots"
-
-
-def _load_kind(path: Path) -> DimosKind:
-    data = tomllib.loads(path.read_text())
-    gripper_joint = data.get("dimos_gripper_joint")
-    return DimosKind(
-        name=data["name"],
-        profile_name=data["profile_name"],
-        dimos_arm_joints=tuple(data["dimos_arm_joints"]),
-        dimos_gripper_joint=gripper_joint,
-        gripper_hardware_id=data.get("gripper_hardware_id"),
-    )
-
-
-def _load_known_kinds() -> dict[str, DimosKind]:
-    kinds: dict[str, DimosKind] = {}
-    for path in sorted(_ROBOTS_DIR.glob("*.toml")):
-        kind = _load_kind(path)
-        if kind.name in kinds:
-            raise ValueError(f"duplicate dimos kind {kind.name!r} declared in {path}")
-        kinds[kind.name] = kind
-    return kinds
-
+# UFACTORY xArm7 behind a dimos ControlCoordinator. Joint names come from
+# dimos's `make_joints("arm", 7)` (dimos/control/components.py) with the
+# hardware id the reference blueprint uses; the gripper is declared separately
+# (`gripper_joints=["arm/gripper"]`) and driven via the coordinator's
+# `set_gripper_position("arm", ...)` RPC, not the joint_command stream.
+XARM7 = DimosKind(
+    name="xarm7",
+    profile_name="dimos_xarm7",
+    dimos_arm_joints=tuple(f"arm/joint{i}" for i in range(1, 8)),
+    dimos_gripper_joint="arm/gripper",
+    gripper_hardware_id="arm",
+)
 
 # go2_base (velocity virtual joints go2/vx, go2/vy, go2/wz) is planned for v1.5 —
 # see CONFIG.md; the seam is identical but profile semantics are velocity bounds.
-KNOWN_KINDS: dict[str, DimosKind] = _load_known_kinds()
-
-# Convenience module-level references for the two shipped kinds (existing call
-# sites and tests import these by name). A newly-added kind's TOML file is
-# enough on its own -- resolve it via get_kind("<name>"), no matching constant
-# required here.
-XARM7 = KNOWN_KINDS["xarm7"]
-A1Z = KNOWN_KINDS["a1z"]
+KNOWN_KINDS: dict[str, DimosKind] = {XARM7.name: XARM7}
 
 
 def get_kind(name: str) -> DimosKind:
@@ -134,4 +107,4 @@ def get_kind(name: str) -> DimosKind:
         ) from None
 
 
-__all__ = ["DimosKind", "XARM7", "A1Z", "KNOWN_KINDS", "get_kind", "feature_key_for"]
+__all__ = ["DimosKind", "XARM7", "KNOWN_KINDS", "get_kind", "feature_key_for"]
