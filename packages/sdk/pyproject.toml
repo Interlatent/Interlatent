@@ -189,6 +189,7 @@ interlatent = "interlatent.cli.main:main"
 # module's import guard turns a missing [dimos] extra into one actionable error.
 [project.entry-points."dimos.blueprints"]
 xarm7 = "interlatent.adapters.dimos.blueprints:xarm7"
+a1z = "interlatent.adapters.dimos.blueprints:a1z"
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"
@@ -211,12 +212,16 @@ namespaces = true
 [tool.setuptools.package-data]
 # Built-in behavior definitions shipped per robot (interlatent.behaviors.data).
 "interlatent.behaviors" = ["data/*.toml"]
+# dimos-mediated kind declarations + teleop profiles, one TOML per kind
+# (kinds.py / robot_profile.py load these at runtime; see adapters/dimos/robots/).
+"interlatent.adapters.dimos" = ["robots/*.toml"]
 # Robot embodiment data, one subpackage per kind (interlatent_robots.<kind>).
 # ~18 KB of JSON/XML per robot — small enough to ship for every kind rather than
 # gate behind the per-kind extras, which carry the *driver* deps, not the data.
 # Note ik_config.json is carved back out below — see exclude-package-data.
 "interlatent_robots.yam" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.nori" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.a1z" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.so101" = ["*.urdf", "*.json", "*.lock"]
 
 [tool.setuptools.exclude-package-data]

@@ -22,19 +22,38 @@ this module is a convenience, not a requirement. A dimos-side memory2 recorder
 for low-level streams (go2_base pattern) is documented in CONFIG.md, not baked
 in here.
 
+Every dimos-shipped, per-vendor blueprint (xarm7's, A1Z's, ...) configures a
+``trajectory`` task instead of the exclusive ``servo`` task this contract
+needs, so this module has always had to author its own composition per kind
+rather than reuse dimos's. ``_streaming_blueprint`` + ``_mock_hardware`` below
+are the *generic* halves of that composition — genuinely vendor-agnostic,
+built once and shared by every kind. What's left per kind is real,
+irreducible vendor knowledge (each vendor's own hardware/model factory has a
+different signature and mock/sim fork behavior — see CONFIG.md and the
+per-kind blocks below) — now a few lines of binding, not a duplicated block.
+
 Import guard: dimos is required at import time BY DESIGN — dimos itself resolves
 the entry point lazily, so a base install never touches this module, and a
 half-installed state produces one actionable error instead of a deep stack.
 """
 from __future__ import annotations
 
+from functools import partial
+
 try:
+    from dimos.control.components import (
+        HardwareComponent,
+        HardwareType,
+        make_gripper_joints,
+        make_joints,
+    )
     from dimos.control.coordinator import TaskConfig
     from dimos.core.coordination.blueprints import autoconnect
     from dimos.core.global_config import global_config
     from dimos.hardware.sensors.camera.module import CameraModule
     from dimos.robot.manipulators.common.blueprints import coordinator, planner
     from dimos.robot.manipulators.common.sim import mujoco_if_sim
+    from dimos.robot.manipulators.a1z.config import a1z_hardware, make_a1z_model_config
     from dimos.robot.manipulators.xarm.config import (
         XARM7_SIM_PATH,
         make_xarm7_model_config,
@@ -79,34 +98,143 @@ def _camera_if_real() -> tuple:
     return (CameraModule.blueprint(),)
 
 
-# UFACTORY xArm7 + gripper. `mock_without_address=True`: with no xarm7_ip
-# configured this runs the mock adapter — the hardware-free path the
-# integration tests (and first-time operators) use.
-_xarm7_hw = xarm7_hardware("arm", gripper=True, mock_without_address=True)
+def _mock_hardware(
+    hw_id: str,
+    dof: int,
+    *,
+    has_gripper: bool,
+    gripper_open_position: float | None = None,
+    gripper_closed_position: float | None = None,
+) -> HardwareComponent:
+    """Vendor-independent hardware-free dev path.
 
-# Follow dimos's own xarm7_planner_coordinator composition, but keep execution
-# on the session's exclusive servo task. The ManipulationModule supplies the
-# planning model, collision world, live-state rendering, and trajectory
-# previews; it deliberately has no coordinator trajectory task because adding
-# one would claim the same joints and violate this adapter's strict-exclusivity
-# safety contract. Interlatent commands still move the mock adapter's in-memory
-# state, so Viser displays the exact command path used on hardware.
-_xarm7_model = make_xarm7_model_config(name="arm", add_gripper=True).model_copy(
-    update={"coordinator_task_name": None}
+    Built directly from dimos's own uniform primitives (``HardwareComponent``,
+    ``make_joints``, ``make_gripper_joints`` — imported identically by every
+    manipulator vendor dimos ships), NOT via any vendor's own mock-fallback
+    logic. That logic is inconsistent across vendors (xarm7 has an
+    address-optional ``mock_without_address`` knob; A1Z has none; a750 has its
+    own differently-defaulted knob; openyam is always mock) — this gives every
+    kind the same hardware-free path regardless of what its vendor factory
+    happens to support.
+    """
+    return HardwareComponent(
+        hardware_id=hw_id,
+        hardware_type=HardwareType.MANIPULATOR,
+        joints=make_joints(hw_id, dof),
+        adapter_type="mock",
+        gripper_joints=make_gripper_joints(hw_id) if has_gripper else [],
+        gripper_open_position=gripper_open_position,
+        gripper_closed_position=gripper_closed_position,
+    )
+
+
+def _resolve_hardware(
+    real_factory,
+    hw_id: str,
+    dof: int,
+    *,
+    has_gripper: bool,
+    address_configured: bool,
+    gripper_open_position: float | None = None,
+    gripper_closed_position: float | None = None,
+) -> HardwareComponent:
+    """Real hardware if an address is configured, or if ``--simulation`` is set
+    (the vendor's own factory already knows how to build its own sim/mock
+    adapter in that case — e.g. xarm7's MuJoCo path). Otherwise
+    :func:`_mock_hardware` — the vendor-independent hardware-free fallback,
+    given uniformly regardless of whether the vendor's own factory supports an
+    address-optional mock knob.
+    """
+    if global_config.simulation or address_configured:
+        return real_factory(hw_id)
+    return _mock_hardware(
+        hw_id,
+        dof,
+        has_gripper=has_gripper,
+        gripper_open_position=gripper_open_position,
+        gripper_closed_position=gripper_closed_position,
+    )
+
+
+def _without_coordinator_task(model):
+    """Clear ``coordinator_task_name`` so the ManipulationModule's planner
+    doesn't also attach a trajectory task claiming the session's joints
+    (would violate this adapter's strict-exclusivity contract) -- but only if
+    that field genuinely exists on the installed dimos version's
+    ``RobotModelConfig``. A blind ``model_copy(update=...)`` is a pydantic v2
+    no-op for an unknown key, which is exactly how this went unnoticed before:
+    check first, rather than silently maybe-doing-nothing.
+    """
+    if "coordinator_task_name" in type(model).model_fields:
+        return model.model_copy(update={"coordinator_task_name": None})
+    return model
+
+
+def _streaming_blueprint(hardware: HardwareComponent, *, model=None, sim_path=None):
+    """Compose the full session contract (ADR 0018) from an already-built
+    ``HardwareComponent`` (+ optional ``RobotModelConfig`` for the Viser/
+    planning preview, + optional MuJoCo ``sim_path``). Fully vendor-agnostic —
+    only ``hardware``/``model``/``sim_path`` vary per kind; every kind's
+    blueprint reduces to one call.
+    """
+    parts: list = []
+    if model is not None:
+        parts.append(
+            planner(
+                robots=[_without_coordinator_task(model)],
+                visualization={"backend": "viser"},
+            )
+        )
+    parts.append(coordinator(hardware=[hardware], tasks=[_servo_task(hardware)]))
+    parts.extend(_camera_if_real())
+    if sim_path is not None:
+        parts.extend(mujoco_if_sim(sim_path, len(hardware.joints)))
+    return autoconnect(*parts)
+
+
+# ---------------------------------------------------------------------------
+# UFACTORY xArm7 + gripper
+# ---------------------------------------------------------------------------
+
+_xarm7_real_hardware = partial(xarm7_hardware, gripper=True)
+
+xarm7 = _streaming_blueprint(
+    _resolve_hardware(
+        _xarm7_real_hardware,
+        "arm",
+        7,
+        has_gripper=True,
+        address_configured=bool(global_config.xarm7_ip),
+        # xarm7's own gripper convention: raw meters passthrough (both None).
+    ),
+    model=make_xarm7_model_config(name="arm", add_gripper=True),
+    sim_path=XARM7_SIM_PATH,
 )
 
-xarm7 = autoconnect(
-    planner(
-        robots=[_xarm7_model],
-        visualization={"backend": "viser"},
+
+# ---------------------------------------------------------------------------
+# Galaxea A1Z + gripper
+# ---------------------------------------------------------------------------
+
+_a1z_real_hardware = partial(a1z_hardware, has_gripper=True)
+
+a1z = _streaming_blueprint(
+    _resolve_hardware(
+        _a1z_real_hardware,
+        "arm",
+        6,
+        has_gripper=True,
+        address_configured=bool(global_config.can_port),
+        # A1Z's own gripper convention: normalized [0,1] fraction (both set) --
+        # matches a1z_hardware()'s own gripper_open_position/closed_position.
+        gripper_open_position=1.0,
+        gripper_closed_position=0.0,
     ),
-    coordinator(
-        hardware=[_xarm7_hw],
-        tasks=[_servo_task(_xarm7_hw)],
-    ),
-    *_camera_if_real(),
-    *mujoco_if_sim(XARM7_SIM_PATH, len(_xarm7_hw.joints)),
+    model=make_a1z_model_config(name="arm", has_gripper=True),
+    # No sim_path: dimos ships no MuJoCo scene for A1Z today. Unlike before,
+    # A1Z now gets a hardware-free dev path WITHOUT --simulation too (just
+    # don't configure --can-port) -- see _resolve_hardware above.
 )
 
 
-__all__ = ["xarm7"]
+__all__ = ["xarm7", "a1z"]

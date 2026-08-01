@@ -620,6 +620,16 @@ class NodeDaemon:
         teleop_channel = None
         teleop_api_key = self.cfg.drtc_api_key or ""
         if teleop_api_key and session.get("id"):
+            # The interlatent_robots data lookup (QUIC's kinematic_spec) is
+            # keyed by the specific embodiment, not the adapter family. Every
+            # other --robot value maps 1:1 to its interlatent_robots.<kind>
+            # data, but --robot dimos covers multiple, kinematically distinct
+            # arms selected via --robot-arg kind=<embodiment> -- resolve that
+            # here rather than looking up data for the literal string "dimos"
+            # (which the SDK never ships, by design: it's not one robot).
+            teleop_robot_kind = self.cfg.robot_kind
+            if teleop_robot_kind == "dimos":
+                teleop_robot_kind = self.cfg.robot_extra.get("kind") or teleop_robot_kind
             teleop_channel = make_teleop_channel(
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
@@ -636,7 +646,7 @@ class NodeDaemon:
                 bypass_key=self.cfg.bypass_key,
                 # Lets the quic channel serve this robot's kinematic_spec to the
                 # browser from the installed interlatent[<kind>] data.
-                robot_kind=self.cfg.robot_kind,
+                robot_kind=teleop_robot_kind,
             )
             if teleop_channel is not None:
                 teleop_channel.start()

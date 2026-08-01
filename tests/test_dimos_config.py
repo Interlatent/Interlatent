@@ -9,6 +9,7 @@ import pytest
 
 from interlatent.adapters.dimos.config import build_adapter_config
 from interlatent.adapters.dimos.kinds import (
+    A1Z,
     XARM7,
     DimosKind,
     feature_key_for,
@@ -32,10 +33,20 @@ def test_xarm7_kind_feature_keys_order_and_shape():
     assert XARM7.feature_keys[-1] == "arm_gripper.pos"
 
 
+def test_a1z_kind_feature_keys_order_and_shape():
+    assert A1Z.dimos_arm_joints == tuple(f"arm/joint{i}" for i in range(1, 7))
+    assert A1Z.dimos_gripper_joint == "arm/gripper"
+    assert A1Z.feature_keys == tuple(
+        f"arm_joint{i}.pos" for i in range(1, 7)
+    ) + ("arm_gripper.pos",)
+    assert A1Z.feature_keys[-1] == "arm_gripper.pos"
+
+
 def test_name_map_is_bijective_and_inverts():
-    for dimos_name, feature in zip(XARM7.dimos_joint_names, XARM7.feature_keys):
-        assert feature_key_for(dimos_name) == feature
-        assert XARM7.dimos_name_for(feature) == dimos_name
+    for kind in (XARM7, A1Z):
+        for dimos_name, feature in zip(kind.dimos_joint_names, kind.feature_keys):
+            assert feature_key_for(dimos_name) == feature
+            assert kind.dimos_name_for(feature) == dimos_name
 
 
 def test_dimos_name_for_unknown_feature_raises():
@@ -59,6 +70,10 @@ def test_get_kind_unknown_lists_known():
         get_kind("go1")
 
 
+def test_get_kind_resolves_a1z():
+    assert get_kind("a1z") is A1Z
+
+
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
@@ -79,6 +94,11 @@ def test_defaults():
     assert cfg.staleness_ms == 200.0
     assert cfg.max_step_rad == 0.05
     assert cfg.cameras == {}
+
+
+def test_defaults_a1z():
+    cfg = build_adapter_config({"kind": "a1z"}, None)
+    assert cfg.kind is A1Z
 
 
 def test_knobs_parse_and_cameras_map_to_topics():
@@ -144,3 +164,32 @@ def test_dimos_xarm7_limits_sanity():
         assert lo <= rest <= hi
     # Velocity caps well below the 3.14 rad/s motor max for arm joints.
     assert all(v <= 1.5 for v in profile.max_velocity[:7])
+
+
+def test_dimos_a1z_profile_registered_and_aligned_with_kind():
+    profile = get_profile("dimos_a1z")
+    assert profile is not None
+    assert list(profile.joint_names) == [
+        k.removesuffix(".pos") for k in A1Z.feature_keys
+    ]
+
+
+def test_dimos_a1z_limits_sanity():
+    profile = get_profile("dimos_a1z")
+    assert profile is not None
+    lims = dict(zip(profile.joint_names, profile.joint_limits))
+    # Transcribed verbatim from dimos's A1Z URDF <limit> tags.
+    assert lims["arm_joint1"] == (-2.094, 2.094)
+    assert lims["arm_joint2"] == (0.0, 3.142)
+    assert lims["arm_joint3"] == (-3.142, 0.0)
+    assert lims["arm_joint4"] == (-1.309, 1.309)
+    assert lims["arm_joint5"] == (-1.484, 1.484)
+    assert lims["arm_joint6"] == (-2.007, 2.007)
+    # Gripper is a normalized fraction (0 closed .. 1 open), not xarm7's meters.
+    assert lims["arm_gripper"] == (0.0, 1.0)
+    # Rest pose inside limits (J2/J3 rest exactly on their own mechanical stop).
+    for (lo, hi), rest in zip(profile.joint_limits, profile.rest_pose):
+        assert lo <= rest <= hi
+    # Velocity caps well below both the URDF's velocity_limit (min 3.77 rad/s)
+    # and the vendor adapter's own cap (min 7.0 rad/s) for the 6 arm joints.
+    assert all(v <= 1.5 for v in profile.max_velocity[:6])
