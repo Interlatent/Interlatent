@@ -81,6 +81,7 @@ anything but your nodes.
   dashboard when you retire the machine.
 - Teleop is unaffected: the browser↔node path goes through the hosted QUIC
   relay and never touches the GPU box.
-- GPU sizing follows the same rules as managed pods — ~24 GB VRAM covers the
+- GPU sizing follows the same rules as managed boxes — ~24 GB VRAM covers the
   common families (SmolVLA/ACT/Diffusion); Pi0/MolmoAct2-class VLAs want
-  more. See `docker/README.md` (hosted image) for the family/dep matrix.
+  more. See [`docker/README.md`](../docker/README.md) for the family/dep
+  matrix, the build args, and every environment variable the image reads.

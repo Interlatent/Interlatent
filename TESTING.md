@@ -1,17 +1,40 @@
 # Test plan
 
-What must be exercised before declaring a release of the robot-side stack
-(`packages/sdk` — the DRTC client, the node, and the `interlatent` dashboard CLI)
-stable. Inference runs on managed cloud GPU pods; this repo's job is to drive them
-correctly and to collect datasets locally.
+What must be exercised before declaring a release stable. The repo ships three things
+and they are released independently, so read this per-deliverable:
+
+| Deliverable | Test roots | CI job |
+|---|---|---|
+| `packages/sdk` (`interlatent`) — DRTC client, node, dashboard CLI | `tests/`, `packages/sdk/tests/` | `test` (x86 + ARM, py3.11/3.12) |
+| `packages/server` (`interlatent-server`) — the DRTC policy server | `packages/server/tests/` | `server` (x86, py3.11/3.12) |
+| `teleop/teleop-web` — the WebXR VR producer | *(none yet — typecheck + build only)* | `teleop-web` |
+
+Both test roots for the SDK matter: `packages/sdk/tests/` holds the loop-runner,
+movement-arbitration, and Nori-guard suites, and is **not** a subset of `tests/`.
 
 ## What CI covers vs. what it doesn't
 
-The pytest suite runs with **no GPU and no robot**. It exercises the DRTC client
-control loop against the `echo` / `tiny_torch` test backends (chunk merging,
-latency estimation, scheduling), the local dataset-collection path, and the
-dashboard CLI argument/URL plumbing. It does **not** exercise a real policy on a
-real GPU pod — that path lives in the cloud and is validated separately.
+Everything runs with **no GPU and no robot**.
+
+- **SDK.** The DRTC client control loop against the `echo` / `tiny_torch` test backends
+  (chunk merging, latency estimation, scheduling), motion-path arbitration, the robot
+  adapters' pure logic, and the dashboard CLI argument/URL plumbing.
+- **Server.** Identity resolution, the owner-checked gRPC auth wrapper, box status
+  reporting, `interlatent-serve` registration, and an import walk of every module on a
+  bare install (no torch, no lerobot). Not the policy path: loading a real checkpoint and
+  running `forward()` needs a GPU.
+- **Protocol.** `tests/test_proto_sync.py` asserts the two packages' mirrored `.proto`
+  and generated descriptors agree — a client from PyPI has to talk to a server from PyPI.
+- **teleop-web.** `tsc --noEmit` and a production build. There are no runtime tests; WebXR
+  needs a headset.
+
+It does **not** exercise a real policy on a real GPU box end to end — that is Tier 4,
+below, and is run by hand.
+
+> **Stale below.** Tier 3 still describes the client-side collection API
+> (`watch()` / `tick()` / `collect()`, local SQLite staging) that ADR 0022 removed.
+> Collection is streaming-first and server-side now; those checks want rewriting against
+> the recorder in `packages/server`.
 
 ---
 

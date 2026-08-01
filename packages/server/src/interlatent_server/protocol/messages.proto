@@ -95,9 +95,17 @@ message RecordTickRequest {
   // Per-camera JPEG bytes. Keys are short camera names (e.g. "overhead");
   // the server prepends "observation.images." when building the dataset.
   map<string, bytes> jpegs = 6;
-  // Who drove this tick: "policy" (default) or "teleop" (DAgger
-  // intervention via the dashboard). Recorded into the LeRobot dataset
-  // as annotation.interlatent.control_source.
+  // Who drove this tick. Four values (CONTEXT.md is authoritative):
+  //   "policy"       — the policy drove it (default when unset)
+  //   "teleop"       — human demonstration, no policy running
+  //   "intervention" — human override of a *running* policy (ADR 0034);
+  //                    the DAgger correction label training upweights
+  //   "hold"         — disengaged, no-motion tick; must NOT collapse
+  //                    into "policy"
+  // Recorded into the LeRobot dataset as
+  // annotation.interlatent.control_source. Mislabeling "intervention"
+  // as "teleop" is silent training-data corruption, so senders must
+  // distinguish the two.
   string control_source = 7;
 }
 

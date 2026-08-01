@@ -32,8 +32,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
 
 from ..protocol import messages_pb2 as pb  # noqa: F401  (type-only ref in docstrings)
-from ...storage.lerobot_rebuild import LeRobotRebuilder, StepRow
-from ...storage.lerobot_live import (
+from ..storage.lerobot_rebuild import LeRobotRebuilder, StepRow
+from ..storage.lerobot_live import (
     FpsDivergenceError,
     LiveEncodeError,
     LiveEpisodeBuilder,

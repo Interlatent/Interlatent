@@ -430,3 +430,16 @@ with mock.patch(
 
 
 print(f"All {PASSED} server auth/CLI checks passed.")
+
+
+def test_all_checks_passed() -> None:
+    """Pytest handle for the module-level checks above.
+
+    Every check in this file runs at import time (the file doubles as a
+    standalone script) and ``check()`` exits non-zero on the first
+    failure, so under pytest a failure surfaces as a collection error.
+    This turns the *passing* case into a reported test rather than
+    "no tests ran" — which is indistinguishable from the file having
+    been deleted.
+    """
+    assert PASSED > 0

@@ -362,23 +362,50 @@ start a session. The node picks it up and the arm starts moving under the policy
 | [`06_connect_hosted.py`](examples/06_connect_hosted.py) - the minimal cloud connect | none |
 | [`07_named_behaviors.py`](examples/07_named_behaviors.py) - named behaviors offline | none (fake arm) or a supported arm |
 
+## What's in this repo
+
+Three deliverables, released independently. The whole path from a robot's motors to a
+policy's actions is here — the client, the server it talks to, and the VR producer that
+lets a human take over mid-rollout.
+
+| Path | Ships as | What it is |
+|---|---|---|
+| [`packages/sdk/`](packages/sdk) | `pip install interlatent` | The SDK on this page: the `Robot` contract, adapters, behaviors, the node daemon, and the DRTC client. |
+| [`packages/server/`](packages/server) | `pip install interlatent-server` | The **DRTC policy server** — the same code that runs Interlatent's hosted GPU boxes, so you can run one on your own hardware. See [self-hosting](docs/self-hosting.md). |
+| [`teleop/teleop-web/`](teleop/teleop-web) | static PWA | The **WebXR VR teleop producer**. Open it in a Quest browser to drive a robot's end effector and record corrections. |
+
+Two shared pieces sit above them: [`proto/messages.proto`](proto/README.md) is the single
+source of truth for the DRTC wire protocol (both Python packages mirror it), and
+[`docker/`](docker/README.md) builds the server image.
+
+The SDK and the server both need to be installable on their own — they run on different
+machines, on different hardware, and are versioned separately. Nothing in one imports the
+other; they meet only at the protocol.
+
 ## Open source vs. Interlatent Cloud
 
 This SDK is open source and yours to run, but it's built to plug into the
-[dashboard](https://interlatent.com), which runs inference on managed GPUs and orchestrates
-your pods, nodes, and sessions - so you never operate GPUs, warm pools, or storage.
+[dashboard](https://interlatent.com), which orchestrates your boxes, nodes, and sessions.
+The dashboard is the control plane either way — what's optional is whose GPU runs the
+policy.
 
 | Capability | Open source | [Interlatent](https://interlatent.com) |
 |---|:---:|:---:|
 | One interface + safety model across robots | ✅ | ✅ |
 | Drive robots directly (behaviors, manual moves) | ✅ | ✅ |
 | Robot node daemon + DRTC client | ✅ | ✅ |
-| Run a VLA policy on your robot | - (needs a GPU pod) | ✅ managed warm GPUs, no cold starts |
+| Policy server (DRTC) | ✅ `interlatent-server` on your GPU | ✅ managed warm GPUs, no cold starts |
+| Run a VLA policy on your robot | ✅ bring your own GPU box | ✅ provisioned for you |
+| VR teleoperation + DAgger corrections | ✅ | ✅ |
 | CLI for pods / nodes / sessions | ✅ | ✅ + full dashboard |
 | Hosted, versioned datasets | DIY | ✅ managed, shareable |
 | Auto policy analysis & reports | ❌ | ✅ |
 | GPU autoscaling & warm pools | ❌ | ✅ |
 | Support / SLA | community | ✅ |
+
+A self-hosted box still registers with the dashboard (your API key, your hardware) — see
+[ADR 0023](docs/adr/0023-self-hosted-policy-server-returns.md) for why "hosted control
+plane, BYO compute" rather than a fully standalone mode.
 
 ## Documentation
 
@@ -391,6 +418,8 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 - [Teleoperation](docs/teleop.md) - drive the robot in VR to collect demonstrations, safety, recordings
 - [Node encoding & GPU acceleration](docs/node-encoding.md) - the JPEG backend chain, Jetson GPUJPEG setup, bandwidth budgeting
 - [Going to cloud](docs/going-to-cloud.md)
+- [Self-hosting the policy server](docs/self-hosting.md) - run `interlatent-server` on your own GPU
+- [The DRTC wire protocol](proto/README.md) - the source of truth, and how to change it
 - [Architecture](ARCHITECTURE.md) - for contributors
 
 ## Contributing

@@ -37,6 +37,12 @@ dependencies = [
 [project.optional-dependencies]
 # The real policy backend. MolmoAct2 needs lerobot main (post-0.5.1) —
 # see docker/README.md for the pinned git-ref install used by the image.
+#
+# pyarrow and av are pulled in transitively by lerobot, but are declared
+# here because the recorder degrades *quietly* without them: the parquet
+# post-edits in storage/lerobot_rebuild.py (episode-uuid injection,
+# control_source int->string) log a warning and skip, producing a session
+# the merge cannot fold. Pin them where the recorder is expected to work.
 lerobot = [
   "lerobot>=0.4.0",
   "transformers",
@@ -44,6 +50,8 @@ lerobot = [
   "num2words",
   "peft",
   "scipy",
+  "pyarrow>=15",
+  "av>=12",
 ]
 dev = ["ruff", "pytest"]
 

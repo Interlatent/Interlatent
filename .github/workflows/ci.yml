@@ -34,7 +34,12 @@ jobs:
           pytest tests/test_lazy_imports.py -v --timeout=300
       - name: Test suite (unit + e2e, no GPU, no robot)
         run: |
-          pytest tests/ -v --timeout=120
+          # Both test roots. packages/sdk/tests/ is NOT a duplicate of tests/ —
+          # it holds the loop-runner, movement/arbitration, and Nori-guard suites
+          # (36 tests, including the ADR 0034 intervention coverage) and went
+          # unrun for as long as this step named only tests/. A test that never
+          # runs is worse than no test: it reads as coverage.
+          pytest tests/ packages/sdk/tests/ -v --timeout=120
       - name: Lint
         run: |
           ruff check .
@@ -79,6 +84,137 @@ jobs:
           assert "interlatent_robots/__init__.py" not in names
           print(f"all wheels complete (robot kinds: {', '.join(kinds)})")
           EOF
+
+  server:
+    # The `interlatent-server` dist (packages/server/) — the DRTC policy server
+    # that moved out of the closed engine in ADR 0035. It shipped with zero CI:
+    # the wheel built and passed `twine check` while the package could not be
+    # imported at all, because two relative imports written for the engine's
+    # package depth (`...cloud.box_status`, `...storage.lerobot_*`) resolved
+    # past the top of `interlatent_server`. Build-time checks cannot see that.
+    # Import it.
+    #
+    # x86 only, unlike the SDK matrix: this runs on a CUDA GPU box, not on the
+    # ARM robot hardware. Nothing here needs a GPU — the tests are auth, CLI,
+    # and import-surface only.
+    name: server (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (no torch, no lerobot)
+        run: |
+          # --no-deps + the light runtime deps by hand. Installing for real
+          # would pull CUDA torch (~2.5 GB) for tests that never touch it, and
+          # the point of the import-surface test is precisely that the package
+          # works on a machine where torch is not yet importable. Dependency
+          # declarations are validated by the resolve step below instead.
+          pip install --no-deps -e ./packages/server
+          pip install grpcio protobuf numpy pillow httpx huggingface_hub pytest ruff
+      - name: Import surface + auth/CLI tests
+        run: |
+          pytest packages/server/tests/ -v --timeout=120
+      - name: Lint
+        run: |
+          ruff check packages/server
+      - name: Resolve dependencies (dry run, installs nothing)
+        run: |
+          # Gating on the base dist, advisory on [lerobot]: the extra tracks
+          # lerobot's fast-moving releases and a red there is usually upstream
+          # churn, not a defect in our declaration. Same stance as the SDK's
+          # ADVISORY extras.
+          echo "::group::base"
+          pip install --dry-run --ignore-installed ./packages/server
+          echo "::endgroup::"
+          echo "::group::[lerobot] (advisory)"
+          pip install --dry-run --ignore-installed './packages/server[lerobot]' || \
+            echo "::warning title=interlatent-server[lerobot] did not resolve::advisory only"
+          echo "::endgroup::"
+      - name: Wheel builds, is complete, and is publishable
+        run: |
+          pip install build twine
+          python -m build --wheel --sdist ./packages/server -o /tmp/server-dist
+          twine check /tmp/server-dist/*
+          python - <<'EOF'
+          import glob, zipfile
+          [wheel] = glob.glob("/tmp/server-dist/interlatent_server-*.whl")
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = [
+              "interlatent_server/cli.py",              # interlatent-serve entry point
+              "interlatent_server/serve_gpu.py",
+              "interlatent_server/credentials.py",
+              "interlatent_server/box_status.py",
+              "interlatent_server/server/transport.py",
+              "interlatent_server/server/recorder.py",
+              # The recorder's dataset writers. Omitted from the original
+              # split, which is what made the dist unimportable.
+              "interlatent_server/storage/lerobot_rebuild.py",
+              "interlatent_server/storage/lerobot_live.py",
+              # docker/gen_proto.sh regenerates the stubs in-image against the
+              # image's protobuf runtime, and needs the .proto to do it.
+              "interlatent_server/protocol/messages.proto",
+              "interlatent_server/protocol/messages_pb2.py",
+              "interlatent_server/protocol/messages_pb2_grpc.py",
+          ]
+          for f in required:
+              assert f in names, f"{f} missing from {wheel}"
+          print(f"{wheel} complete ({len(names)} entries)")
+          EOF
+      - name: Installed wheel imports on a bare interpreter
+        run: |
+          # The install above is editable and shares this checkout. Prove the
+          # built artifact stands on its own in a clean venv — that is what a
+          # user gets from `pip install interlatent-server`.
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install --no-deps /tmp/server-dist/*.whl
+          /tmp/bare/bin/pip install grpcio protobuf numpy pillow httpx huggingface_hub
+          /tmp/bare/bin/python - <<'EOF'
+          import importlib, pkgutil
+          import interlatent_server
+          mods = sorted(
+              m.name for m in pkgutil.walk_packages(
+                  interlatent_server.__path__, prefix="interlatent_server.")
+          )
+          assert mods, "package walk found nothing"
+          for m in mods:
+              importlib.import_module(m)
+          print(f"imported {len(mods)} modules from the installed wheel")
+          EOF
+          /tmp/bare/bin/interlatent-serve --help > /dev/null
+          echo "interlatent-serve entry point OK"
+
+  teleop-web:
+    # The WebXR VR teleop producer (teleop/teleop-web/) — ~14k lines that
+    # landed with no build gate at all. It is a deliberate fork of the
+    # dashboard's teleop engine (see its README), so nothing upstream compiles
+    # it either; a broken headset build would only surface in a headset.
+    name: teleop-web (typecheck + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: teleop/teleop-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: teleop/teleop-web/package-lock.json
+      - name: Install (locked)
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Build
+        run: npm run build
 
   extras-resolve:
     # The optional extras have never been installed or resolved in CI - only the

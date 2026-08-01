@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 
-from ...cloud.box_status import report_status as _report_box_status
+from ..box_status import report_status as _report_box_status
 from ..protocol import messages_pb2 as pb
 from ..protocol import messages_pb2_grpc as pb_grpc
 from .chunk_buffer import ChunkBuffer, InMemoryChunkBuffer, StoredChunk
