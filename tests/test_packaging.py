@@ -73,6 +73,64 @@ def test_dimos_blueprints_actually_build_against_the_installed_dimos():
         assert blueprint is not None, f"entry point {name!r} resolved to None"
 
 
+def test_dimos_blueprint_failure_is_scoped_to_one_kind():
+    """One kind's vendor incompatibility must not take the others down.
+
+    A1Z was authored against a Galaxea-enabled dimos branch and imported
+    `a1z_hardware` at module scope. On a stock release that raised — and since
+    both kinds lived in one module, it also killed `dimos run
+    interlatent.xarm7`, which shares nothing with A1Z. Per-kind builders behind
+    ``__getattr__`` are the fix; this pins it.
+    """
+    pytest.importorskip("dimos", reason="[dimos] extra not installed")
+    from interlatent.adapters.dimos import blueprints as bp
+
+    def _boom():
+        raise ImportError("cannot import name 'a1z_hardware' [simulated]")
+
+    saved_builders, saved_cache = dict(bp._BUILDERS), dict(bp._CACHE)
+    try:
+        bp._BUILDERS["a1z"] = _boom
+        bp._CACHE.pop("a1z", None)
+
+        assert bp.xarm7 is not None, "a broken a1z must not affect xarm7"
+
+        with pytest.raises(ImportError) as excinfo:
+            bp.a1z
+        assert "'a1z'" in str(excinfo.value), "the error must name the failing kind"
+    finally:
+        bp._BUILDERS.clear()
+        bp._BUILDERS.update(saved_builders)
+        bp._CACHE.clear()
+        bp._CACHE.update(saved_cache)
+
+
+def test_dimos_mock_hardware_matches_the_installed_component_shape():
+    """``_mock_hardware`` must not pass fields this dimos does not declare.
+
+    The Galaxea branch's ``HardwareComponent`` carries gripper open/closed
+    range fields; stock 0.0.14b1 has none. Passing them unconditionally was a
+    TypeError on every hardware-free start, so the range is feature-detected.
+    """
+    pytest.importorskip("dimos", reason="[dimos] extra not installed")
+    from interlatent.adapters.dimos import blueprints as bp
+
+    hw = bp._mock_hardware(
+        "arm", 6, has_gripper=True,
+        gripper_open_position=1.0, gripper_closed_position=0.0,
+    )
+    assert hw.adapter_type == "mock"
+    assert hw.gripper_joints == ["arm/gripper"]
+    # Applied iff this dimos declares them — never blindly, never dropped when
+    # the build does support them.
+    supported = bp._component_accepts(
+        "gripper_open_position", "gripper_closed_position"
+    )
+    assert hasattr(hw, "gripper_open_position") == supported
+    if supported:
+        assert hw.gripper_open_position == 1.0
+
+
 def test_dimos_extra_covers_the_shipped_blueprint():
     """`pip install 'interlatent[dimos]'` must be able to RUN `dimos run
     interlatent.xarm7`, not just import the adapter. That takes dimos's

@@ -26,12 +26,12 @@ Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go **before** `run`:
 
 ```bash
-dimos --xarm7-ip 192.168.1.185 run interlatent.xarm7   # correct
-dimos run interlatent.xarm7 --xarm7-ip 192.168.1.185   # fails: "No such option"
+dimos --can-port can0 run interlatent.a1z     # correct
+dimos run interlatent.a1z --can-port can0     # fails: "No such option: --can-port"
 ```
 
-(`--can-port` is `piper`'s knob and does **not** reach A1Z motors — see the
-A1Z notes below.)
+(`--can-port` only reaches A1Z motors on a Galaxea-enabled dimos build; on a
+published release it is inert. See the A1Z notes below.)
 
 The reference blueprint includes DIMOS's `ManipulationModule` with **Viser as
 its default visualization backend**. Viser serves its browser UI at
@@ -100,33 +100,43 @@ Galaxea A1Z, `dimos run interlatent.a1z`:
 
 - Arm joints: **radians**, dimos names `arm/joint1..arm/joint6` mapped to
   feature keys `arm_joint1.pos..arm_joint6.pos` (`/`→`_`), gripper last.
-- Gripper: the SDK-side range in `robots/a1z.toml` is the contract. An earlier
-  version of this section described `gripper_open_position`/
-  `gripper_closed_position` fields activating a dimos normalization layer;
-  `HardwareComponent` (dimos 0.0.14b1, `dimos/control/components.py`) has no
-  such fields. Verify the open/closed direction once against a live or mocked
-  stack before trusting it in a policy.
-- **This blueprint is mock-only, and that is a dimos limitation, not a
-  choice.** dimos 0.0.14b1 — the newest release; nothing newer exists on PyPI —
-  ships A1Z as a *planning model* only: `dimos/robot/manipulators/a1z/config.py`
-  is URDF paths, joint names, and collision pairs, and its only hardware
-  helper, `make_a1z_hardware`, is a raw builder that defaults to
-  `adapter_type="mock", address=None`. There is no Galaxea driver to bind to:
-  the manipulator registry
-  (`dimos.hardware.manipulators.registry.adapter_registry.available()`) holds
-  exactly `a750, mock, openarm, piper, sim_mujoco, xarm`. Both of dimos's own
-  A1Z blueprints (`a1z/blueprints/basic.py`) call `make_a1z_hardware("arm")`
-  bare for the same reason. `--can-port` does NOT reach A1Z motors through this
-  blueprint — that flag is `piper`'s knob, and nothing in the A1Z path reads
-  it; a previous version of this blueprint gated a "real hardware" branch on it
-  and produced a mock component wearing a real-hardware label.
-  **Driving real A1Z hardware does not require this blueprint.** The adapter is
-  a bus peer: point `--robot dimos --robot-arg kind=a1z` at any running stack
-  that satisfies the ADR 0018 session contract (servo task, non-zero timeout,
-  exclusive joint claim) — a dimos-side or vendor-side blueprint is equally
-  valid. If your dimos build *does* expose a Galaxea driver, wiring it here is
-  one line: pass that registry name as `adapter_type=` plus the CAN port as
-  `address=` in `blueprints.py`'s `a1z` block.
+- **A1Z needs a Galaxea-enabled dimos for real hardware — check which build you
+  have.** dimos ships A1Z two different ways, and the blueprint adapts to
+  whichever you installed:
+
+  ```bash
+  python -c "from dimos.robot.manipulators.a1z import config; \
+    print('real-capable' if hasattr(config, 'a1z_hardware') else 'mock-only')"
+  ```
+
+  - **Galaxea-enabled branch** — exports `a1z_hardware`, a vendor *policy
+    wrapper* like xarm7's: `dimos --can-port can0 run interlatent.a1z` binds the
+    real CAN adapter, and omitting `--can-port` gives the hardware-free mock.
+    This is the build A1Z was developed and hardware-verified against.
+  - **Any published release** (0.0.14b1 and earlier) — A1Z is a *planning model*
+    only. `a1z/config.py` is URDF paths, joint names, and collision pairs; its
+    lone hardware helper `make_a1z_hardware` is a raw builder defaulting to
+    `adapter_type="mock", address=None`, and there is no Galaxea entry in
+    `dimos.hardware.manipulators.registry.adapter_registry.available()`
+    (`a750, mock, openarm, piper, sim_mujoco, xarm`). No flag reaches real
+    motors here, and `--can-port` is inert — it is `piper`'s knob. dimos's own
+    A1Z blueprints call the builder bare for the same reason.
+
+  The blueprint feature-detects `a1z_hardware` rather than pinning either
+  lineage, so one source tree serves both. **And you never need this blueprint
+  to drive real hardware**: the adapter is a bus peer, so `--robot dimos
+  --robot-arg kind=a1z` binds to any running stack satisfying the ADR 0018
+  contract (servo task, non-zero timeout, exclusive joint claim) — a dimos-side
+  or vendor-side blueprint is equally valid.
+- Gripper: **a normalized `[0, 1]` fraction, NOT meters** — the opposite
+  convention from xarm7. On a build whose `HardwareComponent` declares
+  `gripper_open_position`/`gripper_closed_position`, the blueprint sets them
+  (activating dimos's hardware-normalization layer) so the wire value is
+  already 0 (closed) .. 1 (open); on a build without those fields they are
+  omitted rather than passed blindly, which was a `TypeError` on every
+  hardware-free start. Either way the SDK-side range in `robots/a1z.toml` is
+  what the adapter clamps against. Verify the open/closed direction once
+  against a live or mocked stack before trusting it in a policy.
 - **No MuJoCo visualization path.** dimos ships no MuJoCo scene for A1Z, so
   `--simulation` here selects the generic in-memory mock adapter (not a
   physics sim). Viser (via the `ManipulationModule`) still renders the mock
