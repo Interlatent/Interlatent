@@ -20,11 +20,38 @@ this box); the any-key check probes ``/environments`` because it uses
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
-from typing import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 
 DEFAULT_API_BASE = "https://interlatent.com/api/v1"
 DEFAULT_TTL_S = 60.0
+
+_MAX_CACHE_ENTRIES = 1024
+
+_auth_executor: Optional[ThreadPoolExecutor] = None
+_auth_executor_lock = threading.Lock()
+
+
+def _auth_probe_executor() -> ThreadPoolExecutor:
+    """The pool the blocking backend probe runs on.
+
+    Deliberately *not* the loop's default executor. On a GPU box that
+    pool is the recording executor, pinned to the reserved cores (see
+    :mod:`interlatent_server.serve_gpu`), so a 5-second auth probe parked
+    there would sit on a worker the recorder needs for disk writes. Two
+    workers is enough because concurrent misses on the same token are
+    deduped — the ceiling is *distinct cold keys*, not RPC rate.
+    """
+    global _auth_executor
+    with _auth_executor_lock:
+        if _auth_executor is None:
+            _auth_executor = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="il-auth"
+            )
+        return _auth_executor
 
 
 def validate_api_key(token: str, *, api_base: str = DEFAULT_API_BASE) -> bool:
@@ -47,36 +74,93 @@ def validate_api_key(token: str, *, api_base: str = DEFAULT_API_BASE) -> bool:
         return False
 
 
-def build_api_key_validator(
-    api_base: str = DEFAULT_API_BASE,
-    ttl_s: float = DEFAULT_TTL_S,
-) -> Callable[[str], bool]:
-    """Return a stateful `check(token)` with in-process LRU+TTL cache.
+class CachedValidator:
+    """A stateful `check(token)` with an in-process LRU+TTL cache.
 
     Cache lives for the process lifetime — the DRTC server is a long-
     running asyncio process, so warm cache hits are the steady state.
     The 60-second TTL means an active client pays one backend
     roundtrip per minute regardless of inference rate.
-    """
-    cache: dict[str, tuple[float, bool]] = {}
 
-    def check(token: str) -> bool:
+    Callable, so it satisfies the historical ``Callable[[str], bool]``
+    contract for sync callers. Async callers must use
+    :meth:`check_async`: the underlying probe is a blocking
+    ``httpx.get(timeout=5.0)``, and awaiting it on the event loop would
+    stall every concurrent RPC — including 30 Hz RecordTick ingest — for
+    up to five seconds on each cold key. ``check_async`` serves warm
+    hits inline (a dict lookup, no thread hop, no yield) and offloads
+    only the miss.
+    """
+
+    def __init__(self, probe: Callable[[str], bool], ttl_s: float) -> None:
+        self._probe = probe
+        self._ttl_s = ttl_s
+        self._cache: dict[str, tuple[float, bool]] = {}
+        # token -> the single in-flight probe for it. Without this, a
+        # cold key arriving at 30 Hz would fan out one blocking request
+        # per tick against a 2-worker pool.
+        self._inflight: dict[str, asyncio.Future] = {}
+
+    def _peek(self, token: str, now: float) -> Optional[bool]:
+        hit = self._cache.get(token)
+        if hit is not None and (now - hit[0]) < self._ttl_s:
+            return hit[1]
+        return None
+
+    def _store(self, token: str, now: float, ok: bool) -> None:
+        self._cache[token] = (now, ok)
+        if len(self._cache) > _MAX_CACHE_ENTRIES:
+            cutoff = now - self._ttl_s
+            for k, (t, _) in list(self._cache.items()):
+                if t < cutoff:
+                    self._cache.pop(k, None)
+
+    def __call__(self, token: str) -> bool:
+        """Blocking check. For sync callers only — see :meth:`check_async`."""
         if not token:
             return False
         now = time.time()
-        hit = cache.get(token)
-        if hit and (now - hit[0]) < ttl_s:
-            return hit[1]
-        ok = validate_api_key(token, api_base=api_base)
-        cache[token] = (now, ok)
-        if len(cache) > 1024:
-            cutoff = now - ttl_s
-            for k, (t, _) in list(cache.items()):
-                if t < cutoff:
-                    cache.pop(k, None)
+        cached = self._peek(token, now)
+        if cached is not None:
+            return cached
+        ok = self._probe(token)
+        self._store(token, time.time(), ok)
         return ok
 
-    return check
+    async def check_async(self, token: str) -> bool:
+        """Non-blocking check for the asyncio server."""
+        if not token:
+            return False
+        now = time.time()
+        cached = self._peek(token, now)
+        if cached is not None:
+            return cached
+
+        pending = self._inflight.get(token)
+        if pending is not None:
+            # Someone else is already probing this key. Shield: our
+            # cancellation must not cancel the probe they're awaiting.
+            return await asyncio.shield(pending)
+
+        loop = asyncio.get_running_loop()
+        pending = loop.run_in_executor(_auth_probe_executor(), self._probe, token)
+        self._inflight[token] = pending
+        try:
+            ok = await pending
+        finally:
+            self._inflight.pop(token, None)
+        self._store(token, time.time(), ok)
+        return ok
+
+
+def build_api_key_validator(
+    api_base: str = DEFAULT_API_BASE,
+    ttl_s: float = DEFAULT_TTL_S,
+) -> CachedValidator:
+    """Cached "is this a valid Interlatent key?" check."""
+    return CachedValidator(
+        lambda token: validate_api_key(token, api_base=api_base), ttl_s
+    )
 
 
 def validate_key_for_box(
@@ -108,29 +192,14 @@ def build_box_key_validator(
     box_id: str,
     api_base: str = DEFAULT_API_BASE,
     ttl_s: float = DEFAULT_TTL_S,
-) -> Callable[[str], bool]:
-    """Owner-scoped `check(token)` with the same in-process LRU+TTL cache
-    as :func:`build_api_key_validator`. The steady state is one backend
+) -> CachedValidator:
+    """Owner-scoped `check(token)`, same cache as
+    :func:`build_api_key_validator`. The steady state is one backend
     roundtrip per presented key per minute."""
-    cache: dict[str, tuple[float, bool]] = {}
-
-    def check(token: str) -> bool:
-        if not token:
-            return False
-        now = time.time()
-        hit = cache.get(token)
-        if hit and (now - hit[0]) < ttl_s:
-            return hit[1]
-        ok = validate_key_for_box(token, box_id=box_id, api_base=api_base)
-        cache[token] = (now, ok)
-        if len(cache) > 1024:
-            cutoff = now - ttl_s
-            for k, (t, _) in list(cache.items()):
-                if t < cutoff:
-                    cache.pop(k, None)
-        return ok
-
-    return check
+    return CachedValidator(
+        lambda token: validate_key_for_box(token, box_id=box_id, api_base=api_base),
+        ttl_s,
+    )
 
 
 def wrap_servicer_with_auth(servicer, *, check_token: Callable[[str], bool]):
@@ -155,28 +224,47 @@ def wrap_servicer_with_auth(servicer, *, check_token: Callable[[str], bool]):
         md = dict(context.invocation_metadata() or [])
         return md.get("x-api-key", "").strip()
 
+    # A CachedValidator knows how to keep its blocking probe off the
+    # loop. Anything else is assumed to block too — a plain callable
+    # here is almost always a backend roundtrip — so it gets the same
+    # treatment rather than being trusted to be cheap.
+    _check_async = getattr(check_token, "check_async", None)
+    if _check_async is None:
+
+        async def _check_async(token: str, _fn=check_token) -> bool:
+            if not token:
+                return False
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(_auth_probe_executor(), _fn, token)
+
     for name in rpc_names:
         original = getattr(servicer, name, None)
         if original is None:
             continue
 
+        # grpc.aio's context.abort() raises, so the returns below are
+        # unreachable in production. They are here so the contract does
+        # not rest on that: a non-raising context (a test double, a
+        # future grpc change) must still not reach the real handler.
         if name == "Stream":
             async def _guarded_stream(request_iterator, context, _orig=original):
-                if not check_token(_token_from(context)):
+                if not await _check_async(_token_from(context)):
                     await context.abort(
                         grpc.StatusCode.UNAUTHENTICATED,
                         "missing or invalid Interlatent API key",
                     )
+                    return
                 async for resp in _orig(request_iterator, context):
                     yield resp
             setattr(servicer, name, _guarded_stream)
         else:
             async def _guarded_unary(request, context, _orig=original):
-                if not check_token(_token_from(context)):
+                if not await _check_async(_token_from(context)):
                     await context.abort(
                         grpc.StatusCode.UNAUTHENTICATED,
                         "missing or invalid Interlatent API key",
                     )
+                    return None
                 return await _orig(request, context)
             setattr(servicer, name, _guarded_unary)
 

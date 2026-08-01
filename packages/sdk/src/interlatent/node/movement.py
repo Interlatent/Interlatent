@@ -391,10 +391,10 @@ class CommandBus:
         ``perf_counter()`` at the top of the tick, so gate timing and the
         profiler agree on one clock.
         """
-        if self._helpers is None or self._robot is None:
+        if self._helpers is None or self._robot is None or self._client is None:
             raise RuntimeError(
-                "CommandBus.drive() needs robot + helpers; this bus was built "
-                "for arbitration only"
+                "CommandBus.drive() needs robot + client + helpers; this bus "
+                "was built for arbitration only"
             )
 
         frame = self.sample_teleop()

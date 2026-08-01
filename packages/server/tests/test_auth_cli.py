@@ -291,8 +291,105 @@ async def _run_wrap_tests():
             e.code is grpc.StatusCode.UNAUTHENTICATED,
         )
 
+    # grpc.aio's abort() raises, but the guard must not *depend* on that:
+    # against a context that merely records the abort, the real handler
+    # still has to be unreachable.
+    sv3 = FakeServicer()
+    auth.wrap_servicer_with_auth(sv3, check_token=lambda t: t == "good")
+    out = await sv3.OpenSession("req", NonRaisingContext("wrong"))
+    check(
+        "non-raising abort: unary returns None, handler never ran",
+        out is None and sv3.calls == [],
+    )
+    streamed = [x async for x in sv3.Stream(iter(()), NonRaisingContext("wrong"))]
+    check(
+        "non-raising abort: stream yields nothing, handler never ran",
+        streamed == [] and sv3.calls == [],
+    )
+
+
+class NonRaisingContext(FakeContext):
+    def __init__(self, key):
+        super().__init__(key)
+        self.aborted = None
+
+    async def abort(self, code, detail):
+        self.aborted = (code, detail)
+
 
 asyncio.run(_run_wrap_tests())
+
+
+# ------------------------------------------------------ auth check_async
+# The probe is a blocking httpx.get(timeout=5.0). Awaiting it on the event
+# loop would stall every concurrent RPC — including 30 Hz RecordTick ingest
+# — for up to five seconds per cold key.
+print("auth.CachedValidator.check_async()")
+
+import time as _time  # noqa: E402
+
+
+def _slow_get(delay: float, status: int = 200):
+    def _get(*a, **k):
+        _time.sleep(delay)
+        return mock.Mock(status_code=status)
+
+    return mock.Mock(side_effect=_get)
+
+
+async def _run_async_check_tests():
+    # 1. A cold probe must not block the loop: a 10 ms ticker running
+    #    alongside a 300 ms probe should get most of its ~30 ticks. If the
+    #    probe ran inline it would get 0 or 1.
+    ticks = 0
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    slow = _slow_get(0.3)
+    with mock.patch("httpx.get", slow):
+        checkfn = auth.build_box_key_validator(box_id="b", api_base="https://x.com")
+        t = asyncio.create_task(_ticker())
+        ok = await checkfn.check_async("k")
+        t.cancel()
+    check("cold probe resolves", ok is True)
+    check(f"loop kept running during probe ({ticks} ticks)", ticks >= 10, str(ticks))
+
+    # 2. A warm hit is served inline — no probe, and no thread hop.
+    with mock.patch("httpx.get", _fake_get(200)) as g:
+        again = await checkfn.check_async("k")
+        check("warm hit served from cache (0 probes)", again is True and g.call_count == 0)
+
+    # 3. Concurrent misses on the same token collapse to one probe.
+    #    Without dedup a cold key arriving at 30 Hz fans out one blocking
+    #    request per tick against a 2-worker pool.
+    slow2 = _slow_get(0.2)
+    with mock.patch("httpx.get", slow2):
+        fresh = auth.build_box_key_validator(box_id="b", api_base="https://x.com")
+        results = await asyncio.gather(*(fresh.check_async("burst") for _ in range(8)))
+    check("concurrent misses all resolve", all(r is True for r in results))
+    check(
+        f"concurrent misses deduped to 1 probe ({slow2.call_count})",
+        slow2.call_count == 1,
+        str(slow2.call_count),
+    )
+
+    # 4. A cancelled waiter must not take down the probe its peers await.
+    slow3 = _slow_get(0.2)
+    with mock.patch("httpx.get", slow3):
+        fresh2 = auth.build_box_key_validator(box_id="b", api_base="https://x.com")
+        leader = asyncio.create_task(fresh2.check_async("shared"))
+        await asyncio.sleep(0.01)  # let the leader register as in-flight
+        follower = asyncio.create_task(fresh2.check_async("shared"))
+        await asyncio.sleep(0.01)
+        follower.cancel()
+        check("survivor unaffected by peer cancellation", await leader is True)
+
+
+asyncio.run(_run_async_check_tests())
 
 
 # ------------------------------------------------------ box_status.report_status

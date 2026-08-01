@@ -536,6 +536,30 @@ def test_drive_requires_motion_collaborators():
         raise AssertionError("drive() must raise without robot + helpers")
 
 
+def test_drive_requires_client():
+    """A half-built bus (robot + helpers, no client) must fail the same
+    explicit way. The POLICY path calls client.step(), so without this the
+    first policy tick dies on an uninformative AttributeError instead."""
+    trace = []
+    bus = CommandBus(
+        teleop_channel=_FakeChannel(None),
+        teleop_gate=_TraceGate(latched=False, trace=trace),
+        teleop_profile=_FakeProfile(joint_names=tuple(_KEYS)),
+        policy_enabled=True,
+        robot=_TraceRobot(trace),
+        client=None,
+        action_keys=list(_KEYS),
+        helpers=_helpers(trace),
+        max_step=5.0,
+    )
+    try:
+        bus.drive(_OBS, step=0, now=1.0)
+    except RuntimeError as exc:
+        assert "arbitration only" in str(exc) and "client" in str(exc)
+    else:
+        raise AssertionError("drive() must raise without a client")
+
+
 def test_drive_latches_before_arbitrating():
     """An e-stop arriving on this tick suppresses this tick, not the next one."""
     trace = []
