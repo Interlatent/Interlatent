@@ -181,7 +181,7 @@ def _source_kinds() -> list[Path]:
 def test_source_tree_has_kinds():
     """Guard the guard: if the layout moves, the checks below must not silently
     pass by iterating an empty dir."""
-    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "yam", "so101"]
+    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "so101", "yam"]
 
 
 @pytest.mark.parametrize("kind_dir", _source_kinds(), ids=lambda p: p.name)
