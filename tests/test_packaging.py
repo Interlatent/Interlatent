@@ -7,12 +7,72 @@ real wheel for lack of an ``__init__.py``. That bug shipped once — the
 wheel. This test runs the same package discovery setuptools uses at
 build time.
 """
+import ast
 from pathlib import Path
 
 import pytest
 from setuptools import find_packages
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def _parent_map(tree: ast.AST) -> dict:
+    return {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+
+
+def _enclosing_function(parents: dict, node: ast.AST) -> ast.FunctionDef | None:
+    """Innermost ``def`` containing ``node`` (ast nodes carry no parent link)."""
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.FunctionDef):
+            return node
+    return None
+
+
+def _function_named(tree: ast.AST, name: str) -> ast.FunctionDef:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"no def {name}() in blueprints.py")
+
+
+def _param_names(fn: ast.FunctionDef) -> set:
+    args = fn.args
+    return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+
+
+def _nulls_coordinator_task(fn: ast.FunctionDef) -> bool:
+    """True if ``fn`` returns ``<its own param>.model_copy(update={...: None})``.
+
+    Structural, not textual: the copy must be taken off the parameter the
+    function was handed and handed straight back as a return value, so a
+    version that nulls a *different* model — or computes the copy and drops it
+    on the floor — does not count.
+    """
+    if not fn.args.args:
+        return False
+    param = fn.args.args[0].arg
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "model_copy"):
+            continue
+        if not (isinstance(func.value, ast.Name) and func.value.id == param):
+            continue
+        for keyword in call.keywords:
+            if keyword.arg != "update":
+                continue
+            try:
+                update = ast.literal_eval(keyword.value)
+            except ValueError:
+                continue
+            if update == {"coordinator_task_name": None}:
+                return True
+    return False
 
 
 def test_sdk_wheel_contains_all_entry_point_packages():
@@ -156,9 +216,16 @@ def test_dimos_extra_covers_the_shipped_blueprint():
 def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
     """The reference stack must retain the hardware-free visual test path:
     DIMOS's planner/manipulation module renders mock coordinator state in
-    Viser, while the exclusive servo task remains the only execution task."""
-    import ast
+    Viser, while the exclusive servo task remains the only execution task.
 
+    The exclusivity half is checked structurally, by walking the model
+    expression from ``planner(robots=[...])`` back to where it is bound. String
+    assertions ("does ``coordinator_task_name`` appear anywhere in the file")
+    cannot tell a nulled model that reaches the planner from a nulled model
+    assigned to some unrelated variable while the planner gets a fresh one —
+    and that refactor is exactly how a second trajectory task would come back
+    to fight the policy invisibly, corrupting the recorded control_source.
+    """
     blueprint = (
         REPO
         / "packages"
@@ -170,6 +237,7 @@ def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
         / "blueprints.py"
     )
     tree = ast.parse(blueprint.read_text(encoding="utf-8"))
+    parents = _parent_map(tree)
     planner_calls = [
         node
         for node in ast.walk(tree)
@@ -183,9 +251,71 @@ def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
     visualization = ast.literal_eval(keywords["visualization"])
     assert visualization == {"backend": "viser"}
 
-    source = blueprint.read_text(encoding="utf-8")
-    assert "make_xarm7_model_config" in source
-    assert 'update={"coordinator_task_name": None}' in source
+    # 1. The planner plans for exactly one robot, and that robot expression is
+    #    a call — the sanitizer — not a bare model handed straight through.
+    robots = keywords["robots"]
+    assert isinstance(robots, ast.List) and len(robots.elts) == 1, ast.dump(robots)
+    sanitizer_call = robots.elts[0]
+    assert isinstance(sanitizer_call, ast.Call) and isinstance(
+        sanitizer_call.func, ast.Name
+    ), f"planner robots[0] must be a sanitizing call: {ast.dump(sanitizer_call)}"
+
+    # 2. That sanitizer genuinely nulls coordinator_task_name on the model it
+    #    was handed, and returns it.
+    sanitizer = _function_named(tree, sanitizer_call.func.id)
+    assert _nulls_coordinator_task(sanitizer), (
+        f"{sanitizer.name}() must return "
+        'model.model_copy(update={"coordinator_task_name": None}) — otherwise the '
+        "planner attaches a trajectory task claiming the servo task's joints"
+    )
+
+    # 3. The model it sanitizes is the one the blueprint was given, not a fresh
+    #    factory call: it must be a plain parameter of the enclosing builder,
+    #    never rebound between the signature and the planner call.
+    assert len(sanitizer_call.args) == 1 and not sanitizer_call.keywords
+    sanitized = sanitizer_call.args[0]
+    assert isinstance(sanitized, ast.Name), (
+        "the sanitized model must be the builder's own model parameter, not an "
+        f"inline expression: {ast.dump(sanitized)}"
+    )
+    builder = _enclosing_function(parents, planner_calls[0])
+    assert builder is not None
+    assert sanitized.id in _param_names(builder), (
+        f"{sanitized.id} is not a parameter of {builder.name}() — the planner is "
+        "being handed a model built somewhere the sanitizer never saw"
+    )
+    rebinds = [
+        node
+        for node in ast.walk(builder)
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.NamedExpr))
+        for target in (
+            node.targets if isinstance(node, ast.Assign) else [node.target]
+        )
+        if isinstance(target, ast.Name) and target.id == sanitized.id
+    ]
+    assert not rebinds, (
+        f"{builder.name}() rebinds {sanitized.id} before the planner sees it "
+        f"(line {rebinds[0].lineno}) — the sanitized model may not be the one that "
+        "reaches the planner"
+    )
+
+    # 4. And the xarm7 kind reaches that builder with the real model config.
+    xarm7_builder = _function_named(tree, "_build_xarm7")
+    models = [
+        keyword.value
+        for node in ast.walk(xarm7_builder)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == builder.name
+        for keyword in node.keywords
+        if keyword.arg == sanitized.id
+    ]
+    assert len(models) == 1, f"_build_xarm7 must pass one {sanitized.id}= : {models}"
+    assert (
+        isinstance(models[0], ast.Call)
+        and isinstance(models[0].func, ast.Name)
+        and models[0].func.id == "make_xarm7_model_config"
+    ), f"expected make_xarm7_model_config(...), got {ast.dump(models[0])}"
 
 
 def test_dimos_native_loop_registered():
