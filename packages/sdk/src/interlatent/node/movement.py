@@ -64,6 +64,15 @@ from .teleop.safety import TargetSample
 _LOG = logging.getLogger(__name__)
 
 
+def _should_log(n: int) -> bool:
+    """Loud for the first few, then every hundredth.
+
+    A rejection at 30 Hz would otherwise emit 1800 lines a minute; silencing
+    it after the first would hide a policy that recovers and re-breaks.
+    """
+    return n <= 3 or n % 100 == 0
+
+
 class MovementSource(str, Enum):
     """Who is commanding the robot on a given control tick.
 
@@ -256,6 +265,11 @@ class CommandBus:
         # One-shot warnings / latches, mirroring the loops they replace.
         self._teleop_warned = False
         self._estop_forwarded = False
+        # Malformed-chunk rejection counters (see _drive_policy). Logged on the
+        # first occurrence and then geometrically, so a persistently broken
+        # policy neither hides nor floods the journal.
+        self._rejected_nonfinite = 0
+        self._rejected_arity = 0
 
     # ------------------------------------------------------------------
     # Decision surface (Phase 1; still used directly by tests)
@@ -503,6 +517,20 @@ class CommandBus:
             return TickOutcome(source=MovementSource.POLICY, **base)
 
         arr = np.asarray(action, dtype=np.float32).reshape(-1)
+
+        # Reject a malformed chunk before it touches the robot. Nothing else on
+        # this path catches either case: the policy stream never passes through
+        # the SafetyGate (that is the teleop path), and the delta clamp is
+        # disabled unless --robot.max_step is set — and even when it *is* set it
+        # cannot stop a NaN, because ``abs(delta) > max_step`` is False for NaN,
+        # so the clamp passes it straight through to send_action.
+        #
+        # A rejected action is reported as a no-action tick, which is already a
+        # safe, exercised state: nothing is sent and the servos hold the last
+        # commanded pose, exactly as when a chunk fails to arrive.
+        if not self._policy_action_ok(arr, step):
+            return TickOutcome(source=MovementSource.POLICY, **base)
+
         # Low-pass the policy stream to damp per-tick volatility (chunk-boundary
         # / model jitter) before any safety guard. Warm-started, so it does not
         # ramp from zero.
@@ -521,6 +549,50 @@ class CommandBus:
         )
 
     # --- collaborators ------------------------------------------------
+
+    def _policy_action_ok(self, arr: "np.ndarray", step: int) -> bool:
+        """Validate a policy action vector; False means "treat as no-action".
+
+        Two checks, neither of which existed anywhere on the policy path:
+
+        * **Arity.** ``_clamp_action_delta`` operates on the shortest common
+          prefix of (action_keys, action, measured) and returns the array
+          untouched when that prefix is empty; ``_coerce_action_for_robot``
+          falls back to passing the bare array to ``send_action`` when the
+          widths disagree. So a wrong-width vector is silently *truncated* —
+          it commands a different set of joints than intended, with no error.
+        * **Finiteness.** There was no NaN/Inf check between the gRPC receiver
+          and ``send_action``, and the delta clamp cannot serve as one:
+          ``abs(delta) > max_step`` evaluates False for NaN, so a non-finite
+          action passes the clamp even when the clamp is enabled.
+
+        Rejections are counted and logged on the first few occurrences and
+        then every hundredth, so a policy that has gone bad is loud once and
+        does not drown the journal at 30 Hz.
+        """
+        n = len(self._action_keys)
+        if n and arr.size != n:
+            self._rejected_arity += 1
+            if _should_log(self._rejected_arity):
+                _LOG.error(
+                    "policy action REJECTED at step %d: width %d != %d action "
+                    "keys %s (holding pose; %d rejected so far). The server and "
+                    "the robot disagree on the action space — check the "
+                    "policy's action_dim against this robot.",
+                    step, arr.size, n, self._action_keys, self._rejected_arity,
+                )
+            return False
+        if not np.isfinite(arr).all():
+            self._rejected_nonfinite += 1
+            if _should_log(self._rejected_nonfinite):
+                _LOG.error(
+                    "policy action REJECTED at step %d: non-finite values "
+                    "(holding pose; %d rejected so far). The delta clamp cannot "
+                    "catch this — NaN compares False against any limit.",
+                    step, self._rejected_nonfinite,
+                )
+            return False
+        return True
 
     def _send(self, action: np.ndarray) -> float:
         """The single ``send_action`` sink. Every source funnels through here."""
