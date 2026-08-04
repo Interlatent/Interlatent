@@ -49,6 +49,20 @@ class PolicyBackend(Protocol):
         them and use `prior_actions` instead."""
         ...
 
+    def reset_session_state(self) -> None:
+        """Drop everything carried over from the previous session.
+
+        Optional — ``PolicyRuntime.load`` falls back to the legacy
+        attribute-poke for backends that predate this method. Implement it
+        whenever a backend holds state that must not survive into the next
+        episode. For a stateless policy the carry-over is a small RTC trail;
+        for a world-action model it is a rolling KV cache of the previous
+        episode's video, and reusing it makes the next session's first chunk a
+        continuation of a scene no longer in front of the robot — wrong,
+        plausible-looking, and silent.
+        """
+        ...
+
 
 _BACKENDS: dict[str, Callable[..., PolicyBackend]] = {}
 
@@ -263,10 +277,14 @@ class PolicyRuntime:
                 # ``reset_session_state()`` method instead of relying
                 # on this attribute-poke pattern.
                 impl = cached.backend
-                if hasattr(impl, "_last_raw"):
-                    impl._last_raw = None
-                if hasattr(impl, "_last_start"):
-                    impl._last_start = 0
+                reset = getattr(impl, "reset_session_state", None)
+                if callable(reset):
+                    reset()
+                else:
+                    if hasattr(impl, "_last_raw"):
+                        impl._last_raw = None
+                    if hasattr(impl, "_last_start"):
+                        impl._last_start = 0
                 # Override the per-session default_task if the caller
                 # supplied a new one. Per-tick observations usually
                 # carry their own ``task`` field, so this only matters

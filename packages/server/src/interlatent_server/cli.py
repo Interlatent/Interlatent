@@ -85,6 +85,41 @@ def _detect_gpu_model() -> str:
     return "unknown"
 
 
+def _detect_gpu_capacity() -> tuple[int, int | None]:
+    """``(gpu_count, vram_gb)`` for this box. Best-effort, never raises.
+
+    ``gpu_model`` cannot carry this: it is ``nvidia-smi``'s first line only, so
+    a 2xH100 box and a 1xH100 box have always looked identical to the backend.
+    World-action models need at least 2 GPUs (ADR 0037), and without a real
+    count the launch gate can only fail late — the session opens, the sidecar
+    dies at ``torchrun`` spawn, and the operator sees a dead process instead of
+    a reason. Reporting it turns that into a 409 they can act on.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10.0,
+        )
+        rows = [r.strip() for r in (out.stdout or "").splitlines() if r.strip()]
+        if out.returncode == 0 and rows:
+            return len(rows), max(1, int(round(int(rows[0]) / 1024)))
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            n = torch.cuda.device_count()
+            vram = int(round(
+                torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            ))
+            return max(1, n), vram
+    except Exception:
+        pass
+    # 1 is the safe default and true of every box that predates this field.
+    return 1, None
+
+
 def _register(
     *,
     api_base: str,
@@ -93,6 +128,8 @@ def _register(
     name: str,
     endpoint: str,
     gpu_model: str,
+    gpu_count: int = 1,
+    vram_gb: int | None = None,
     warmup_policy: str | None,
 ) -> None:
     """One dashboard-registration handshake. Raises SystemExit with an
@@ -104,6 +141,8 @@ def _register(
         "name": name,
         "endpoint": endpoint,
         "gpu_model": gpu_model,
+        "gpu_count": gpu_count,
+        "vram_gb": vram_gb,
         "gpu_id": "custom",
         "provider": "byo",
         "warmup_policy": warmup_policy or None,
@@ -220,7 +259,8 @@ def main() -> None:
 
     box_id = _resolve_box_id(args.box_id)
     gpu_model = _detect_gpu_model()
-    log.info("GPU: %s", gpu_model)
+    gpu_count, vram_gb = _detect_gpu_capacity()
+    log.info("GPU: %s x%d (%s GB each)", gpu_model, gpu_count, vram_gb or "?")
 
     _register(
         api_base=args.api_base,
@@ -229,6 +269,8 @@ def main() -> None:
         name=args.name,
         endpoint=endpoint,
         gpu_model=gpu_model,
+        gpu_count=gpu_count,
+        vram_gb=vram_gb,
         warmup_policy=args.warmup_policy or None,
     )
 

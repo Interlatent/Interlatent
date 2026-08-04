@@ -69,6 +69,25 @@ DEFAULT_IDLE_TIMEOUT_S = float(os.environ.get("DRTC_IDLE_TIMEOUT_S", "60"))
 _IDLE_GC_PERIOD_S = 15.0
 
 
+def _peek_policy_config(request) -> dict:
+    """Best-effort ``config.json`` for a checkpoint, for backend dispatch.
+
+    Pulls the single config file, never the weights. Returns ``{}`` on any
+    failure, leaving the decision to the URI hint — a config we could not read
+    must not silently route a session to the wrong backend.
+    """
+    uri = getattr(request, "policy_uri", "") or ""
+    if not uri:
+        return {}
+    try:
+        from .lerobot_backend import _read_config_json
+
+        return _read_config_json(uri)
+    except Exception:
+        log.debug("policy config peek failed for %s", uri, exc_info=True)
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Recorder metadata defaults — match the backend's auto-Model layer.
 # ---------------------------------------------------------------------------
@@ -236,6 +255,13 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         # contract (policy_backend="lerobot") stays unchanged.
         from .molmoact2_backend import resolve_backend
         backend = resolve_backend(backend, request.policy_uri)
+        # World-action models (DreamZero) are neither lerobot- nor
+        # transformers-native. Unlike the arm above this keys on the checkpoint
+        # config, not the URI: user fine-tunes are the point here, and a
+        # substring test would miss "myorg/my-dreamzero-ft" and fire on
+        # anything with "dream" in the name. See ADR 0037.
+        from .dreamzero_backend import resolve_backend as _resolve_wm
+        backend = _resolve_wm(backend, request.policy_uri, _peek_policy_config(request))
         requested_action_dim = request.action_dim or 0
         # Natural-language task instruction (e.g. SmolVLA "pick up the
         # red cube"). Set once at session-open via OpenSession.metadata;
