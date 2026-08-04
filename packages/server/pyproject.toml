@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interlatent-server"
+version = "0.1.0"
+description = "Self-hosted Interlatent DRTC policy server — run hosted-grade GPU inference on your own hardware, registered with the Interlatent dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Interlatent Contributors" }]
+keywords = ["robotics", "inference", "lerobot", "grpc", "policy-server"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# NOTE: unlike the `interlatent` SDK dist (which pins torch to CPU wheels —
+# nodes never run inference), this package wants CUDA torch. Install on the
+# GPU machine with the default PyPI index so the cu* wheels resolve.
+dependencies = [
+  "grpcio>=1.60",
+  "protobuf>=4.25",
+  "numpy>=1.24",
+  "torch>=2.4",
+  "pillow>=10",
+  "httpx>=0.27",
+  "huggingface_hub>=0.20",
+]
+
+[project.optional-dependencies]
+# The real policy backend. MolmoAct2 needs lerobot main (post-0.5.1) —
+# see docker/README.md for the pinned git-ref install used by the image.
+#
+# pyarrow and av are pulled in transitively by lerobot, but are declared
+# here because the recorder degrades *quietly* without them: the parquet
+# post-edits in storage/lerobot_rebuild.py (episode-uuid injection,
+# control_source int->string) log a warning and skip, producing a session
+# the merge cannot fold. Pin them where the recorder is expected to work.
+lerobot = [
+  "lerobot>=0.4.0",
+  "transformers",
+  "accelerate",
+  "num2words",
+  "peft",
+  "scipy",
+  "pyarrow>=15",
+  "av>=12",
+]
+dev = ["ruff", "pytest"]
+
+[project.scripts]
+interlatent-serve = "interlatent_server.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Interlatent/Interlatent"
+Documentation = "https://github.com/Interlatent/Interlatent/blob/main/docs/self-hosting.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["interlatent_server*"]
+
+[tool.setuptools.package-data]
+"interlatent_server.protocol" = ["*.proto"]

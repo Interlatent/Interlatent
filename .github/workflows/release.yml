@@ -1,0 +1,133 @@
+name: Release
+
+# Publish either dist in this repo to PyPI.
+#
+#   interlatent-v2.0.1        -> packages/sdk     (interlatent)
+#   interlatent-server-v0.1.0 -> packages/server  (interlatent-server)
+#
+# Two dists in one repo, so the tag names the package. A bare `v*` tag is
+# deliberately NOT a trigger — it would be ambiguous.
+#
+# Auth is PyPI Trusted Publishing (OIDC): no API token lives in this repo.
+# One-time setup per project on PyPI → Publishing → Add a pending publisher:
+#   owner  Interlatent      repo  Interlatent
+#   workflow  release.yml   environment  pypi
+# Until that exists for `interlatent-server`, the publish step fails with an
+# OIDC error and nothing is uploaded — the build and checks still run, so a
+# tag is never silently half-published.
+
+on:
+  push:
+    tags:
+      - "interlatent-v*"
+      - "interlatent-server-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Which dist to build
+        required: true
+        type: choice
+        options: [interlatent, interlatent-server]
+      repository:
+        description: Upload target
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  build:
+    name: Build + verify
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.resolve.outputs.package }}
+      version: ${{ steps.resolve.outputs.version }}
+      path: ${{ steps.resolve.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve package + version from the tag
+        id: resolve
+        run: |
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import os, re, sys, tomllib
+          from pathlib import Path
+
+          DISTS = {
+              "interlatent": "packages/sdk",
+              "interlatent-server": "packages/server",
+          }
+
+          ref = os.environ.get("GITHUB_REF_NAME", "")
+          dispatch = os.environ.get("INPUT_PACKAGE", "")
+          tag_version = None
+
+          if dispatch:
+              package = dispatch
+          else:
+              # Longest prefix wins: "interlatent-server-v..." must not match
+              # the "interlatent-v..." rule by accident.
+              for name in sorted(DISTS, key=len, reverse=True):
+                  m = re.fullmatch(rf"{re.escape(name)}-v(.+)", ref)
+                  if m:
+                      package, tag_version = name, m.group(1)
+                      break
+              else:
+                  sys.exit(f"tag {ref!r} names no known dist (expected one of "
+                           f"{', '.join(n + '-v<version>' for n in DISTS)})")
+
+          path = Path(DISTS[package])
+          declared = tomllib.loads((path / "pyproject.toml").read_text())["project"]
+
+          if declared["name"] != package:
+              sys.exit(f"{path}/pyproject.toml declares {declared['name']!r}, "
+                       f"expected {package!r}")
+
+          version = declared["version"]
+          if tag_version is not None and tag_version != version:
+              # The failure this prevents: tagging a release without bumping
+              # pyproject, which uploads the *previous* version's number and
+              # burns it — PyPI filenames are immutable.
+              sys.exit(f"tag says v{tag_version} but {path}/pyproject.toml "
+                       f"says {version} — bump the version and re-tag")
+
+          print(f"package={package}")
+          print(f"version={version}")
+          print(f"path={path}")
+          EOF
+        env:
+          INPUT_PACKAGE: ${{ inputs.package }}
+
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build --wheel --sdist "${{ steps.resolve.outputs.path }}" -o dist
+
+      - name: Verify the artifacts
+        run: |
+          twine check dist/*
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish ${{ needs.build.outputs.package }} ${{ needs.build.outputs.version }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.repository == 'testpypi' && 'testpypi' || 'pypi' }}
+    permissions:
+      id-token: write # Trusted Publishing — the only credential used.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.repository == 'testpypi' && 'https://test.pypi.org/legacy/' || '' }}

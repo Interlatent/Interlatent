@@ -8,9 +8,12 @@ training data. This is typically how you get from a pretrained base policy to
 full automation: collect demonstrations in your environment, then train on
 them.
 
-> **Coming in a future release:** live *intervention* — taking over mid-rollout
-> during a hosted inference session to correct the policy. It is not yet fully
-> implemented and tested, and is not covered further here.
+> **Live intervention:** engaging teleop *during* a hosted inference session
+> takes over from the running policy mid-rollout — the human-driven steps
+> record as `control_source="intervention"` (the DAgger correction label),
+> and releasing the deadman hands control back to the policy within about one
+> control tick. Everything below (producer, safety, deadman) applies the same
+> way; the only difference is that a policy is running underneath.
 
 The split is **engine on the platform, thin receiver on the robot** (see
 [ADR 0012](adr/0012-teleop-receiver-stub-open-core-boundary.md)): everything
@@ -331,8 +334,10 @@ the preview.
 ## What lands in the dataset
 
 Every recorded step carries its provenance in
-`annotation.interlatent.control_source` — `"teleop"` for human-driven ticks,
-`"hold"` for disengaged ticks, `"policy"` for policy-driven steps in inference
-sessions. Downstream training uses this to distinguish human demonstration
-from policy behavior. Episodes with any teleop steps are flagged in the
-dashboard.
+`annotation.interlatent.control_source` — `"teleop"` for human-driven ticks in
+a policy-less recording, `"intervention"` for human-driven ticks that overrode
+a running policy mid-rollout, `"hold"` for disengaged/no-motion ticks,
+`"policy"` for policy-driven steps in inference sessions. Downstream training
+uses this to distinguish human demonstration and correction from policy
+behavior — intervention frames are the DAgger corrections and are upweighted.
+Episodes with any human-driven steps are flagged in the dashboard.

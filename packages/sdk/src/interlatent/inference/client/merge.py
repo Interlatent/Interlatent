@@ -32,18 +32,27 @@ class ActionSchedule:
     def __init__(self) -> None:
         self._data: dict[int, ScheduledAction] = {}
         self._cursor: int = 0  # next step to execute
+        self._merge_floor_ts: int = 0  # actions stamped at/below this never install
         self._lock = threading.Lock()
 
     # --- merge ---------------------------------------------------------
 
     def merge(self, actions: Iterable[ScheduledAction]) -> int:
         """Apply LWW for each incoming action. Returns count actually
-        installed (i.e. with a strictly newer control_timestamp)."""
+        installed (i.e. with a strictly newer control_timestamp).
+
+        Actions whose ``control_timestamp`` is at or below the barrier set
+        by ``flush(barrier_ts=...)`` are rejected outright — they were
+        computed from an observation taken before the barrier event (a
+        teleop takeover, an e-stop) and must not execute after it.
+        """
         installed = 0
         with self._lock:
             for a in actions:
                 if a.action_step < self._cursor:
                     continue  # already executed; ignore
+                if a.control_timestamp <= self._merge_floor_ts:
+                    continue  # in-flight from before the last barrier flush
                 cur = self._data.get(a.action_step)
                 if cur is None or a.control_timestamp > cur.control_timestamp:
                     self._data[a.action_step] = a
@@ -139,16 +148,25 @@ class ActionSchedule:
         with self._lock:
             return self._cursor
 
-    def flush(self) -> int:
+    def flush(self, barrier_ts: Optional[int] = None) -> int:
         """Drop every queued action without advancing the cursor.
 
         The cursor stays where it is so the next Infer chunk anchors at
         the same step the policy was about to execute. Returns the
         number of dropped entries (for telemetry).
+
+        ``barrier_ts`` additionally raises the merge floor: any chunk
+        whose actions carry a ``control_timestamp <= barrier_ts`` is
+        rejected by ``merge`` even if it lands *after* this flush. That
+        closes the race where an Infer dispatched just before a teleop
+        takeover delivers pre-takeover actions as the first post-handback
+        motion. Pass the client clock's current tick as the barrier.
         """
         with self._lock:
             n = len(self._data)
             self._data.clear()
+            if barrier_ts is not None:
+                self._merge_floor_ts = max(self._merge_floor_ts, barrier_ts)
             return n
 
     def __iter__(self) -> Iterator[ScheduledAction]:

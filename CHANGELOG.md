@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### `interlatent-server` 0.1.0 — the policy server is open source (ADR 0023)
+
+The DRTC serving stack moved out of the closed engine into `packages/server/`,
+published as a second dist. `pip install 'interlatent-server[lerobot]'` on a CUDA
+machine, run `interlatent-serve --advertise-address <ip>`, and the box registers with
+the dashboard as a self-hosted compute box. Same server code, same wire protocol, same
+episode recording as Interlatent's managed boxes. See [docs/self-hosting.md](docs/self-hosting.md).
+
+- Fixed: the dist could not be imported at all. Two relative imports carried over from
+  the engine's package layout (`...cloud.box_status`, `...storage.lerobot_*`) resolved
+  past the top of `interlatent_server`, and the recorder's dataset writers
+  (`storage/lerobot_rebuild.py`, `storage/lerobot_live.py`) were never moved with it.
+  The wheel built and passed `twine check` regardless — `packages/server/tests/test_import_surface.py`
+  now walks and imports every module, on a bare install with no torch and no lerobot.
+- `[lerobot]` now declares `pyarrow` and `av` explicitly. They arrive transitively, but
+  without them the recorder's parquet post-edits (episode-uuid injection, `control_source`
+  int→string) warn and skip, producing a session the merge cannot fold.
+- Added a release workflow: tag `interlatent-server-v<version>` or `interlatent-v<version>`
+  to publish via PyPI Trusted Publishing. The tag version must match `pyproject.toml`.
+
+### `proto/messages.proto` is the single source of truth
+
+Both packages carry mirrored copies plus generated stubs; `./proto/gen_proto.sh` writes
+all of them in one pass, and `tests/test_proto_sync.py` fails the build if a mirror
+drifts or the two packages' descriptors disagree. Pin `grpcio-tools==1.74.0` to
+regenerate — a different version rewrites the stubs' version stamps and the diff reads
+as a protocol change.
+
+- `RecordTickRequest.control_source` now documents all four values
+  (`policy` / `teleop` / `intervention` / `hold`). Both copies described two, and the
+  server's called an intervention a teleop — the distinction ADR 0034 introduced, and
+  the one training upweights. Comment-only; the wire is unchanged.
+
+### CI
+
+- `packages/sdk/tests/` now runs. 36 tests — loop runner, movement arbitration, Nori
+  guard, and the ADR 0034 intervention coverage — were never executed, because the test
+  step named only `tests/`.
+- New `server` job: import surface, auth/CLI tests, lint, dependency resolution, wheel
+  completeness, `twine check`, and a clean-venv install of the built wheel.
+- New `teleop-web` job: `npm ci`, `tsc --noEmit`, and a production build for the WebXR
+  producer, which landed with no build gate.
+
 ## 2.0.0 — 2026-07-18
 
 ### BREAKING: client-side collection removed (ADR 0022)

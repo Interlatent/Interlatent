@@ -1,0 +1,17 @@
+{
+  "name": "Interlatent Teleop",
+  "short_name": "Teleop",
+  "description": "Standalone WebXR VR teleop producer for Interlatent robot sessions.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
