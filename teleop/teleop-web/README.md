@@ -28,6 +28,20 @@ npm run build
 Because it registers a manifest + service worker, Quest Browser will offer
 to install it as an app (PWA).
 
+### CORS
+
+The backend only answers browser calls from origins on its CORS allowlist,
+and dev origins are not on it — a direct call from `http://localhost:3100`
+fails the preflight with `400 Disallowed CORS origin`. `npm run dev`
+therefore proxies `/api` to the backend server-side (`vite.config.ts`), and
+the client routes the default API base through that proxy automatically, so
+local dev needs no backend change. Override the proxy target with
+`TELEOP_API_TARGET=http://localhost:8000 npm run dev`.
+
+The built app has no proxy: whatever origin you serve `dist/` from (the
+HTTPS host the headset loads) must be added to the backend's CORS allowlist
+— `INTERLATENT_CORS_ORIGINS` on the hosted deployment.
+
 ## Configuration
 
 Everything is in the in-app Settings panel (gear icon), persisted to

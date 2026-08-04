@@ -27,7 +27,20 @@ export const DEFAULT_API_BASE = 'https://interlatent.com';
 export function getApiBase(): string {
   const stored = localStorage.getItem(API_BASE_STORAGE_KEY);
   const base = (stored ?? DEFAULT_API_BASE).trim() || DEFAULT_API_BASE;
-  return base.replace(/\/+$/, '');
+  return resolveApiBase(base.replace(/\/+$/, ''));
+}
+
+/**
+ * The hosted backend's CORS allowlist has no dev origins on it, so calling
+ * https://interlatent.com straight from http://localhost:3100 fails the
+ * preflight (`400 Disallowed CORS origin`). Under `vite dev` we return the
+ * empty string instead — a same-origin URL that the dev server's /api proxy
+ * (vite.config.ts) forwards to the same backend, server-side, where CORS
+ * does not apply. A base pointing anywhere else (self-hosted backend) is
+ * left alone: that deployment controls its own allowlist.
+ */
+function resolveApiBase(base: string): string {
+  return import.meta.env.DEV && base === DEFAULT_API_BASE ? '' : base;
 }
 
 export function getApiKey(): string {
