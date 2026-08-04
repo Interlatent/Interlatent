@@ -113,6 +113,18 @@ yam = [
   "numpy",
 ]
 
+# pip install 'interlatent[so101]'
+# Drives a single SO-101 follower arm via lerobot's SO101Follower (robot kind
+# "so101"; resolved in node/control.py::_make_lerobot_robot). The driver stack
+# is exactly the [lerobot] extra — keep the two lists in sync; this alias
+# exists so `interlatent[<kind>]` works for every kind that ships robot data.
+so101 = [
+  "huggingface_hub>=0.20",
+  "lerobot>=0.4.0",
+  "pyarrow>=14",
+  "Pillow>=9",
+]
+
 # pip install 'interlatent[nori]'
 # Drives the Nori robot through its on-Pi daemon (NoriCoreAgent) over the
 # Nori-Protocol v1 NDJSON contract on TCP localhost:7777 (robot kind "nori";
@@ -130,6 +142,31 @@ nori = [
   "numpy",
 ]
 
+# pip install 'interlatent[dimos]'
+# Binds to a RUNNING dimos stack as an external LCM/Zenoh bus peer (robot kind
+# "dimos", --robot-arg kind=<embodiment>; see interlatent.adapters.dimos and
+# ADR 0018). No motor driver here — the dimos process is the "vendor SDK": the
+# adapter streams joint_command to a dimos servo task and reads
+# coordinator_joint_state + camera Image topics. Same host (or same bus) as the
+# dimos stack; both processes must agree on DIMOS_TRANSPORT (lcm|zenoh).
+# PYTHON VERSION: dimos pins <3.13 while the SDK allows >=3.11 — this extra
+# resolves only on 3.11/3.12 (axol-precedent: the sharper floor/ceiling is
+# documented on the extra, not imposed on the base package).
+# HEAVY: dimos unconditionally pulls open3d, rerun-sdk, opencv-contrib,
+# numba, and pinocchio. Expect a multi-GB environment.
+dimos = [
+  # [manipulation] is required by the shipped session blueprint (ManipulationModule
+  # + Viser preview — ROBOT.md "Special case: the dimos adapter"), not by the
+  # adapter itself: without it `dimos run interlatent.xarm7` fails at import.
+  "dimos[manipulation]>=0.0.14b1; python_version < '3.13'",
+  # Undeclared imports of dimos 0.0.14b1's camera module (pulled in by the
+  # blueprint off-sim): dimos/web/websocket_vis imports all three at module
+  # scope but its pyproject declares none of them. Drop when dimos fixes it.
+  "python-socketio; python_version < '3.13'",
+  "starlette; python_version < '3.13'",
+  "uvicorn; python_version < '3.13'",
+]
+
 [project.scripts]
 # Connectivity check: opens a real DRTC session against a managed GPU pod
 # with synthetic observations and reports a latency verdict — no robot needed.
@@ -145,6 +182,14 @@ interlatent-act = "interlatent.node.act_cli:main"
 interlatent = "interlatent.cli.main:main"
 # (interlatent-sync-rollout was removed with client-side collection —
 # ADR 0022: recording is streaming-first through a hosted session.)
+
+# Reference dimos session blueprints, discovered by dimos's external-blueprint
+# registry (namespace = this distribution's name): `dimos run interlatent.xarm7`.
+# Metadata-only for base installs — dimos imports the target lazily, and the
+# module's import guard turns a missing [dimos] extra into one actionable error.
+[project.entry-points."dimos.blueprints"]
+xarm7 = "interlatent.adapters.dimos.blueprints:xarm7"
+a1z = "interlatent.adapters.dimos.blueprints:a1z"
 
 [project.urls]
 Homepage = "https://github.com/interlatent/interlatent"
@@ -167,12 +212,17 @@ namespaces = true
 [tool.setuptools.package-data]
 # Built-in behavior definitions shipped per robot (interlatent.behaviors.data).
 "interlatent.behaviors" = ["data/*.toml"]
+# dimos-mediated kind declarations + teleop profiles, one TOML per kind
+# (kinds.py / robot_profile.py load these at runtime; see adapters/dimos/robots/).
+"interlatent.adapters.dimos" = ["robots/*.toml"]
 # Robot embodiment data, one subpackage per kind (interlatent_robots.<kind>).
 # ~18 KB of JSON/XML per robot — small enough to ship for every kind rather than
 # gate behind the per-kind extras, which carry the *driver* deps, not the data.
 # Note ik_config.json is carved back out below — see exclude-package-data.
 "interlatent_robots.yam" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.nori" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.a1z" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.so101" = ["*.urdf", "*.json", "*.lock"]
 
 [tool.setuptools.exclude-package-data]
 # ik_config.json is the hand-authored curation source for the MuJoCo

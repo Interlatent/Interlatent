@@ -181,7 +181,7 @@ def _source_kinds() -> list[Path]:
 def test_source_tree_has_kinds():
     """Guard the guard: if the layout moves, the checks below must not silently
     pass by iterating an empty dir."""
-    assert [p.name for p in _source_kinds()] == ["nori", "yam"]
+    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "so101", "yam"]
 
 
 @pytest.mark.parametrize("kind_dir", _source_kinds(), ids=lambda p: p.name)
@@ -235,3 +235,19 @@ def test_real_nori_data_resolves():
     assert not robots.has_meshes("nori")
     src_ik = json.loads((_SRC_KINDS_DIR / "nori" / "ik_config.json").read_text(encoding="utf-8"))
     assert list(src_ik["chains"]) == ["left", "right"]
+
+
+def test_real_so101_data_resolves():
+    """so101 is the single-arm kind: one 'right' chain (the VR producer prefers
+    the right controller) mapped onto the 6-dim action vector (joints 0-4,
+    gripper 5). The URDF is the same single-arm so101_new_calib.urdf the nori
+    (dual-SO101) kind solves both of its chains from."""
+    assert robots.is_installed("so101")
+    data = robots.load("so101")
+    assert not robots.has_meshes("so101")
+    chains = data.kinematic_spec["chains"]
+    assert list(chains) == ["right"]
+    assert [j["action_index"] for j in chains["right"]["joints"]] == [0, 1, 2, 3, 4]
+    assert chains["right"]["gripper"]["action_index"] == 5
+    src_ik = json.loads((_SRC_KINDS_DIR / "so101" / "ik_config.json").read_text(encoding="utf-8"))
+    assert list(src_ik["chains"]) == ["right"]

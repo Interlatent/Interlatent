@@ -113,3 +113,23 @@ genuinely robot-specific.**
   same table. `teleop/robot_profile._PROFILES` stays separate — it is the
   teleop-embodiment map and also covers LeRobot kinds.
 - `--loop module:function` remains the public escape hatch, unchanged.
+- **The dimos adapter (2026-08-01) is the case that proved the thesis.** It
+  landed after this ADR as a fork of the *pre*-migration YAM loop and drifted
+  the same way within weeks: no e-stop handling at all (the gate was never
+  latched and `DimosNativeRobot.estop()` — which exists — was never forwarded),
+  no delta clamp on the policy path, no teleop seq echo, no latency window.
+  Nothing caught it, because `dimos` was never added to `_NATIVE_KINDS`: the
+  test matrix here covered four kinds and the daemon silently dispatched
+  `--robot dimos` to the LeRobot wrapper, so the forked loop was unreachable
+  except via `--loop`. It is now a shim like the rest, with staleness as a
+  `pre_tick` verdict and a fifth row in `tests/test_loop_contract.py`. Two
+  registry lessons: a new adapter must be added to `_NATIVE_KINDS` *and* the
+  contract matrix in the same change, and a stale test that breaks on an
+  `AttributeError` (`test_packaging` still asserted the deleted
+  `daemon._NATIVE_LOOPS`) hides the registration it was written to protect.
+- Episode markers (ADR 0018) moved onto `DimosNativeRobot.connect/disconnect`,
+  keyed off an `episode_id` the shim sets. The runner disconnects the robot in
+  its own `finally` and dimos's `disconnect()` closes the bus, so a "stop"
+  published from a loop `finally` — as the forked loop did — would land on a
+  closed transport. Adapters whose teardown owns a transport must bracket
+  inside their own lifecycle, not around the runner's.

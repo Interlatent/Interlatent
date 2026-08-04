@@ -232,9 +232,134 @@ api_base = "https://interlatent.com"
 name     = "my-arm"
 ```
 
+## Special case: the dimos adapter (the robot is a running stack)
+
+`--robot dimos` ([`adapters/dimos/`](packages/sdk/src/interlatent/adapters/dimos/),
+`interlatent[dimos]`, python 3.11–3.12) inverts the usual shape: there is no motor
+driver, because the "vendor SDK" is a **running dimos process**. The adapter joins
+dimos's LCM/Zenoh bus as a peer — `coordinator_joint_state` + camera `Image`
+topics in, `joint_command` out (consumed by a dimos **servo task** that claims
+every joint *including the gripper* — dimos stomps unclaimed grippers back to
+their startup value while streaming).
+
+Two embodiments ship today: `xarm7` (UFACTORY xArm7) and `a1z` (Galaxea A1Z).
+Unlike every other adapter, a dimos kind's declaration and profile are **not**
+Python literals in `kinds.py`/`robot_profile.py` — they load at import time
+from [`adapters/dimos/robots/<kind>.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/),
+one file per kind, holding both the `DimosKind` (dimos wire joint names,
+gripper joint/hardware id) and the teleop `RobotProfile` (limits, velocity
+caps, rest pose) side by side. `kinds.py` scans that directory at import —
+adding a kind's declaration is "add a TOML file," not "edit three Python
+modules and their registries." If a kind's TOML has no `[profile]` section,
+`robot_profile.py` synthesizes a conservative, loudly-logged fallback
+(`±2π` position bound, a small fixed velocity fraction, zero rest pose)
+instead of blocking — a hand-tuned profile stays optional to get *something*
+moving; tuning it is how you get it moving *well*.
+
+The four files still exist, but two get reinterpreted:
+
+- **The profile** is the ONLY safety envelope in the entire path: dimos applies
+  **no limits** to streamed joint commands, so the profile + the adapter's
+  `max_step_rad` clamp are it.
+- **The adapter** declares an embodiment per *kind* (`--robot-arg kind=xarm7`),
+  and `connect()` **verifies the declaration against the live stack** —
+  coordinator present, joints, a servo task claiming exactly the kind's joints
+  with a non-zero timeout and no competing claimant, joint-state order — failing
+  closed with every mismatch listed. The trap this exists for: a stock dimos
+  coordinator blueprint has no servo task and *silently ignores* streamed
+  commands. **Every dimos-shipped, per-vendor blueprint has this trap** — they
+  configure a `trajectory` task, never dimos's own `servo` task — so this SDK
+  has always had to author its own session blueprint per kind, and expects to
+  keep doing so for any future one.
+- `--camera <name>=<topic>` maps observation keys to bus topics instead of
+  devices.
+- The dimos side needs a **session blueprint** satisfying that contract; this
+  SDK ships one per kind via dimos's entry-point registry, built from one
+  shared, generic composition helper (`_streaming_blueprint` /
+  `_mock_hardware` / `_resolve_hardware` in `adapters/dimos/blueprints.py`)
+  plus a few kind-specific lines binding that vendor's own hardware/model
+  factory via `functools.partial`. Every kind gets the same hardware-free dev
+  path for free this way — no vendor address configured (and `--simulation`
+  not passed) resolves to a generic in-memory mock, regardless of whether the
+  vendor's own factory happens to support that (xarm7's does out of the box;
+  A1Z's originally didn't — this is a real behavior improvement over calling
+  the vendor's factory directly, not just a refactor). The reference
+  blueprints also include DIMOS's manipulation module with Viser as the
+  default viewer, so commands can be inspected in a browser without physical
+  hardware or MuJoCo:
+
+```bash
+dimos run interlatent.xarm7          # terminal 1: the dimos session stack
+interlatent-node run --robot dimos \
+  --robot-arg kind=xarm7 \
+  --camera wrist=/color_image        # terminal 2: the node
+```
+
+Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
+are options on `dimos` itself, not on `dimos run` — they go *before* `run`
+(`dimos --can-port can0 run interlatent.a1z`), not after; `dimos run ...
+--can-port can0` fails with "No such option." Note that `--can-port` only
+reaches real A1Z motors on a **Galaxea-enabled dimos build**; published
+releases ship A1Z as a planning model with no Galaxea driver in their hardware
+registry, and the blueprint feature-detects which you have. Real hardware never
+*requires* our blueprint anyway — the adapter is a bus peer, so `--robot dimos
+--robot-arg kind=a1z` binds to a stack started any other way. See
+`adapters/dimos/CONFIG.md`.
+
+**VR/QUIC teleoperation** needs a separate data bundle per kind
+(`interlatent_robots/<kind>/`, see
+[`interlatent_robots/README.md`](packages/sdk/src/interlatent_robots/README.md))
+that a dimos kind's own TOML data does not supply — a browser-side IK
+descriptor (`kinematic_spec.json`) and its tuning surface (`ik_config.json`).
+`a1z` ships one; `xarm7` does not yet. For `--robot dimos`, the lookup
+resolves `--robot-arg kind=` (not the literal string `"dimos"`, which the SDK
+never ships data for, by design — it isn't one robot) — see the
+`teleop_robot_kind` resolution in `node/daemon.py`.
+
+See [`adapters/dimos/CONFIG.md`](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md)
+for the full knob table and blueprint contract, and
+[docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md) for the design.
+
+### Grabbing kinematic data from dimos instead of hand-transcribing it
+
+Interlatent already depends on `dimos[manipulation]` for the `[dimos]` extra,
+which bundles each vendor's own URDF as local package data — there is no live
+RPC to fetch it from a *running* stack (checked: `ControlCoordinator` exposes
+no limits/URDF over its RPC surface), but the file is on disk once dimos is
+installed. Two dev-time scripts read it directly instead of a human opening
+the URDF and copying numbers by hand:
+
+- [`packages/sdk/scripts/dimos_profile_gen.py`](packages/sdk/scripts/dimos_profile_gen.py)
+  prints a kind's joint position limits (for a `robots/<kind>.toml`
+  `[profile]` section) via dimos's own `dimos.robot.model_parser.parse_model()`.
+- [`packages/sdk/scripts/dimos_kinematic_spec_gen.py`](packages/sdk/scripts/dimos_kinematic_spec_gen.py)
+  prints a kind's full joint *chain* (origin/axis/limits, not just limits) by
+  parsing the URDF's `<origin>`/`<axis>` tags directly — dimos's own parser
+  drops that geometric data — for `interlatent_robots/<kind>/kinematic_spec.json`.
+
+Neither script is imported by any runtime path — `robot_profile.py`/`kinds.py`
+stay importable without dimos installed either way (enforced by
+`tests/test_dimos_config.py`); these are one-shot generators whose output you
+review and commit, same as any other robot's transcribed literals. Neither
+invents the parts that still need real judgment: `dimos_profile_gen.py`
+prints a joint's raw `velocity_limit` only as a comment (a URDF's velocity tag
+is typically a motor max, not a safe streaming cap — the margin is still your
+call), and `dimos_kinematic_spec_gen.py` does not touch IK-solver tuning
+(damping, reach limits, VR-frame alignment) — those aren't URDF properties at
+all, and (per `interlatent_robots/README.md`) `kinematic_spec.json` is
+normally machine-generated pod-side from `ik_config.json` by a tool this SDK
+does not carry; treat anything built by this script as an unofficial,
+`packaging/verify_urdf.py`-checked substitute, not the canonical pipeline.
+
 ## Adding a new robot
 
-Putting the four files together, the whole job for a new arm is:
+**Adding a dimos-mediated kind (xarm7/a1z-style) does not follow the five
+steps below** — see "Special case: the dimos adapter" above. In short: add an
+`adapters/dimos/robots/<kind>.toml`, a few `functools.partial`-bound lines in
+`blueprints.py` binding that vendor's hardware/model factory, and a
+`pyproject.toml` entry point.
+
+Putting the four files together, the whole job for a new *non-dimos* arm is:
 
 1. **Write the profile.** A `RobotProfile` in
    [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py): joint

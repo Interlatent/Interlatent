@@ -43,6 +43,21 @@ incomplete, mis-named, or missing from the tree.
 Regenerate the spec after any `ik_config.json` or URDF change, or the browser solver
 and the pod solver silently disagree.
 
+**Exception: `a1z`'s `kinematic_spec.json` was NOT produced by the official
+generator** — this environment has no access to
+`interlatent.inference.server.retarget.kinematic_spec` (the platform repo).
+It was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
+URDF's `<origin>`/`<axis>`/`<limit>` tags directly) plus per-joint `tool0`
+computed from the URDF's own `gripper_eef_joint` fixed-joint offset — both are
+genuine URDF properties, and `packaging/verify_urdf.py`'s FK-parity check
+confirms this geometry against a MuJoCo-compiled model to ~1e-16 m. The
+solver-tuning fields that aren't URDF properties at all — `damping`,
+`webxr_to_base_R`, `pos_reach_limit`/`rot_reach_limit`, `w_rot` — are copied
+verbatim from `yam`'s `right` chain as a starting template (A1Z judged "near
+identical" in scale/DOF), genuinely unverified against real A1Z hardware.
+Regenerate this kind's spec with the official tool the next time it's
+available rather than treating this file as authoritative long-term.
+
 ## Meshes are not used (IK needs no geometry)
 
 Inverse kinematics is a function of the joint tree alone — origins, axes, limits,
@@ -82,3 +97,7 @@ loudly. Exit status is nonzero on any failure.
 The directory name **is** the `robot_kind` and **is** the kind's subpackage name — it must equal
 the string the live node reports. `nori` is the dual-SO-101 rig (historically also
 mis-labelled `so101_bimanual` in an early S3 upload; that name is retired).
+`so101` is the standalone single arm: same URDF as nori's chains, one `right`
+chain (the VR producer drives it with the right controller) over the 6-dim
+action vector. It is the only spelling — the old `so101_follower` alias is
+retired (`--robot so101_follower` now errors and points here).

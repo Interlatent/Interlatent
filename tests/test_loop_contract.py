@@ -144,9 +144,13 @@ class FakeClient:
 class FakeRobot:
     """Minimal RobotAdapter (adapters/base.py:77) that records its sends."""
 
-    def __init__(self, trace: Trace, action_keys: list[str]):
+    def __init__(self, trace: Trace, action_keys: list[str], robot_kind: str = ""):
         self._trace = trace
         self._action_keys = list(action_keys)
+        # Per-instance embodiment. The dimos shim selects its RobotProfile from
+        # this rather than from the --robot value, because one dimos adapter
+        # family covers several kinematically distinct arms.
+        self.robot_kind = robot_kind
 
     @property
     def action_features(self) -> list[str]:
@@ -220,6 +224,11 @@ LOOPS = [
                   "interlatent.adapters.nori.robot"),
     LoopUnderTest("axol", "axol", "interlatent.adapters.axol.loop:control_loop",
                   "interlatent.adapters.axol.robot"),
+    # The daemon dispatches this one as --robot dimos; the kind here is the
+    # PER-INSTANCE embodiment the adapter declares (robot.robot_kind), which is
+    # what selects the profile and therefore what the teleop contract binds to.
+    LoopUnderTest("dimos", "dimos_xarm7", "interlatent.adapters.dimos.loop:control_loop",
+                  "interlatent.adapters.dimos.robot"),
 ]
 
 
@@ -247,7 +256,7 @@ def _drive(
 
     trace = Trace()
     action_keys = _action_keys_for(spec)
-    robot = FakeRobot(trace, action_keys)
+    robot = FakeRobot(trace, action_keys, robot_kind=spec.robot_kind)
     client = FakeClient(trace, len(action_keys))
 
     # --- Robot construction ------------------------------------------------

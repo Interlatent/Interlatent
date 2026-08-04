@@ -263,13 +263,43 @@ class NodeDaemon:
         state["drain_done"] = state["spool_pending"] == 0
         return state
 
+    def _safety_state(self) -> dict:
+        """Node-side motion-guard posture for the heartbeat (ADR 0037).
+
+        The backend gates world-model launches on this. A world-action model
+        commits ~1.6 s of motion per chunk into a path that has no SafetyGate
+        — the gate clamps teleop targets only — so the per-tick delta clamp is
+        the sole magnitude guard, and it is **disabled unless
+        ``--robot.max_step`` is set**. Reporting it lets the launch fail with
+        a 409 the operator can act on, rather than a robot that slams.
+
+        ``context_ring`` advertises that this node can build a world-model
+        context window at all: an older SDK omits the key entirely, which is
+        how the backend tells "not configured" apart from "cannot".
+        """
+        state: dict = {"max_step": None, "max_step_set": False, "context_ring": True}
+        try:
+            # Reuse the loop's own parser so the reported value can never
+            # disagree with the one the clamp actually enforces.
+            from .control import _parse_max_step
+
+            value = _parse_max_step(self.cfg.robot_extra or {})
+            state["max_step"] = value
+            state["max_step_set"] = value is not None
+        except Exception:
+            _LOG.debug("max_step introspection failed", exc_info=True)
+        return state
+
     async def _heartbeat_loop(self) -> None:
         backoff = self.cfg.reconnect_backoff_s
         while True:
             try:
                 r = await self._http.post(
                     f"/api/v1/nodes/{self.cfg.node_id}/heartbeat",
-                    json={"recording": self._recording_state()},
+                    json={
+                        "recording": self._recording_state(),
+                        "safety": self._safety_state(),
+                    },
                 )
                 if r.status_code >= 400:
                     _LOG.warning("Heartbeat %s: %s", r.status_code, r.text)
@@ -602,7 +632,14 @@ class NodeDaemon:
             record=True,
             episode_id=session.get("id"),
             env_id=session.get("environment_id"),
-            synchronous=self.cfg.synchronous,
+            # Sync mode is an operator preference (--synchronous / env) OR a
+            # server-side requirement. World-action models require it: their
+            # inference exceeds a chunk's own duration, and DRTC's schedule is
+            # replace-mode, so in async mode every late chunk falls below the
+            # cursor and is discarded — the arm would never move at all. The
+            # backend sets it on the session so the node cannot be launched
+            # into a configuration that silently does nothing. See ADR 0037.
+            synchronous=self.cfg.synchronous or bool(session.get("synchronous")),
         )
 
         # Hosted teleop receiver. The QUIC channel owns a background
@@ -620,6 +657,16 @@ class NodeDaemon:
         teleop_channel = None
         teleop_api_key = self.cfg.drtc_api_key or ""
         if teleop_api_key and session.get("id"):
+            # The interlatent_robots data lookup (QUIC's kinematic_spec) is
+            # keyed by the specific embodiment, not the adapter family. Every
+            # other --robot value maps 1:1 to its interlatent_robots.<kind>
+            # data, but --robot dimos covers multiple, kinematically distinct
+            # arms selected via --robot-arg kind=<embodiment> -- resolve that
+            # here rather than looking up data for the literal string "dimos"
+            # (which the SDK never ships, by design: it's not one robot).
+            teleop_robot_kind = self.cfg.robot_kind
+            if teleop_robot_kind == "dimos":
+                teleop_robot_kind = self.cfg.robot_extra.get("kind") or teleop_robot_kind
             teleop_channel = make_teleop_channel(
                 session_id=session["id"],
                 api_base=self.cfg.api_base,
@@ -636,7 +683,7 @@ class NodeDaemon:
                 bypass_key=self.cfg.bypass_key,
                 # Lets the quic channel serve this robot's kinematic_spec to the
                 # browser from the installed interlatent[<kind>] data.
-                robot_kind=self.cfg.robot_kind,
+                robot_kind=teleop_robot_kind,
             )
             if teleop_channel is not None:
                 teleop_channel.start()

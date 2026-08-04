@@ -38,13 +38,24 @@ _NATIVE_KINDS: dict[str, str] = {
     "yam_left": "yam",
     "yam_right": "yam",
     "nori": "nori",
+    "dimos": "dimos",
 }
 
 
 def native_kind(kind: Optional[str]) -> Optional[str]:
     """The native subpackage for a ``--robot`` kind, or ``None`` for LeRobot
-    serial arms (which construct through :class:`LeRobotAdapter`)."""
-    return _NATIVE_KINDS.get((kind or "").lower().strip())
+    serial arms (which construct through :class:`LeRobotAdapter`).
+
+    ``dimos_<embodiment>`` is matched by prefix rather than enumerated: the set
+    of dimos-mediated kinds is open (adding one is "add a
+    ``adapters/dimos/robots/<kind>.toml``"), and :func:`resolve_adapter` already
+    accepts the same sugar. Enumerating them here would put a second, staler
+    copy of that registry in this file — the exact failure ADR 0022 collapsed.
+    """
+    k = (kind or "").lower().strip()
+    if k.startswith("dimos_"):
+        return "dimos"
+    return _NATIVE_KINDS.get(k)
 
 
 def native_loop_path(kind: Optional[str]) -> Optional[str]:
@@ -53,7 +64,10 @@ def native_loop_path(kind: Optional[str]) -> Optional[str]:
 
     Deliberately ``None`` for the YAM variants (``yam_left`` …): their arm
     defaults are applied by :func:`resolve_adapter`, not by the session shim,
-    so dispatching them to the native loop would drive the wrong arms.
+    so dispatching them to the native loop would drive the wrong arms. Same
+    reasoning excludes the ``dimos_<embodiment>`` sugar — the shim builds its
+    config straight from ``--robot-arg``, so a driving session names the
+    canonical ``dimos`` kind and passes ``--robot-arg kind=<embodiment>``.
     """
     k = (kind or "").lower().strip()
     pkg = _NATIVE_KINDS.get(k)
@@ -104,6 +118,17 @@ def resolve_adapter(
         from .axol.robot import AxolNativeRobot
 
         return AxolNativeRobot(build_adapter_config(extra, cameras))
+
+    if k == "dimos" or k.startswith("dimos_"):
+        # `--robot dimos --robot-arg kind=xarm7`, or the `dimos_<kind>` sugar
+        # (`--robot dimos_xarm7`). Binds to a RUNNING dimos stack as a bus
+        # peer; connect() runs the fail-closed declare-then-verify check.
+        if k.startswith("dimos_"):
+            extra.setdefault("kind", k[len("dimos_"):])
+        from .dimos.config import build_adapter_config as build_dimos_config
+        from .dimos.robot import DimosNativeRobot
+
+        return DimosNativeRobot(build_dimos_config(extra, cameras))
 
     from .lerobot.robot import LeRobotAdapter
 

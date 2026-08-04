@@ -311,18 +311,21 @@ host requirements, `--robot-arg` knobs, camera declarations, and worked examples
 
 | Robot | `--robot` | Joints and units | Extra | Config doc |
 |---|---|---|---|---|
-| **SO-101** (reference) | `so101`, `so101_follower` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **SO-101** (reference) | `so101` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
 | **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
 | **Almond Axol** (dual arm, **unstable beta**) | `axol` | 16 (7 + gripper per side); radians, gripper 0-1 | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
+| **UFACTORY xArm7 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
 | Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
 | Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
 
-The SO-101, YAM, and Nori rows are the kinds that ship a **`RobotProfile`** (the full
-list lives in
-`_PROFILES` in [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py));
-Axol does not yet, so it is policy-only.
+The SO-101, YAM, Nori, and dimos (`xarm7`/`a1z`) rows are the kinds that ship a
+**`RobotProfile`** (the full list lives in `_PROFILES` in
+[`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py) —
+dimos kinds resolve there too, just loaded from
+[`adapters/dimos/robots/*.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/)
+rather than being literals in that file); Axol does not yet, so it is policy-only.
 That distinction is the one rule worth internalizing:
 
 > **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
@@ -516,11 +519,26 @@ from the robot's URDF, so limits/order/rest-pose come from one authoritative fil
   The arm `joint_limits` in our profile are now transcribed from it; `max_velocity`
   and the gripper range are still hand-chosen (the gripper is combined in separately
   from the `LINEAR_4310` model, so it is not in `yam.urdf`).
+- The dimos adapter has since built the **build-time** half of this for its own
+  kinds: `packages/sdk/scripts/dimos_profile_gen.py` (position limits) and
+  `dimos_kinematic_spec_gen.py` (the fuller joint chain, for VR teleop) both
+  parse a vendor's URDF directly — reachable because `[dimos]` already
+  installs the vendor's package data locally, no separate fetch needed — and
+  print output reviewed and committed as a literal, same as YAM's. This
+  answers the first open question below (build-time, not connect-time) for
+  the one adapter family where it's been tried, and confirms the second
+  bullet's caveat in practice: `dimos_profile_gen.py` deliberately does NOT
+  emit `max_velocity`, because the URDF's velocity tag disagreed with the
+  vendor's own SDK-level cap by ~2x for A1Z — a URDF alone wasn't enough to
+  pick a number, exactly the concern this section already anticipated.
 
 **Open design questions (resolve before building):**
 - Parse the URDF at build time into a static profile (keeps the current convention,
   no runtime parse-dep) vs. at `connect()` (always matches the installed driver, adds
-  a `yourdfpy`-style dependency on the import path)?
+  a `yourdfpy`-style dependency on the import path)? — **resolved this way for dimos
+  kinds** (build-time), for a concrete reason beyond convention: `robot_profile.py`
+  must stay importable without dimos installed (tested), which a connect-time parse
+  would break.
 - Vendor the URDF + meshes into the robot package, or read it from the installed vendor
   package (e.g. i2rt's `ARM_YAM_XML_PATH`)? Meshes/asset paths complicate vendoring.
 - How does URDF joint order reconcile with `action_features` ordering (the policy
