@@ -278,3 +278,49 @@ def test_rejection_logging_is_rate_limited():
     assert [n for n in range(1, 8) if _should_log(n)] == [1, 2, 3]
     assert _should_log(100) and _should_log(200)
     assert not _should_log(101)
+
+
+# --- ADR 0034 x ADR 0037: shadow inference in synchronous mode --------
+
+
+class _Cfg:
+    def __init__(self, synchronous):
+        self.synchronous = synchronous
+
+
+class _Client:
+    def __init__(self, synchronous):
+        self.cfg = _Cfg(synchronous)
+        self.steps = 0
+
+    def step(self, *a, **k):
+        self.steps += 1
+        return None
+
+
+def _bus_with(client):
+    from interlatent.node.movement import CommandBus, WireHelpers
+
+    return CommandBus(
+        teleop_channel=None, teleop_gate=None, teleop_profile=None,
+        policy_enabled=True, client=client, action_keys=["a.pos"],
+        helpers=WireHelpers(
+            extract=lambda o, k: None, clamp=lambda *a, **k: None,
+            coerce=lambda a, k: a, encode=lambda o: b"",
+        ),
+    )
+
+
+def test_shadow_inference_runs_in_async_mode():
+    """ADR 0034's prepaid handback depends on it, and async can prepay."""
+    c = _Client(synchronous=False)
+    _bus_with(c)._shadow_step({"j.pos": 1.0})
+    assert c.steps == 1
+
+
+def test_shadow_inference_is_skipped_in_synchronous_mode():
+    """Nothing to prefetch into, so it would burn a multi-second forward
+    per cycle on a multi-GPU box and discard every result (ADR 0037)."""
+    c = _Client(synchronous=True)
+    _bus_with(c)._shadow_step({"j.pos": 1.0})
+    assert c.steps == 0

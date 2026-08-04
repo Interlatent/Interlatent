@@ -546,8 +546,21 @@ class CommandBus:
         schedule cursor keeps advancing in step with wall-clock ticks, and
         the server's chunk-continuity memory keeps tracking the motion the
         human is actually producing.
+
+        **Not in synchronous mode** (ADR 0037). Every side effect above
+        assumes overlapping chunking. Sync mode fires only on a drained
+        schedule, so there is no cooldown to keep warm, no unexecuted tail to
+        merge against, and nothing to prefetch into — handback costs a full
+        inference either way, and shadowing cannot shorten it. What it *would*
+        do is spend a multi-second forward on a multi-GPU box, once per cycle,
+        for the whole intervention, and throw every result away.
+
+        The server's context stays fresh regardless: the world-model context
+        ring is fed node-side on every tick from the control loop, so it keeps
+        recording the human's motion whether or not an observation is sent.
+        That is what makes skipping this safe rather than merely cheaper.
         """
-        if self._client is None:
+        if self._client is None or self._is_synchronous():
             return
         helpers = self._helpers
         try:
@@ -681,6 +694,16 @@ class CommandBus:
         )
 
     # --- collaborators ------------------------------------------------
+
+    def _is_synchronous(self) -> bool:
+        """True when the DRTC client is doing sequential chunking.
+
+        Read off the client rather than passed in, so it cannot drift from the
+        cadence actually in force — the session payload sets it (world-action
+        models require it), but ``--synchronous`` and the env var set it too.
+        """
+        cfg = getattr(self._client, "cfg", None)
+        return bool(getattr(cfg, "synchronous", False))
 
     def _policy_action_ok(self, arr: "np.ndarray", step: int) -> bool:
         """Validate a policy action vector; False means "treat as no-action".

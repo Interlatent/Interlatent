@@ -46,6 +46,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from .chunk_seam import crossfade_chunk
 from .policy_runtime import register_backend
 
 log = logging.getLogger(__name__)
@@ -805,10 +806,7 @@ class LeRobotBackend:
 
         # Discard warmup's raw actions: the first real chunk must be a
         # clean cold start, not in-painted/blended against synthetic data.
-        self._last_raw = None
-        self._last_start = 0
-        self._last_processed = None
-        self._last_processed_start = 0
+        self.reset_session_state()
         if self._crossfade_requested and not self._rtc_ok:
             log.info(
                 "Seam cross-fade ENABLED for %s (non-RTC policy) — new chunks "
@@ -818,6 +816,22 @@ class LeRobotBackend:
             )
 
     # ------------------------------------------------------------------
+
+    def reset_session_state(self) -> None:
+        """Clear every trail that must not cross a session boundary.
+
+        Backends are cached process-wide and reused across sessions, so this
+        is what stops one episode's tail from stitching into the next one's
+        first chunk. The cross-fade pair (``_last_processed*``) was ABSENT
+        from the attribute-poke this replaces; it survived only because
+        ``_crossfade_chunk`` guards on ``offset < 0``, which happens to hold
+        when a new session numbers below the old session's high-water step —
+        a coincidence, not a check.
+        """
+        self._last_raw = None
+        self._last_start = 0
+        self._last_processed = None
+        self._last_processed_start = 0
 
     @staticmethod
     def _latency_gate(lat_i: int, sample_every: int) -> tuple[bool, bool]:
@@ -1156,51 +1170,14 @@ class LeRobotBackend:
         is executing and smoothly hands off to the new prediction, instead of
         a hard jump.
         """
-        prev = self._last_processed
-        if prev is None or prev.shape[0] == 0:
-            return processed_np
-        if prev.shape[1:] != processed_np.shape[1:]:
-            return processed_np  # action_dim changed — don't blend
-
-        # `offset` = where the new chunk's first step sits inside the previous
-        # chunk (absolute-step space). Mirrors `_rtc_leftover`'s guard: a
-        # negative offset means the new chunk starts BEFORE the previous one —
-        # which happens whenever a fresh session reuses this cached backend
-        # (the new session's cursor restarts near 0 while
-        # `_last_processed_start` still holds the prior session's high step).
-        # offset >= len(prev) means the robot ran past the whole previous
-        # chunk. Either way there's no usable seam overlap, so don't blend
-        # (and never index prev out of bounds).
-        offset = int(next_action_step) - int(self._last_processed_start)
-        if offset < 0 or offset >= prev.shape[0]:
-            return processed_np
-        # Overlapping leading steps of the new chunk that the previous chunk
-        # also predicted: bounded so p = offset + o stays within prev.
-        m = min(processed_np.shape[0], prev.shape[0] - offset)
-        if m <= 0:
-            return processed_np
-
-        # Anchor where the previous plan's weight begins to fall: past the
-        # latency window (those leading steps are dropped client-side anyway),
-        # so the first step the robot actually executes is still continuous.
-        anchor = max(0, min(int(inference_delay), m - 1))
-        ramp = self._crossfade_steps_cfg or max(2, int(inference_delay))
-        ramp = max(1, min(ramp, m - anchor))
-
-        out = processed_np.copy()
-        for o in range(m):
-            p = offset + o  # index into the previous chunk (guaranteed in-range)
-            if o <= anchor:
-                w = 1.0
-            elif o >= anchor + ramp:
-                w = 0.0
-            else:
-                phase = (o - anchor) / ramp
-                w = 0.5 * (1.0 + float(np.cos(np.pi * phase)))
-            if w <= 0.0:
-                continue
-            out[o] = w * prev[p] + (1.0 - w) * processed_np[o]
-        return out
+        return crossfade_chunk(
+            processed_np,
+            self._last_processed,
+            self._last_processed_start,
+            next_action_step,
+            inference_delay,
+            ramp_steps=self._crossfade_steps_cfg,
+        )
 
     def forward(
         self,
