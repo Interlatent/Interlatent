@@ -121,8 +121,12 @@ jobs:
           # pytest-timeout: the test step below passes --timeout, which is a
           # plugin flag, not core pytest. Without it pytest exits 4 on the
           # unrecognized argument before running a single test.
-          pip install grpcio protobuf numpy pillow httpx huggingface_hub pytest pytest-timeout ruff
-      - name: Import surface + auth/CLI tests
+          # pyarrow: the rebuilder stages its string annotation columns as
+          # int64 and converts them in a parquet post-edit, so the tests that
+          # cover that pass need to read parquet. It is a lerobot transitive
+          # dep in production, but this job installs --no-deps.
+          pip install grpcio protobuf numpy pillow pyarrow httpx huggingface_hub pytest pytest-timeout ruff
+      - name: Import surface + recorder/rebuilder/auth/CLI tests
         run: |
           pytest packages/server/tests/ -v --timeout=120
       - name: Lint
@@ -161,6 +165,9 @@ jobs:
               # split, which is what made the dist unimportable.
               "interlatent_server/storage/lerobot_rebuild.py",
               "interlatent_server/storage/lerobot_live.py",
+              # Both writers import it to pick the codec parameter for the
+              # installed lerobot; shipping without it breaks recording.
+              "interlatent_server/storage/lerobot_codec.py",
               # docker/gen_proto.sh regenerates the stubs in-image against the
               # image's protobuf runtime, and needs the .proto to do it.
               "interlatent_server/protocol/messages.proto",
@@ -194,12 +201,75 @@ jobs:
           /tmp/bare/bin/interlatent-serve --help > /dev/null
           echo "interlatent-serve entry point OK"
 
+  server-lerobot:
+    # The dataset writers against the REAL lerobot, plus one full rollout
+    # through the real DRTC stack (client -> gRPC -> recorder -> build ->
+    # inbox upload). Everything the other jobs stub.
+    #
+    # This job exists because a stub certified a data-loss bug as correct.
+    # Both writers passed `vcodec=` to LeRobotDataset.create(); upstream
+    # renamed that parameter (2026-05-14 -> camera_encoder, 2026-06-27 ->
+    # rgb_encoder) and create() takes no **kwargs, so on every lerobot from
+    # mid-May 2026 — INCLUDING the ref docker/Dockerfile pins — the call
+    # raised TypeError. The writers catch broadly, so it surfaced as
+    # "rebuild failed; aborting upload", the staged episode was deleted,
+    # and the robot side saw a clean close. Every unit suite stayed green.
+    #
+    # NOT advisory, unlike the extras-resolve job. A red here does not mean
+    # "lerobot churned" — it means episodes are being discarded.
+    name: server + real lerobot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install ffmpeg (the encoder the dataset writers drive)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install both dists + real lerobot
+        run: |
+          # Both halves: the end-to-end test drives the SDK's client against
+          # the server's servicer in one process. CPU torch keeps the image
+          # small — nothing here runs a policy.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e './packages/server[lerobot]' -e ./packages/sdk \
+                      pytest pytest-timeout
+      - name: Report what resolved
+        run: |
+          python - <<'EOF'
+          import inspect, lerobot
+          from lerobot.datasets.lerobot_dataset import LeRobotDataset
+          params = inspect.signature(LeRobotDataset.create).parameters
+          encoder = [p for p in ("vcodec", "camera_encoder", "rgb_encoder")
+                     if p in params]
+          print(f"lerobot {lerobot.__version__}; encoder parameter: {encoder or 'NONE'}")
+          EOF
+      - name: Real dataset build + full DRTC rollout
+        run: |
+          set -o pipefail
+          pytest packages/server/tests/test_lerobot_real_build.py \
+                 packages/server/tests/test_drtc_end_to_end.py \
+                 --real-lerobot -v --timeout=600 2>&1 | tee /tmp/real.txt
+      - name: Fail if the tests that matter did not actually run
+        # Both files guard on importorskip, so a broken install would skip
+        # the whole module and this job would go green having tested
+        # nothing. Name the two assertions that must have executed.
+        run: |
+          for t in test_the_video_is_actually_h264 test_the_episode_reaches_the_backend; do
+            grep -q "$t PASSED" /tmp/real.txt || {
+              echo "::error title=$t did not run::the real-lerobot job must execute it"
+              exit 1
+            }
+          done
+
   teleop-web:
     # The WebXR VR teleop producer (teleop/teleop-web/) — ~14k lines that
     # landed with no build gate at all. It is a deliberate fork of the
     # dashboard's teleop engine (see its README), so nothing upstream compiles
     # it either; a broken headset build would only surface in a headset.
-    name: teleop-web (typecheck + build)
+    name: teleop-web (typecheck + test + build)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -216,6 +286,12 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npx tsc --noEmit
+      - name: Unit tests (pure math — no WebXR, no headset)
+        # The IK, FK, clutch mapping and wrist-pivot solve are ordinary
+        # functions and testable on a runner; only the XR session isn't.
+        # Before this, "no runtime tests" meant a wrong sign in the pose
+        # mapping could only be found by putting a headset on.
+        run: npm test
       - name: Build
         run: npm run build
 

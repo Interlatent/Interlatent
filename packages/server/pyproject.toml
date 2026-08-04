@@ -44,7 +44,11 @@ dependencies = [
 # control_source int->string) log a warning and skip, producing a session
 # the merge cannot fold. Pin them where the recorder is expected to work.
 lerobot = [
-  "lerobot>=0.4.0",
+  # [dataset] pulls `datasets` + `av`, without which `import
+  # lerobot.datasets` raises on lerobot >= 0.6 — i.e. the recorder's whole
+  # dataset-writing path. docker/Dockerfile already builds with
+  # LEROBOT_EXTRAS=dataset,...; this makes the PyPI install match.
+  "lerobot[dataset]>=0.4.0",
   "transformers",
   "accelerate",
   "num2words",

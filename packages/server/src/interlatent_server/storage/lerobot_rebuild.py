@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence, Tuple
 
+from .lerobot_codec import video_encoder_kwargs
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -364,6 +366,9 @@ class LeRobotRebuilder:
         # "Failed to set thread priority: Invalid argument" — and the encoder
         # then stalls badly (an upload that never finishes) instead of just
         # running unprioritized. libx264 has no such step.
+        #
+        # How the request reaches lerobot depends on its version (the
+        # parameter was renamed twice); ``lerobot_codec`` resolves that.
         self.vcodec = vcodec
 
     # ------------------------------------------------------------------
@@ -473,7 +478,10 @@ class LeRobotRebuilder:
             root=str(self.root),
             robot_type=self.env_slug or "custom",
             use_videos=bool(cameras and image_shape is not None),
-            **({"vcodec": self.vcodec} if self.vcodec else {}),
+            # The codec parameter has been renamed twice upstream and
+            # create() takes no **kwargs, so the right one is detected
+            # per-version — see storage/lerobot_codec.py.
+            **video_encoder_kwargs(LeRobotDataset.create, self.vcodec),
         )
 
         # 4. Pre-index frames per (episode, step) so the inner loop is

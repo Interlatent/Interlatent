@@ -544,12 +544,17 @@ class _StubDataset:
         self.episode_buffer: dict[str, list] = {}
         self.finalized = 0
 
+    # The signature mirrors the generation docker/Dockerfile pins (post
+    # bd9619df): a `camera_encoder` config, NOT the `vcodec` string the
+    # rebuilder used to pass unconditionally. Keeping this honest is the
+    # whole point — a stub taking **kwargs accepts the broken call and
+    # certifies it as correct.
     @classmethod
     def create(cls, *, repo_id, fps, features, root, robot_type,
-               use_videos, **extra):
+               use_videos, camera_encoder=None, **extra):
         self = cls(Path(root), features, dict(
             repo_id=repo_id, fps=fps, robot_type=robot_type,
-            use_videos=use_videos, **extra,
+            use_videos=use_videos, camera_encoder=camera_encoder, **extra,
         ))
         (self.root / "meta").mkdir(parents=True, exist_ok=False)
         (self.root / "meta" / "info.json").write_text(json.dumps({
@@ -593,6 +598,7 @@ class _StubDataset:
 
 def _install_lerobot(monkeypatch) -> None:
     import types
+    from dataclasses import dataclass
 
     _StubDataset.created = None
     pkg = types.ModuleType("lerobot")
@@ -601,9 +607,21 @@ def _install_lerobot(monkeypatch) -> None:
     mod.LeRobotDataset = _StubDataset
     pkg.datasets = datasets
     datasets.lerobot_dataset = mod
+    # The codec shim builds one of these to name the encoder (see
+    # storage/lerobot_codec.py).
+    configs = types.ModuleType("lerobot.configs")
+
+    @dataclass
+    class VideoEncoderConfig:
+        vcodec: str
+
+    configs.VideoEncoderConfig = VideoEncoderConfig
+    configs.RGBEncoderConfig = VideoEncoderConfig
+    pkg.configs = configs
     monkeypatch.setitem(sys.modules, "lerobot", pkg)
     monkeypatch.setitem(sys.modules, "lerobot.datasets", datasets)
     monkeypatch.setitem(sys.modules, "lerobot.datasets.lerobot_dataset", mod)
+    monkeypatch.setitem(sys.modules, "lerobot.configs", configs)
 
 
 def _jpeg(path: Path, size=(6, 4), color=(10, 20, 30)) -> Path:
@@ -655,8 +673,9 @@ def test_build_from_source_writes_a_dataset_and_all_three_post_edits(
     assert ds.create_kwargs["robot_type"] == "pick-cube"
     # Cameras + a decodable frame => video features are on.
     assert ds.create_kwargs["use_videos"] is True
-    # gVisor stalls on libsvtav1, so the recorder's h264 must reach lerobot.
-    assert ds.create_kwargs["vcodec"] == "h264"
+    # gVisor stalls on libsvtav1, so the recorder's h264 must reach lerobot —
+    # through whichever parameter this lerobot generation exposes.
+    assert ds.create_kwargs["camera_encoder"].vcodec == "h264"
     assert ds.finalized == 1
 
     # Image shape discovered from the first decodable frame (PIL: W x H).
@@ -700,7 +719,8 @@ def test_build_from_source_without_cameras_disables_video(
     LeRobotRebuilder(root, fps=30, task="t", env_slug="e").build_from_source(src)
     ds = _StubDataset.created
     assert ds.create_kwargs["use_videos"] is False
-    assert "vcodec" not in ds.create_kwargs  # None must not be forwarded
+    # vcodec=None means "no preference": no encoder kwarg is forwarded at all.
+    assert ds.create_kwargs["camera_encoder"] is None
     assert not [k for k in ds.features if k.startswith("observation.images.")]
     # No labels anywhere => no optional columns at all.
     assert "annotation.interlatent.control_source" not in ds.features
@@ -767,7 +787,13 @@ def test_build_from_source_finalizes_even_when_a_frame_write_explodes(
 def test_build_from_source_reports_a_missing_lerobot_as_an_install_hint(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setitem(sys.modules, "lerobot", None)
+    # None out the submodules too, not just the package: on a machine that
+    # HAS lerobot, `interlatent_server.server` already imported
+    # lerobot.datasets.lerobot_dataset (lerobot_backend applies an RTC
+    # patch at import time), so blanking only the top-level name leaves the
+    # cached submodule importable and this test would pass vacuously.
+    for name in ("lerobot", "lerobot.datasets", "lerobot.datasets.lerobot_dataset"):
+        monkeypatch.setitem(sys.modules, name, None)
     src = _StubSource({"e": [StepRow(episode_id="e", step=0,
                                      observation=[0.0], action=[0.0])]})
     with pytest.raises(RuntimeError, match="pip install"):

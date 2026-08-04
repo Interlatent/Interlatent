@@ -30,6 +30,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional
 
+from .lerobot_codec import video_encoder_kwargs
 from .lerobot_rebuild import (
     CONTROL_SOURCE_ID_TO_NAME,
     LeRobotRebuilder,
@@ -321,8 +322,10 @@ class LiveEpisodeBuilder:
             robot_type=self.env_slug or "custom",
             use_videos=bool(cameras),
             # gVisor: SVT-AV1 stalls (thread-priority EINVAL); libx264
-            # doesn't. Same rationale as the rebuild path's vcodec.
-            vcodec="h264",
+            # doesn't. Same rationale as the rebuild path's vcodec — and the
+            # same per-version parameter detection, since a mismatch here
+            # kills the live lane AND then the rebuild lane it falls back to.
+            **video_encoder_kwargs(LeRobotDataset.create, "h264"),
             streaming_encoding=True,
             encoder_queue_maxsize=_ENCODER_QUEUE_MAXSIZE,
         )
