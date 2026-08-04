@@ -34,7 +34,12 @@ jobs:
           pytest tests/test_lazy_imports.py -v --timeout=300
       - name: Test suite (unit + e2e, no GPU, no robot)
         run: |
-          pytest tests/ -v --timeout=120
+          # Both test roots. packages/sdk/tests/ is NOT a duplicate of tests/ —
+          # it holds the loop-runner, movement/arbitration, and Nori-guard suites
+          # (36 tests, including the ADR 0034 intervention coverage) and went
+          # unrun for as long as this step named only tests/. A test that never
+          # runs is worse than no test: it reads as coverage.
+          pytest tests/ packages/sdk/tests/ -v --timeout=120
       - name: Lint
         run: |
           ruff check .
@@ -80,6 +85,216 @@ jobs:
           print(f"all wheels complete (robot kinds: {', '.join(kinds)})")
           EOF
 
+  server:
+    # The `interlatent-server` dist (packages/server/) — the DRTC policy server
+    # that moved out of the closed engine in ADR 0035. It shipped with zero CI:
+    # the wheel built and passed `twine check` while the package could not be
+    # imported at all, because two relative imports written for the engine's
+    # package depth (`...cloud.box_status`, `...storage.lerobot_*`) resolved
+    # past the top of `interlatent_server`. Build-time checks cannot see that.
+    # Import it.
+    #
+    # x86 only, unlike the SDK matrix: this runs on a CUDA GPU box, not on the
+    # ARM robot hardware. Nothing here needs a GPU — the tests are auth, CLI,
+    # and import-surface only.
+    name: server (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (no torch, no lerobot)
+        run: |
+          # --no-deps + the light runtime deps by hand. Installing for real
+          # would pull CUDA torch (~2.5 GB) for tests that never touch it, and
+          # the point of the import-surface test is precisely that the package
+          # works on a machine where torch is not yet importable. Dependency
+          # declarations are validated by the resolve step below instead.
+          pip install --no-deps -e ./packages/server
+          # pytest-timeout: the test step below passes --timeout, which is a
+          # plugin flag, not core pytest. Without it pytest exits 4 on the
+          # unrecognized argument before running a single test.
+          # pyarrow: the rebuilder stages its string annotation columns as
+          # int64 and converts them in a parquet post-edit, so the tests that
+          # cover that pass need to read parquet. It is a lerobot transitive
+          # dep in production, but this job installs --no-deps.
+          pip install grpcio protobuf numpy pillow pyarrow httpx huggingface_hub pytest pytest-timeout ruff
+      - name: Import surface + recorder/rebuilder/auth/CLI tests
+        run: |
+          pytest packages/server/tests/ -v --timeout=120
+      - name: Lint
+        run: |
+          ruff check packages/server
+      - name: Resolve dependencies (dry run, installs nothing)
+        run: |
+          # Gating on the base dist, advisory on [lerobot]: the extra tracks
+          # lerobot's fast-moving releases and a red there is usually upstream
+          # churn, not a defect in our declaration. Same stance as the SDK's
+          # ADVISORY extras.
+          echo "::group::base"
+          pip install --dry-run --ignore-installed ./packages/server
+          echo "::endgroup::"
+          echo "::group::[lerobot] (advisory)"
+          pip install --dry-run --ignore-installed './packages/server[lerobot]' || \
+            echo "::warning title=interlatent-server[lerobot] did not resolve::advisory only"
+          echo "::endgroup::"
+      - name: Wheel builds, is complete, and is publishable
+        run: |
+          pip install build twine
+          python -m build --wheel --sdist ./packages/server -o /tmp/server-dist
+          twine check /tmp/server-dist/*
+          python - <<'EOF'
+          import glob, zipfile
+          [wheel] = glob.glob("/tmp/server-dist/interlatent_server-*.whl")
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = [
+              "interlatent_server/cli.py",              # interlatent-serve entry point
+              "interlatent_server/serve_gpu.py",
+              "interlatent_server/credentials.py",
+              "interlatent_server/box_status.py",
+              "interlatent_server/server/transport.py",
+              "interlatent_server/server/recorder.py",
+              # The recorder's dataset writers. Omitted from the original
+              # split, which is what made the dist unimportable.
+              "interlatent_server/storage/lerobot_rebuild.py",
+              "interlatent_server/storage/lerobot_live.py",
+              # Both writers import it to pick the codec parameter for the
+              # installed lerobot; shipping without it breaks recording.
+              "interlatent_server/storage/lerobot_codec.py",
+              # docker/gen_proto.sh regenerates the stubs in-image against the
+              # image's protobuf runtime, and needs the .proto to do it.
+              "interlatent_server/protocol/messages.proto",
+              "interlatent_server/protocol/messages_pb2.py",
+              "interlatent_server/protocol/messages_pb2_grpc.py",
+          ]
+          for f in required:
+              assert f in names, f"{f} missing from {wheel}"
+          print(f"{wheel} complete ({len(names)} entries)")
+          EOF
+      - name: Installed wheel imports on a bare interpreter
+        run: |
+          # The install above is editable and shares this checkout. Prove the
+          # built artifact stands on its own in a clean venv — that is what a
+          # user gets from `pip install interlatent-server`.
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install --no-deps /tmp/server-dist/*.whl
+          /tmp/bare/bin/pip install grpcio protobuf numpy pillow httpx huggingface_hub
+          /tmp/bare/bin/python - <<'EOF'
+          import importlib, pkgutil
+          import interlatent_server
+          mods = sorted(
+              m.name for m in pkgutil.walk_packages(
+                  interlatent_server.__path__, prefix="interlatent_server.")
+          )
+          assert mods, "package walk found nothing"
+          for m in mods:
+              importlib.import_module(m)
+          print(f"imported {len(mods)} modules from the installed wheel")
+          EOF
+          /tmp/bare/bin/interlatent-serve --help > /dev/null
+          echo "interlatent-serve entry point OK"
+
+  server-lerobot:
+    # The dataset writers against the REAL lerobot, plus one full rollout
+    # through the real DRTC stack (client -> gRPC -> recorder -> build ->
+    # inbox upload). Everything the other jobs stub.
+    #
+    # This job exists because a stub certified a data-loss bug as correct.
+    # Both writers passed `vcodec=` to LeRobotDataset.create(); upstream
+    # renamed that parameter (2026-05-14 -> camera_encoder, 2026-06-27 ->
+    # rgb_encoder) and create() takes no **kwargs, so on every lerobot from
+    # mid-May 2026 — INCLUDING the ref docker/Dockerfile pins — the call
+    # raised TypeError. The writers catch broadly, so it surfaced as
+    # "rebuild failed; aborting upload", the staged episode was deleted,
+    # and the robot side saw a clean close. Every unit suite stayed green.
+    #
+    # NOT advisory, unlike the extras-resolve job. A red here does not mean
+    # "lerobot churned" — it means episodes are being discarded.
+    name: server + real lerobot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install ffmpeg (the encoder the dataset writers drive)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install both dists + real lerobot
+        run: |
+          # Both halves: the end-to-end test drives the SDK's client against
+          # the server's servicer in one process. CPU torch keeps the image
+          # small — nothing here runs a policy.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e './packages/server[lerobot]' -e ./packages/sdk \
+                      pytest pytest-timeout
+      - name: Report what resolved
+        run: |
+          python - <<'EOF'
+          import inspect, lerobot
+          from lerobot.datasets.lerobot_dataset import LeRobotDataset
+          params = inspect.signature(LeRobotDataset.create).parameters
+          encoder = [p for p in ("vcodec", "camera_encoder", "rgb_encoder")
+                     if p in params]
+          print(f"lerobot {lerobot.__version__}; encoder parameter: {encoder or 'NONE'}")
+          EOF
+      - name: Real dataset build + full DRTC rollout
+        run: |
+          set -o pipefail
+          pytest packages/server/tests/test_lerobot_real_build.py \
+                 packages/server/tests/test_drtc_end_to_end.py \
+                 --real-lerobot -v --timeout=600 2>&1 | tee /tmp/real.txt
+      - name: Fail if the tests that matter did not actually run
+        # Both files guard on importorskip, so a broken install would skip
+        # the whole module and this job would go green having tested
+        # nothing. Name the two assertions that must have executed.
+        run: |
+          for t in test_the_video_is_actually_h264 test_the_episode_reaches_the_backend; do
+            grep -q "$t PASSED" /tmp/real.txt || {
+              echo "::error title=$t did not run::the real-lerobot job must execute it"
+              exit 1
+            }
+          done
+
+  teleop-web:
+    # The WebXR VR teleop producer (teleop/teleop-web/) — ~14k lines that
+    # landed with no build gate at all. It is a deliberate fork of the
+    # dashboard's teleop engine (see its README), so nothing upstream compiles
+    # it either; a broken headset build would only surface in a headset.
+    name: teleop-web (typecheck + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: teleop/teleop-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: teleop/teleop-web/package-lock.json
+      - name: Install (locked)
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests (pure math — no WebXR, no headset)
+        # The IK, FK, clutch mapping and wrist-pivot solve are ordinary
+        # functions and testable on a runner; only the XR session isn't.
+        # Before this, "no runtime tests" meant a wrong sign in the pose
+        # mapping could only be found by putting a headset on.
+        run: npm test
+      - name: Build
+        run: npm run build
+
   extras-resolve:
     # The optional extras have never been installed or resolved in CI - only the
     # base package is. A bad pin, a typo, or a wheel that does not exist for this
@@ -115,7 +330,18 @@ jobs:
           # moves under us) and gates pyrealsense2 to x86_64, so a red here is
           # usually upstream churn rather than a defect in our declaration.
           # Keep the signal, drop the gate.
-          ADVISORY = {"yam"}
+          #
+          # [axol] is advisory for a different reason: almond-axol depends on
+          # dimos[manipulation], which requires a750-control under
+          # `sys_platform == "linux" and platform_machine == "x86_64"`. That
+          # package is not published on PyPI, so the resolve fails on the x86
+          # runners (ARM skips it — the marker is false there). Nothing in this
+          # repo can fix that; the durable fix is upstream, either publishing
+          # a750-control or dropping it from dimos's manipulation extra. Until
+          # then this is a real user-facing break for `pip install
+          # 'interlatent[axol]'` on linux/x86_64, so it stays visible as a
+          # WARN rather than being silenced or removed.
+          ADVISORY = {"yam", "axol"}
 
           PYPROJECT = Path("packages/sdk/pyproject.toml")
           project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]

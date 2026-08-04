@@ -29,6 +29,10 @@ import numpy as np
 
 from . import _env
 from .._clamp_log import warn_clamp
+from .context_ring import DEFAULT_CAPACITY as _CTX_CAPACITY
+from .context_ring import DEFAULT_MAX_DIM as _CTX_MAX_DIM
+from .context_ring import DEFAULT_TARGET_FPS as _CTX_FPS
+from .context_ring import ContextRing
 from .jpeg import backend_name as _jpeg_backend_name
 from .jpeg import encode_jpeg as _encode_jpeg
 from .looprunner import run_control_loop
@@ -252,6 +256,10 @@ def lerobot_control_loop(
         teleop_configured=teleop_gate is not None,
     )
 
+    # World-action model context window (ADR 0037). None for every policy
+    # family that doesn't carry one, which makes both hooks below no-ops.
+    context_ring = _build_context_ring(session)
+
     # --- Wire the bus and hand the tick to the shared runner -------------
     # The bus owns the whole motion path (arbitrate → produce → SafetyGate →
     # delta clamp → send_action → flush/smoother-reset); the runner owns
@@ -274,8 +282,15 @@ def lerobot_control_loop(
             extract=_extract_joint_state,
             clamp=_clamp_action_delta,
             coerce=_coerce_action_for_robot,
+            # The context ring is drained here rather than sampled here: this
+            # lambda only runs on the ticks DRTC actually sends (see
+            # CommandBus._drive_policy), which is exactly when the accumulated
+            # window should ride along. Sampling happens every tick, via
+            # ``context_fn`` in the runner.
             encode=lambda o: _encode_npz(
-                _to_policy_schema(o), image_resize=image_resize
+                _to_policy_schema(o),
+                image_resize=image_resize,
+                context=context_ring.drain() if context_ring is not None else None,
             ),
         ),
         max_step=_max_step,
@@ -305,6 +320,7 @@ def lerobot_control_loop(
             preview_fn=_encode_preview_jpegs,
             report_features_fn=_report,
             extract_fn=_extract_joint_state,
+            context_fn=context_ring.offer if context_ring is not None else None,
             profiler=node_profiler,
         )
     finally:
@@ -810,7 +826,102 @@ def _jpeg_encode(
     return np.frombuffer(data, dtype=np.uint8)
 
 
-def _encode_npz(obs: dict, image_resize: Optional[int] = None) -> bytes:
+#: Policy backends that carry a rolling video context window (ADR 0037). The
+#: node needs to know only *that* a backend wants context, never how the model
+#: consumes it — the window's shape travels in the session payload.
+_CONTEXT_BACKENDS = frozenset({"dreamzero"})
+
+
+def _build_context_ring(session: dict) -> Optional[ContextRing]:
+    """Build the world-model context ring for this session, or None.
+
+    Driven by the session payload rather than a URI sniff, because the ring's
+    shape is per-checkpoint: a fine-tune may declare a different window than
+    the released weights it derives from. The backend name selects *whether*
+    to build one; the optional ``context`` block overrides the defaults::
+
+        "policy_backend": "dreamzero",
+        "context": {"frames": 33, "fps": 5.0, "max_dim": 320}
+
+    Returns None for every policy family that has no context window, which is
+    all of them today except world-action models — and ``context_fn=None``
+    then makes the control loop's hook a no-op.
+    """
+    backend = str(session.get("policy_backend", "") or "").strip().lower()
+    cfg = session.get("context") or {}
+    if backend not in _CONTEXT_BACKENDS and not cfg:
+        return None
+    try:
+        ring = ContextRing(
+            capacity=int(cfg.get("frames", _CTX_CAPACITY) or _CTX_CAPACITY),
+            target_fps=float(cfg.get("fps", _CTX_FPS) or _CTX_FPS),
+            max_dim=cfg.get("max_dim", _CTX_MAX_DIM),
+        )
+    except Exception:
+        _LOG.warning(
+            "Invalid context config %r for backend %r; using defaults",
+            cfg, backend, exc_info=True,
+        )
+        ring = ContextRing()
+    _LOG.info(
+        "World-model context ring enabled for backend %r: %d frames @ %.1f FPS "
+        "(%.1fs window), long edge <= %s px",
+        backend, ring.capacity, ring.target_fps,
+        (ring.capacity / ring.target_fps) if ring.target_fps else 0.0,
+        ring.max_dim,
+    )
+    return ring
+
+
+#: npz key prefix for world-model context frames (ADR 0037). Namespaced so a
+#: backend that knows nothing about context — every lerobot policy — can ignore
+#: it wholesale, and so the server's ``_to_batch`` never mistakes a context
+#: frame for an observation image (it treats *any* uint8 array as one).
+_CTX_PREFIX = "ctx."
+
+
+def _pack_context(flat: dict, context: Optional[dict]) -> None:
+    """Fold a :meth:`ContextRing.drain` result into an npz payload dict.
+
+    Layout::
+
+        ctx.meta            int64[4]  [first_seq, n_frames, produced, fps_milli]
+        ctx.f000.<cam>      uint8[]   JPEG bytes for frame 0, camera <cam>
+        ctx.f001.<cam>      ...
+
+    ``produced`` exceeding ``n_frames`` tells the server the window is a tail
+    and intermediate motion was never shown to the model. ``fps`` is carried
+    in milli-units so the whole header stays one integer array.
+
+    Frames are packed flat rather than as a nested blob so the payload stays
+    inspectable with plain ``np.load`` when debugging a live session.
+    """
+    if not context:
+        return
+    frames = context.get("frames") or []
+    if not frames:
+        return
+    flat[f"{_CTX_PREFIX}meta"] = np.asarray(
+        [
+            int(context.get("first_seq", 0)),
+            len(frames),
+            int(context.get("produced", len(frames))),
+            int(round(float(context.get("fps", 0.0)) * 1000.0)),
+        ],
+        dtype=np.int64,
+    )
+    for i, cams in enumerate(frames):
+        for cam, data in cams.items():
+            if not data:
+                continue
+            flat[f"{_CTX_PREFIX}f{i:03d}.{cam}"] = np.frombuffer(data, dtype=np.uint8)
+
+
+def _encode_npz(
+    obs: dict,
+    image_resize: Optional[int] = None,
+    context: Optional[dict] = None,
+) -> bytes:
     """Encode a LeRobot observation dict into npz bytes.
 
     LeRobot observations are dicts of numpy arrays (joints, cameras).
@@ -841,6 +952,7 @@ def _encode_npz(obs: dict, image_resize: Optional[int] = None) -> bytes:
             except Exception:
                 # Skip un-encodable keys rather than crashing the whole loop.
                 _LOG.debug("Skipping unencodable obs key %r (type=%s)", k, type(v).__name__)
+    _pack_context(flat, context)
     buf = io.BytesIO()
     np.savez(buf, **flat)
     return buf.getvalue()

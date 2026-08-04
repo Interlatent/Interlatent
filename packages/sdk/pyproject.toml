@@ -42,7 +42,11 @@ dependencies = [
 # recorder — ADR 0022 — so this extra no longer powers any on-device build.)
 lerobot = [
   "huggingface_hub>=0.20",
-  "lerobot>=0.4.0",
+  # [dataset] is not optional for us: since lerobot 0.6, importing
+  # `lerobot.datasets` raises unless `datasets` and `av` are present, and
+  # the node's control loop reaches that module. Declaring the bare name
+  # produced an install whose dataset path could not be imported at all.
+  "lerobot[dataset]>=0.4.0",
   "pyarrow>=14",
   "Pillow>=9",
 ]

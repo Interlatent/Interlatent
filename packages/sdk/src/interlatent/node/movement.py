@@ -64,6 +64,15 @@ from .teleop.safety import TargetSample
 _LOG = logging.getLogger(__name__)
 
 
+def _should_log(n: int) -> bool:
+    """Loud for the first few, then every hundredth.
+
+    A rejection at 30 Hz would otherwise emit 1800 lines a minute; silencing
+    it after the first would hide a policy that recovers and re-breaks.
+    """
+    return n <= 3 or n % 100 == 0
+
+
 class MovementSource(str, Enum):
     """Who is commanding the robot on a given control tick.
 
@@ -72,20 +81,19 @@ class MovementSource(str, Enum):
     byte-for-byte identical.
 
     ``ESTOP`` is the one member whose value is **not** a ``control_source``:
-    e-stop ticks are never captured, so the dataset's three-value contract
-    (``{"policy","teleop","hold"}``, ``CONTEXT.md``) is preserved.
-    :attr:`TickOutcome.control_source` is ``None`` on those ticks.
+    e-stop ticks are never captured, so the dataset's four-value contract
+    (``{"policy","teleop","hold","intervention"}``, ``CONTEXT.md``) is
+    preserved. :attr:`TickOutcome.control_source` is ``None`` on those ticks.
     """
 
     ESTOP = "estop"     # safety latch held — overrides every other source
-    TELEOP = "teleop"   # a human is driving (also the label for intervention today)
-    HOLD = "hold"       # no policy loaded and human disengaged: servos hold in place
+    TELEOP = "teleop"   # a human is driving a policy-less recording session
+    #: A human override *of a running policy* (deadman held while
+    #: ``policy_enabled``). Split from TELEOP so interventions carry clean
+    #: correction labels for DAgger-style training (ADR 0034).
+    INTERVENTION = "intervention"
+    HOLD = "hold"       # human disengaged and no policy action to execute
     POLICY = "policy"   # autonomous inference chunk
-
-    # Reserved:
-    #   INTERVENTION — human override *of a running policy*; identical on the
-    #                  wire to TELEOP today, split out later so interventions get
-    #                  clean correction labels.
 
 
 class TickVerdict(str, Enum):
@@ -165,7 +173,8 @@ class TickOutcome:
     #: pose on a HOLD tick. ``None`` when nothing was produced.
     action: Optional[np.ndarray] = None
     #: The dataset label for this tick, or ``None`` when it must not be
-    #: recorded. Always one of ``{"policy","teleop","hold"}`` when set.
+    #: recorded. Always one of ``{"policy","teleop","hold","intervention"}``
+    #: when set.
     control_source: Optional[str] = None
     #: Whether the loop should call its capture helper this tick.
     should_record: bool = False
@@ -186,18 +195,22 @@ class Arbiter:
 
     Priority, highest first:
 
-        1. ``ESTOP``  — a safety latch is held on the SafetyGate. Overrides
-           everything: no motion, no capture, until a human clears it.
-        2. ``TELEOP`` — a human is engaged (deadman held) *and* the gated,
-           schema-matched teleop path is available for this robot.
-        3. ``HOLD``   — no policy is loaded (a teleop-recording assignment) and
-           the human is not driving: send nothing so the servos hold, while the
-           loop keeps recording a continuous episode.
-        4. ``POLICY`` — autonomous inference.
+        1. ``ESTOP``        — a safety latch is held on the SafetyGate.
+           Overrides everything: no motion, no capture, until a human clears
+           it.
+        2. ``INTERVENTION`` / ``TELEOP`` — a human is engaged (deadman held)
+           *and* the gated, schema-matched teleop path is available for this
+           robot. The label depends on what the human is overriding:
+           ``INTERVENTION`` when a policy is running (a DAgger correction),
+           ``TELEOP`` on a policy-less teleop-recording assignment.
+        3. ``HOLD``         — no policy is loaded (a teleop-recording
+           assignment) and the human is not driving: send nothing so the
+           servos hold, while the loop keeps recording a continuous episode.
+        4. ``POLICY``       — autonomous inference.
 
     The e-stop rung lives here rather than as an ``if`` above the branch,
     because "what may drive the robot" is exactly one question and it deserves
-    exactly one answer. ``INTERVENTION`` will later split off from ``TELEOP``.
+    exactly one answer.
     """
 
     def decide(
@@ -210,7 +223,11 @@ class Arbiter:
         if estop_latched:
             return MovementSource.ESTOP
         if teleop_ready.teleop_available:
-            return MovementSource.TELEOP
+            return (
+                MovementSource.INTERVENTION
+                if policy_enabled
+                else MovementSource.TELEOP
+            )
         if not policy_enabled:
             return MovementSource.HOLD
         return MovementSource.POLICY
@@ -239,6 +256,7 @@ class CommandBus:
         helpers: Optional[WireHelpers] = None,
         max_step: Optional[float] = None,
         action_filter: Optional[Any] = None,
+        handback_grace_ticks: int = 8,
     ) -> None:
         self._teleop_channel = teleop_channel
         self._teleop_gate = teleop_gate
@@ -253,9 +271,26 @@ class CommandBus:
         self._max_step = max_step
         self._action_filter = action_filter
 
+        # Disengage grace (ADR 0034). Under shadow inference the schedule is
+        # FULL during an intervention, so a single dropped/stale teleop frame
+        # would otherwise fall straight through to POLICY and execute a policy
+        # action mid-intervention (a jerk, and a mislabeled frame). A stale
+        # frame therefore holds for up to this many ticks before handing back;
+        # an *explicit* disengage (a fresh frame with the deadman released)
+        # hands back instantly. ~8 ticks ≈ 250 ms at 30 Hz, matching the
+        # channel's frame-staleness TTL.
+        self._handback_grace_ticks = max(0, int(handback_grace_ticks))
+        self._grace_left = 0
+        self._prev_source: Optional[MovementSource] = None
+
         # One-shot warnings / latches, mirroring the loops they replace.
         self._teleop_warned = False
         self._estop_forwarded = False
+        # Malformed-chunk rejection counters (see _drive_policy). Logged on the
+        # first occurrence and then geometrically, so a persistently broken
+        # policy neither hides nor floods the journal.
+        self._rejected_nonfinite = 0
+        self._rejected_arity = 0
 
     # ------------------------------------------------------------------
     # Decision surface (Phase 1; still used directly by tests)
@@ -370,10 +405,10 @@ class CommandBus:
         ``perf_counter()`` at the top of the tick, so gate timing and the
         profiler agree on one clock.
         """
-        if self._helpers is None or self._robot is None:
+        if self._helpers is None or self._robot is None or self._client is None:
             raise RuntimeError(
-                "CommandBus.drive() needs robot + helpers; this bus was built "
-                "for arbitration only"
+                "CommandBus.drive() needs robot + client + helpers; this bus "
+                "was built for arbitration only"
             )
 
         frame = self.sample_teleop()
@@ -393,32 +428,137 @@ class CommandBus:
         )
 
         if source is MovementSource.ESTOP:
-            # No motion, no capture. Queued policy chunks are dropped so nothing
-            # stale fires on reset; the smoother is dropped so a post-reset
-            # resume warm-starts from the live pose.
-            self._flush_schedule()
+            # No motion, no capture. Queued policy chunks are dropped — with a
+            # merge barrier, so an in-flight pre-estop chunk can't land after
+            # the flush — and the smoother is dropped so a post-reset resume
+            # warm-starts from the live pose.
+            self._flush_schedule(barrier=True)
             self._reset_filter()
-            return TickOutcome(source=source, **base)
+            self._grace_left = 0
+            return self._finish(TickOutcome(source=source, **base))
+
+        if source is MovementSource.INTERVENTION:
+            return self._finish(
+                self._drive_intervention(obs, frame, step=step, now=now, base=base)
+            )
 
         if source is MovementSource.TELEOP:
-            return self._drive_teleop(obs, frame, step=step, now=now, base=base)
+            self._grace_left = 0
+            return self._finish(
+                self._drive_teleop(obs, frame, step=step, now=now, base=base)
+            )
 
         if source is MovementSource.HOLD:
             # No policy to fall back to: send nothing (the servos hold), but
             # report a capture so the episode stays continuous across the
             # human's engage/disengage gaps.
+            self._grace_left = 0
             self._reset_gate()
             actual = self._helpers.extract(obs, self._action_keys)
-            return TickOutcome(
+            return self._finish(TickOutcome(
                 source=source, action=actual, control_source=MovementSource.HOLD.value,
                 should_record=True, **base
-            )
+            ))
 
-        return self._drive_policy(obs, step=step, base=base)
+        # POLICY. A *stale* teleop stream right after an intervention gets a
+        # grace hold instead of falling through: under shadow inference the
+        # schedule is full, so without it a 1-tick frame drop mid-intervention
+        # would execute a policy action (a jerk, and a mislabeled frame). A
+        # fresh frame with the deadman released is an explicit disengage and
+        # hands back instantly.
+        if self._grace_left > 0:
+            if frame is None:
+                self._grace_left -= 1
+                return self._finish(self._drive_grace_hold(obs, base=base))
+            self._grace_left = 0
+        return self._finish(self._drive_policy(obs, step=step, base=base))
+
+    def _finish(self, outcome: TickOutcome) -> TickOutcome:
+        self._prev_source = outcome.source
+        return outcome
 
     # --- per-source production ---------------------------------------
 
     def _drive_teleop(self, obs, frame, *, step: int, now: float, base: dict) -> TickOutcome:
+        """Human motion on a policy-less teleop-recording assignment.
+
+        Nothing competes with the human here, so the discontinuity bookkeeping
+        is unconditional: any queued (placeholder-backend) chunks are dropped
+        and the smoother state cleared every tick, exactly as before the
+        INTERVENTION split.
+        """
+        outcome = self._produce_human_action(
+            obs, frame, step=step, now=now, base=base,
+            source=MovementSource.TELEOP,
+        )
+        # The policy stream is interrupted: drop queued chunks so they don't
+        # apply when the human releases, and drop the smoother's state so the
+        # first action after release warm-starts from the live pose.
+        self._flush_schedule()
+        self._reset_filter()
+        return outcome
+
+    def _drive_intervention(self, obs, frame, *, step: int, now: float, base: dict) -> TickOutcome:
+        """Human override of a running policy (DAgger correction, ADR 0034).
+
+        On the engage edge the queued policy chunks are flushed *with a merge
+        barrier*, so even an Infer already in flight — computed from a
+        pre-takeover observation — can never install actions once the human
+        has control. After that the DRTC loop is kept warm every tick
+        (*shadow inference*): observations keep flowing, chunks keep merging,
+        and the schedule cursor keeps advancing while the popped policy
+        actions are discarded in favor of the human's targets. At disengage
+        the very next tick pops a chunk computed from a live observation —
+        handback latency ≈ one control tick, instead of a frozen-cooldown
+        stall plus a full inference round trip.
+        """
+        was_in_grace = self._grace_left > 0
+        if self._prev_source is not MovementSource.INTERVENTION and not was_in_grace:
+            # Engage edge only — flushing per tick would discard the fresh
+            # shadow chunks this branch exists to keep.
+            self._flush_schedule(barrier=True)
+            self._reset_filter()
+        self._grace_left = self._handback_grace_ticks
+        self._shadow_step(obs)
+        return self._produce_human_action(
+            obs, frame, step=step, now=now, base=base,
+            source=MovementSource.INTERVENTION,
+        )
+
+    def _drive_grace_hold(self, obs, *, base: dict) -> TickOutcome:
+        """The teleop stream went stale mid-intervention (dropped datagrams,
+        not an explicit disengage): hold pose instead of executing a policy
+        action, keep shadow inference warm, and record the measured pose as a
+        ``hold`` frame so the episode stays continuous."""
+        self._shadow_step(obs)
+        self._reset_gate()
+        actual = self._helpers.extract(obs, self._action_keys)
+        return TickOutcome(
+            source=MovementSource.HOLD, action=actual,
+            control_source=MovementSource.HOLD.value, should_record=True, **base
+        )
+
+    def _shadow_step(self, obs) -> None:
+        """Step the DRTC client without executing its action.
+
+        The side effects are the point: the cooldown keeps ticking,
+        observations keep going up, fresh chunks keep LWW-merging, the
+        schedule cursor keeps advancing in step with wall-clock ticks, and
+        the server's chunk-continuity memory keeps tracking the motion the
+        human is actually producing.
+        """
+        if self._client is None:
+            return
+        helpers = self._helpers
+        try:
+            self._client.step(lambda o=obs: helpers.encode(o), codec="npz")
+        except Exception:
+            _LOG.debug("Shadow inference step failed", exc_info=True)
+
+    def _produce_human_action(
+        self, obs, frame, *, step: int, now: float, base: dict,
+        source: MovementSource,
+    ) -> TickOutcome:
         """The hosted teleop engine already resolved an absolute joint target;
         route it through the SafetyGate (the single safety authority for
         human-driven motion) and the delta clamp, then report the *commanded*
@@ -435,15 +575,16 @@ class CommandBus:
             target = np.asarray(frame.joint_targets, dtype=np.float32)
         else:
             # Malformed/length-mismatched, or a keys/pose frame the node can't
-            # compute locally: hold pose (the gate idles toward it). Pose frames
-            # should have been converted to targets on the compute pod.
+            # compute locally: hold pose (the gate idles toward it). The
+            # browser producer solves IK itself and sends mode='targets' only
+            # (ADR 0017); anything else is a stale or foreign producer.
             if frame.mode == "pose" and not self._teleop_warned:
                 self._teleop_warned = True
                 _LOG.warning(
-                    "Teleop frame mode='pose' reached the node — the pod-side "
-                    "retarget stage should have converted it to 'targets' (is "
-                    "the relay running without a teleop_view hook?); holding "
-                    "pose. See ADR 0009, second amendment."
+                    "Teleop frame mode='pose' reached the node — the browser "
+                    "producer solves IK locally and must send mode='targets' "
+                    "(ADR 0017; the pod-side retarget path is retired). "
+                    "Holding pose."
                 )
             target = actual.copy()
 
@@ -460,7 +601,8 @@ class CommandBus:
         # typically a no-op, but it keeps one execution-safety invariant across
         # every source.
         action = helpers.clamp(
-            action, actual, self._max_step, self._action_keys, step, source="teleop",
+            action, actual, self._max_step, self._action_keys, step,
+            source=source.value,
         )
         cmd_at = self._send(action)
 
@@ -478,15 +620,9 @@ class CommandBus:
         if received is not None:
             age_ms = (time.monotonic_ns() - received) / 1e6
 
-        # The policy stream is interrupted: drop queued chunks so they don't
-        # apply when the human releases, and drop the smoother's state so the
-        # first action after release warm-starts from the live pose.
-        self._flush_schedule()
-        self._reset_filter()
-
         return TickOutcome(
-            source=MovementSource.TELEOP, action=action,
-            control_source=MovementSource.TELEOP.value, should_record=True,
+            source=source, action=action,
+            control_source=source.value, should_record=True,
             sent=True, cmd_at=cmd_at, frame_age_ms=age_ms, **base
         )
 
@@ -503,13 +639,37 @@ class CommandBus:
             return TickOutcome(source=MovementSource.POLICY, **base)
 
         arr = np.asarray(action, dtype=np.float32).reshape(-1)
+        actual = (
+            helpers.extract(obs, self._action_keys) if self._action_keys else None
+        )
+
+        # Reject a malformed chunk before it touches the robot. Nothing else on
+        # this path catches either case: the policy stream never passes through
+        # the SafetyGate (that is the teleop path), and the delta clamp is
+        # disabled unless --robot.max_step is set — and even when it *is* set it
+        # cannot stop a NaN, because ``abs(delta) > max_step`` is False for NaN,
+        # so the clamp passes it straight through to send_action.
+        #
+        # A rejected action is reported as a no-action tick, which is already a
+        # safe, exercised state: nothing is sent and the servos hold the last
+        # commanded pose, exactly as when a chunk fails to arrive.
+        if not self._policy_action_ok(arr, step):
+            return TickOutcome(source=MovementSource.POLICY, **base)
+
         # Low-pass the policy stream to damp per-tick volatility (chunk-boundary
-        # / model jitter) before any safety guard. Warm-started, so it does not
-        # ramp from zero.
+        # / model jitter) before any safety guard.
         if self._action_filter is not None:
+            if actual is not None and not getattr(self._action_filter, "primed", True):
+                # Handback (or first tick): seed the smoother from the robot's
+                # *measured* pose, so the first policy action is damped
+                # relative to where the arm actually is — the plain warm-start
+                # seeds from the policy action itself, which provides zero
+                # damping on exactly the human→policy jump (ADR 0034).
+                seed = getattr(self._action_filter, "seed", None)
+                if seed is not None:
+                    seed(actual)
             arr = self._action_filter.filter(arr)
         if self._action_keys:
-            actual = helpers.extract(obs, self._action_keys)
             arr = helpers.clamp(
                 arr, actual, self._max_step, self._action_keys, step, source="policy",
             )
@@ -522,13 +682,69 @@ class CommandBus:
 
     # --- collaborators ------------------------------------------------
 
+    def _policy_action_ok(self, arr: "np.ndarray", step: int) -> bool:
+        """Validate a policy action vector; False means "treat as no-action".
+
+        Two checks, neither of which existed anywhere on the policy path:
+
+        * **Arity.** ``_clamp_action_delta`` operates on the shortest common
+          prefix of (action_keys, action, measured) and returns the array
+          untouched when that prefix is empty; ``_coerce_action_for_robot``
+          falls back to passing the bare array to ``send_action`` when the
+          widths disagree. So a wrong-width vector is silently *truncated* —
+          it commands a different set of joints than intended, with no error.
+        * **Finiteness.** There was no NaN/Inf check between the gRPC receiver
+          and ``send_action``, and the delta clamp cannot serve as one:
+          ``abs(delta) > max_step`` evaluates False for NaN, so a non-finite
+          action passes the clamp even when the clamp is enabled.
+
+        Rejections are counted and logged on the first few occurrences and
+        then every hundredth, so a policy that has gone bad is loud once and
+        does not drown the journal at 30 Hz.
+        """
+        n = len(self._action_keys)
+        if n and arr.size != n:
+            self._rejected_arity += 1
+            if _should_log(self._rejected_arity):
+                _LOG.error(
+                    "policy action REJECTED at step %d: width %d != %d action "
+                    "keys %s (holding pose; %d rejected so far). The server and "
+                    "the robot disagree on the action space — check the "
+                    "policy's action_dim against this robot.",
+                    step, arr.size, n, self._action_keys, self._rejected_arity,
+                )
+            return False
+        if not np.isfinite(arr).all():
+            self._rejected_nonfinite += 1
+            if _should_log(self._rejected_nonfinite):
+                _LOG.error(
+                    "policy action REJECTED at step %d: non-finite values "
+                    "(holding pose; %d rejected so far). The delta clamp cannot "
+                    "catch this — NaN compares False against any limit.",
+                    step, self._rejected_nonfinite,
+                )
+            return False
+        return True
+
     def _send(self, action: np.ndarray) -> float:
         """The single ``send_action`` sink. Every source funnels through here."""
         self._robot.send_action(self._helpers.coerce(action, self._action_keys))
         return time.perf_counter()
 
-    def _flush_schedule(self) -> None:
+    def _flush_schedule(self, *, barrier: bool = False) -> None:
+        """Drop queued policy chunks. With ``barrier=True``, also raise the
+        schedule's merge floor to the client clock's current tick, so an Infer
+        already in flight (stamped before this moment) is rejected when it
+        lands instead of executing pre-takeover actions."""
         try:
+            if barrier:
+                clock = getattr(self._client, "clock", None)
+                if clock is not None:
+                    try:
+                        self._client.schedule.flush(barrier_ts=clock.tick())
+                        return
+                    except TypeError:
+                        pass  # schedule predates barrier support
             self._client.schedule.flush()
         except Exception:
             pass
