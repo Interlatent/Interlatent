@@ -12,18 +12,21 @@ to know:
 2. **It is multi-process and multi-GPU.** The model lives in a ``torchrun``
    sidecar on its own torch/CUDA floor; ``forward()`` is a blocking local
    socket round-trip. See :mod:`dreamzero_sidecar`.
-3. **It emits relative, normalized actions.** Everything else here returns
-   absolute robot-space actions, so we de-normalize against the checkpoint's
-   q99 stats and re-anchor on the proprioceptive state captured with the
-   observation.
+3. **It emits relative actions.** Everything else here returns absolute
+   robot-space actions, so we re-anchor on the proprioceptive state captured
+   with the observation. We do NOT re-scale them: the policy's own eval
+   transform already applied the inverse normalization from
+   ``experiment_cfg/metadata.json`` before returning. See the note where the
+   de-normalization step used to be.
 4. **Its chunk is expressed at the checkpoint's own control rate**, not the
    node's. A DROID-lineage chunk is 24 steps at 15 Hz; a 30 Hz node consuming
    it verbatim plays the trajectory at double speed.
 
 Nothing in this file may hardcode DROID's numbers. The horizon, fps, action
-dimension, camera slots and normalization stats all come from the sidecar's
-declared contract, because a fine-tune can differ from the weights it derives
-from — which is the entire point of making fine-tunes selectable by
+dimension and camera slots all come from the sidecar's declared contract —
+which the sidecar reads from ``experiment_cfg/metadata.json``, not
+``config.json`` — because a fine-tune can differ from the weights it derives
+from, which is the entire point of making fine-tunes selectable by
 ``policy_uri``.
 
 There is no RTC in-painting here: DreamZero exposes nothing equivalent to
@@ -68,12 +71,22 @@ def is_dreamzero(policy_uri: str, config: Optional[dict] = None) -> bool:
     misses ``myorg/my-dreamzero-ft`` and false-positives on anything with
     "dream" in the name. The config is authoritative; the URI is only a hint
     used when no config could be fetched at all.
+
+    Keyed on the Hydra ``_target_`` of the action head / backbone, because that
+    is the only field that actually names the family. A real DreamZero-DROID
+    config says ``model_type: "vla"`` and ``architectures: ["VLA"]`` — shared
+    with GR00T N1.5, which is the same ``groot`` codebase — so neither can
+    discriminate. The instantiation targets can:
+    ``groot.vla.model.dreamzero.action_head...`` vs ``...model.n1_5...``.
+    A fine-tune inherits its head class, so this survives one.
     """
+    for block in ("action_head_cfg", "backbone_cfg"):
+        cfg = (config or {}).get(block)
+        if isinstance(cfg, dict) and "model.dreamzero" in str(cfg.get("_target_") or ""):
+            return True
     if config:
         model_type = str(config.get("model_type") or config.get("type") or "").lower()
         if "dreamzero" in model_type or "world_action" in model_type:
-            return True
-        if config.get("action_head") and config.get("video_backbone"):
             return True
     return False
 
@@ -156,7 +169,6 @@ class DreamZeroBackend:
         self._horizon = int(contract.get("horizon") or 0)
         self.action_dim = int(action_dim or contract.get("action_dim") or 0)
         self._camera_slots = list(contract.get("camera_slots") or [])
-        self._stats = self._load_stats(contract)
 
         # What we advertise is the *resampled* width, because that is what the
         # client will pace against — the OpenSessionResponse carries this
@@ -205,26 +217,23 @@ class DreamZeroBackend:
         log.info("Fetching DreamZero checkpoint %s (this is ~46 GB)", policy_uri)
         return snapshot_download(policy_uri)
 
-    def _load_stats(self, contract: dict) -> Optional[dict]:
-        """Per-key relative-action normalization stats (q01/q99).
-
-        Ships with the checkpoint as ``relative_stats_dreamzero.json``. Without
-        it the model's output cannot be turned back into joint units, so a
-        missing file is fatal rather than a silently-unnormalized chunk.
-        """
-        stats = contract.get("relative_stats")
-        if stats:
-            return stats
-        path = contract.get("relative_stats_path")
-        if path and os.path.exists(path):
-            with open(path) as fh:
-                return json.load(fh)
-        raise SidecarError(
-            "Checkpoint declares no relative action stats "
-            "(relative_stats_dreamzero.json). Without them the model's "
-            "normalized output cannot be converted to joint units — refusing "
-            "to run rather than command an unnormalized chunk."
-        )
+    # NOTE: there is deliberately no de-normalization step here.
+    #
+    # An earlier draft loaded ``relative_stats_dreamzero.json`` and undid a
+    # q01/q99 min-max normalization. No such file exists in the checkpoint,
+    # and no such step is needed: a ``groot`` checkpoint keeps its statistics
+    # in ``experiment_cfg/metadata.json``, and the policy's own eval transform
+    # applies the inverse before returning. Upstream's serving path does
+    # nothing to the returned actions but concatenate the sub-keys, so
+    # re-applying it here would double-normalize a chunk that is already in
+    # joint units — plausible-looking and wrong.
+    #
+    # The relative -> absolute anchoring below is a SEPARATE question and is
+    # kept: the DROID checkpoints train on ``droid_relative``, and the action
+    # statistics are delta-shaped (joint_position mean about 0, q01/q99 about
+    # +/-0.5 rad against +/-2.4 rad limits). That is strong evidence, not
+    # proof — the numeric oracle run against upstream's own server is what
+    # settles sign and frame convention.
 
     # -- session lifecycle ----------------------------------------------
 
@@ -374,7 +383,7 @@ class DreamZeroBackend:
         # arm is stationary while inference runs, so that anchor is still valid
         # when the chunk lands — which is the second reason sync mode is a
         # correctness requirement and not just a latency workaround.
-        rel = self._denormalize(raw)
+        rel = raw
         absolute = state[None, : rel.shape[1]] + rel
 
         chunk = _resample(absolute, self._src_fps, self._node_fps)
@@ -410,31 +419,3 @@ class DreamZeroBackend:
             )
         return arr
 
-    def _denormalize(self, raw: np.ndarray) -> np.ndarray:
-        """Undo q99 min-max normalization, per action sub-key.
-
-        The checkpoint's stats are keyed by sub-key (``joint_pos``,
-        ``gripper_pos``, ...) with the index span each occupies, matching the
-        ``--action-keys`` layout its conversion step was given. Normalized
-        values live in [-1, 1].
-        """
-        out = raw.astype(np.float32, copy=True)
-        for key, spec in (self._stats or {}).items():
-            span = spec.get("span") or spec.get("index")
-            if not span or len(span) != 2:
-                continue
-            lo_i, hi_i = int(span[0]), int(span[1])
-            if lo_i >= out.shape[1]:
-                continue
-            hi_i = min(hi_i, out.shape[1])
-            q01 = np.asarray(spec.get("q01"), dtype=np.float32)
-            q99 = np.asarray(spec.get("q99"), dtype=np.float32)
-            if q01.size != hi_i - lo_i or q99.size != hi_i - lo_i:
-                log.warning(
-                    "stats for %r do not match its span (%d..%d); leaving that "
-                    "block unnormalized", key, lo_i, hi_i,
-                )
-                continue
-            span_range = np.where(q99 - q01 == 0, 1.0, q99 - q01)
-            out[:, lo_i:hi_i] = (out[:, lo_i:hi_i] + 1.0) * 0.5 * span_range + q01
-        return out

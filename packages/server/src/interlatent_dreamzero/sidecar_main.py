@@ -25,8 +25,10 @@ Operations:
 * ``ready``   -> ``{ready: bool, contract: {...}}``
 * ``context`` -> append frames to the KV cache; blobs are JPEGs, ordered by
                  the ``cameras`` list of each entry in ``frames``
-* ``infer``   -> ``{shape: [H, D]}`` + one float32 blob of **normalized
-                 relative** actions; de-normalization happens engine-side
+* ``infer``   -> ``{shape: [H, D]}`` + one float32 blob of **relative**
+                 actions in joint units. The policy's own eval transform has
+                 already applied the inverse normalization, so neither side
+                 re-scales; the engine only anchors them on the observed state.
 * ``reset``   -> drop the KV cache
 * ``state``   -> ``{last_seq: int}``, the dedupe high-water mark
 """
@@ -96,31 +98,91 @@ class DreamZeroModel:
     def _read_contract(self) -> dict:
         """The checkpoint's own shape. Never hardcode DROID's numbers here.
 
-        A fine-tune may declare a different horizon, control rate, action
-        width or camera layout than the weights it derives from, and making
-        fine-tunes selectable by ``policy_uri`` is the point of the feature.
+        A ``groot``-framework checkpoint splits this across two files and the
+        interesting half is NOT ``config.json``: that carries only the padded
+        tensor widths (``action_dim: 32`` on DreamZero-DROID, which is the
+        network's internal width, not the 8 an arm is commanded with). Camera
+        slot order, control rate, real modality shapes and the embodiment tag
+        all live in ``experiment_cfg/metadata.json``, keyed by embodiment.
+
+        Fps is the one that fails silently: absent, the engine's resample sees
+        0 and short-circuits, handing a 15 Hz chunk to a 30 Hz node — the
+        trajectory plays at double speed with nothing logged.
         """
-        cfg_path = os.path.join(self.model_path, "config.json")
-        cfg = {}
-        if os.path.isfile(cfg_path):
-            with open(cfg_path) as fh:
-                cfg = json.load(fh)
+        def _read(*parts):
+            path = os.path.join(self.model_path, *parts)
+            if os.path.isfile(path):
+                with open(path) as fh:
+                    return json.load(fh)
+            return {}
 
-        stats = None
-        stats_path = os.path.join(self.model_path, "relative_stats_dreamzero.json")
-        if os.path.isfile(stats_path):
-            with open(stats_path) as fh:
-                stats = json.load(fh)
+        cfg = _read("config.json")
+        experiment = _read("experiment_cfg", "metadata.json")
 
-        # --- integration point 2: the model's declared shape --------------
-        m = self._model
+        tag = next(iter(experiment), None) if experiment else None
+        body = (experiment.get(tag) or {}) if tag else {}
+        modalities = body.get("modalities") or {}
+        video = modalities.get("video") or {}
+
+        slots = [str(k) for k in video]
+        fps = 0.0
+        for spec in video.values():
+            if isinstance(spec, dict) and spec.get("fps"):
+                fps = float(spec["fps"])
+                break
+
+        def _subkeys(group):
+            """Declared ``(sub_key, width)`` for a group, in declaration order."""
+            specs = modalities.get(group)
+            if not isinstance(specs, dict):
+                return []
+            out = []
+            for key, spec in specs.items():
+                if not isinstance(spec, dict):
+                    continue
+                shape = spec.get("shape")
+                if not isinstance(shape, (list, tuple)) or not shape:
+                    continue
+                try:
+                    out.append((str(key), int(shape[0])))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        def _width(subkeys):
+            """Commanded width, or 0 when the checkpoint doesn't pin it down.
+
+            The metadata declares statistics for every sub-key the source
+            dataset carried, not the subset the policy commands; the selection
+            comes from the training run's modality config, which does not ship
+            with the weights. Summing everything is wrong (DROID declares
+            ``cartesian_position`` as an alternative to ``joint_position``, not
+            an addition), and so is falling back to ``config.json``'s number —
+            that is the padded internal width, 32. So resolve the DROID-lineage
+            layout and otherwise report 0, which reads as "unknown" rather than
+            as a width the caller would believe.
+            """
+            hits = [w for key, w in subkeys if key in ("joint_position", "gripper_position")]
+            return sum(hits) if hits else 0
+
+        state_keys = _subkeys("state")
+        action_keys = _subkeys("action")
+        declares = bool(state_keys or action_keys)
+
         return {
-            "horizon": int(getattr(m, "action_horizon", 0) or cfg.get("action_horizon", 0)),
-            "fps": float(getattr(m, "control_fps", 0) or cfg.get("control_fps", 0)),
-            "action_dim": int(getattr(m, "action_dim", 0) or cfg.get("action_dim", 0)),
-            "context_frames": int(getattr(m, "context_frames", 0) or cfg.get("context_frames", 33)),
-            "camera_slots": list(getattr(m, "camera_slots", None) or cfg.get("camera_slots") or []),
-            "relative_stats": stats,
+            "horizon": int(cfg.get("action_horizon", 0) or 0),
+            "fps": fps or float(cfg.get("control_fps", 0) or 0),
+            # Fall back to the padded config width ONLY when there is no
+            # metadata at all. Once the checkpoint declares its modalities an
+            # unresolved width stays 0 — 32 would tell a node to expect 32
+            # joints.
+            "action_dim": _width(action_keys) if declares else int(cfg.get("action_dim", 0) or 0),
+            "state_dim": _width(state_keys),
+            "padded_action_dim": int(cfg.get("action_dim", 0) or 0),
+            "state_keys": [{"key": k, "width": w} for k, w in state_keys],
+            "action_keys": [{"key": k, "width": w} for k, w in action_keys],
+            "embodiment_tag": str(body.get("embodiment_tag") or tag or ""),
+            "camera_slots": slots,
         }
 
     def append_context(self, seq: int, cameras: list, blobs: list) -> None:
@@ -142,12 +204,13 @@ class DreamZeroModel:
             self._frames = self._frames[-keep:]
 
     def infer(self, task: str, state: list):
-        """Return normalized relative actions, shape (H, D), float32.
+        """Return relative actions in joint units, shape (H, D), float32.
 
-        De-normalization is deliberately *not* done here: the engine owns the
-        conversion to joint units so that the stats used are the ones the
-        engine validated at load, rather than a second copy in a second
-        environment that could drift.
+        Nothing is re-scaled on either side of the socket. The policy's own
+        eval transform applies the inverse normalization before returning, so
+        a second pass here (or engine-side) would double-normalize a chunk
+        that is already in joint units. The engine's only remaining job is to
+        anchor these deltas on the observed state.
         """
         import numpy as np
         import torch
@@ -159,7 +222,16 @@ class DreamZeroModel:
                 state=torch.tensor(state, dtype=torch.float32),
             )
         arr = out.detach().float().cpu().numpy() if hasattr(out, "detach") else np.asarray(out)
-        return np.ascontiguousarray(arr.reshape(-1, self.contract["action_dim"]), dtype="float32")
+        # Trust the tensor's own trailing dimension. The contract's action_dim
+        # is 0 whenever the commanded subset was unresolvable (see
+        # _read_contract), and reshaping to a width we merely guessed would
+        # silently re-block the chunk rather than fail.
+        width = int(arr.shape[-1]) if arr.ndim >= 2 else (
+            self.contract.get("action_dim") or self.contract.get("padded_action_dim") or 0
+        )
+        if width <= 0:
+            raise ValueError(f"cannot determine action width from output shape {arr.shape}")
+        return np.ascontiguousarray(arr.reshape(-1, width), dtype="float32")
 
     def reset(self) -> None:
         self._frames.clear()
