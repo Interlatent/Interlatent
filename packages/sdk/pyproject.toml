@@ -182,6 +182,23 @@ dimos = [
   "python-socketio; python_version < '3.13'",
   "starlette; python_version < '3.13'",
   "uvicorn; python_version < '3.13'",
+  # Galaxea's own A1Z SDK, imported by dimos's `hardware/manipulators/
+  # galaxea_a1z/adapter.py` (`import a1z`) and declared by NOBODY: dimos ships
+  # the vendor pin in `bin/hardware/a1z/setup`, a bash script that refuses to
+  # run outside a dimos SOURCE checkout ("must run from a DimOS source
+  # checkout" — it wants pyproject.toml + uv.lock at the repo root). Installing
+  # dimos as a wheel, which is the only thing this extra can do, therefore had
+  # no path to it at all. Same rev that script pins; it is not on PyPI, so the
+  # git URL is the dependency (note the whitespace before `;` — PEP 508 folds a
+  # flush semicolon into the URL).
+  # Only the real-hardware path needs it — the mock/sim `dimos run
+  # interlatent.a1z` runs fine without — but it is small (numpy + python-can +
+  # pin, all of which the dimos stack already carries) and a robot arm that
+  # cannot be driven is not worth the saving.
+  # NOT installed here, per dimos's setup script: `can-utils` on Linux (the
+  # `cansend` binary), and on macOS `brew install libusb` plus the
+  # `gs-usb`/`pyusb` bindings for a USB-CAN adapter. See ROBOT.md.
+  "a1z @ git+https://github.com/userguide-galaxea/GALAXEA-A1Z.git@e931ecd0e25ad35df251097ba42921b3d2fa7224 ; python_version < '3.13'",
 ]
 
 [project.scripts]

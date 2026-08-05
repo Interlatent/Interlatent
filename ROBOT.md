@@ -295,6 +295,19 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image        # terminal 2: the node
 ```
 
+**A1Z on real hardware.** Galaxea's own `a1z` SDK is an undeclared import of
+dimos's `hardware/manipulators/galaxea_a1z/adapter.py`, and dimos ships its pin
+only in `bin/hardware/a1z/setup` — a script that refuses to run outside a dimos
+*source* checkout, so a wheel install could never reach it. The `[dimos]` extra
+now carries that same pinned rev, so `uv sync --extra dimos` is enough. Two
+things it deliberately does **not** install, straight from that setup script:
+`can-utils` on Linux (for `cansend`), and on macOS `brew install libusb` plus
+`uv pip install gs-usb==0.3.1 pyusb==1.3.1` for a USB-CAN adapter. Note also
+that published dimos releases expose A1Z as a *planning model* only — the
+Galaxea driver is not in the installed package's hardware registry — so the
+vendor SDK is necessary but not sufficient for motion; the blueprint
+feature-detects which build you have and falls back to the mock.
+
 **Pin the interpreter when installing this extra.** dimos pins `<3.13`, so the
 `[dimos]` requirements carry a `python_version < '3.13'` marker: on a 3.13+
 environment they resolve to *nothing*, the install "succeeds", and the first

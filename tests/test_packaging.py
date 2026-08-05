@@ -206,6 +206,13 @@ def test_dimos_extra_covers_the_shipped_blueprint():
     extra = data["project"]["optional-dependencies"]["dimos"]
 
     assert any(req.startswith("dimos[manipulation]") for req in extra), extra
+    # ...and `dimos run interlatent.a1z` on real hardware needs Galaxea's own
+    # SDK, which dimos imports (galaxea_a1z/adapter.py) but pins only inside a
+    # bash script that refuses to run outside a dimos source checkout.
+    assert any(req.startswith("a1z @ git+") for req in extra), (
+        "the Galaxea a1z SDK pin is missing from the [dimos] extra — nothing "
+        "else installs it for a wheel-installed dimos"
+    )
     for undeclared in ("python-socketio", "starlette", "uvicorn"):
         assert any(req.startswith(undeclared) for req in extra), (
             f"{undeclared} missing from the [dimos] extra — it is an undeclared "
