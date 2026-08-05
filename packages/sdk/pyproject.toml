@@ -94,9 +94,14 @@ teleop-quic = [
 # "almond-axol==0.1.0 cannot be used", an extra it never asked for. Same reason
 # the [dimos] pins carry the mirror-image `< '3.13'` marker: the two extras'
 # interpreter ranges are disjoint, and only markers tell the resolver that.
+# The SPACE before each `;` is required, not style: PEP 508 grammar is
+# `url_req = name urlspec wsp+ quoted_marker?`, so on a URL requirement (unlike
+# a version one) a semicolon flush against the URL is swallowed INTO the URL.
+# uv parses it leniently; setuptools rejects the file outright ("must be
+# pep508").
 axol = [
-  "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae; python_version >= '3.13'",
-  "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c; python_version >= '3.13'",
+  "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae ; python_version >= '3.13'",
+  "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c ; python_version >= '3.13'",
   "opencv-python-headless>=4.8",
 ]
 

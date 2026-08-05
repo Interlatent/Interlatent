@@ -232,6 +232,20 @@ def test_mutually_exclusive_extras_stay_lockable():
         data = tomllib.load(fh)
     extras = data["project"]["optional-dependencies"]
 
+    # Parse, don't substring-match: a marker appended to a URL requirement
+    # WITHOUT whitespace before the `;` reads as valid TOML and as a correct
+    # marker to the eye, but PEP 508 swallows it into the URL and setuptools
+    # rejects the whole file ("project.optional-dependencies.axol[0] must be
+    # pep508"). uv accepts it, so nothing catches it until an install.
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    for name, reqs in ({"project": data["project"]["dependencies"]} | extras).items():
+        for req in reqs:
+            try:
+                Requirement(req)
+            except InvalidRequirement as exc:
+                raise AssertionError(f"[{name}] {req!r} is not PEP 508: {exc}") from exc
+
     for req in extras["axol"]:
         if req.startswith(("almond-axol", "pyroki")):
             assert "python_version >= '3.13'" in req, (
