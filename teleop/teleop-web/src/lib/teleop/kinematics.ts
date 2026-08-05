@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/kinematics.ts @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 /**
  * Browser-side forward kinematics + geometric Jacobian for a serial arm,
  * from the compact "kinematic spec" the backend exports
@@ -67,18 +66,24 @@ export interface KinematicSpec {
   rot_reach_limit: number;
 }
 
-/** A bimanual bundle's spec: one complete `KinematicSpec` per arm, keyed
- *  under `chains` — the exact shape `export_kinematic_spec_bundle` emits
- *  (engine `retarget/kinematic_spec.py`) and the mirror of the bimanual
- *  `ik_config.json` / teleop-token `ik_hints` shape. */
+/** A chains-wrapped spec: one complete `KinematicSpec` per arm, keyed under
+ *  `chains` — the exact shape `export_kinematic_spec_bundle` emits (engine
+ *  `retarget/kinematic_spec.py`) and the mirror of the `ik_config.json` /
+ *  teleop-token `ik_hints` shape.
+ *
+ *  Both sides are OPTIONAL, and that is load-bearing: single-arm rigs ship
+ *  this same wrapper with only `right` populated (`interlatent_robots/a1z`
+ *  and `so101`, vs `nori`/`yam` which carry both). So the presence of the
+ *  `chains` wrapper does NOT mean bimanual — the number of populated sides
+ *  does. Assuming otherwise dereferences `chains.left` as undefined. */
 export interface KinematicSpecChains {
   version?: number;
-  chains: { left: KinematicSpec; right: KinematicSpec };
+  chains: { left?: KinematicSpec; right?: KinematicSpec };
 }
 
 /** The spec the node serves over the relay uni stream (its installed
- *  `kinematic_spec.json`): flat for a single-arm rig, `chains`-wrapped for a
- *  bimanual one. */
+ *  `kinematic_spec.json`): either flat, or `chains`-wrapped with one or two
+ *  arms populated. */
 export type KinematicSpecBundle = KinematicSpec | KinematicSpecChains;
 
 export function isChainsSpec(s: KinematicSpecBundle): s is KinematicSpecChains {
@@ -87,6 +92,25 @@ export function isChainsSpec(s: KinematicSpecBundle): s is KinematicSpecChains {
     typeof (s as KinematicSpecChains).chains === 'object' &&
     (s as KinematicSpecChains).chains !== null
   );
+}
+
+/** What a spec bundle actually carries, once the `chains` wrapper is resolved.
+ *
+ *  The wrapper's presence does not imply bimanual — see `KinematicSpecChains`.
+ *  The solver build and the mapper build must agree on arm count, and both
+ *  previously re-derived this inline and both got it wrong (dereferencing an
+ *  absent `chains.left`), so the rule lives here. */
+export type ResolvedSpecArms =
+  | { bimanual: true; left: KinematicSpec; right: KinematicSpec }
+  | { bimanual: false; single: KinematicSpec };
+
+export function resolveSpecArms(s: KinematicSpecBundle): ResolvedSpecArms {
+  if (!isChainsSpec(s)) return { bimanual: false, single: s };
+  const { left, right } = s.chains;
+  if (left && right) return { bimanual: true, left, right };
+  const single = right ?? left;
+  if (!single) throw new Error('kinematic spec has a `chains` object with no arm');
+  return { bimanual: false, single };
 }
 
 export interface FkResult {

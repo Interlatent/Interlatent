@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/quicPoseSocket.ts @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 /**
  * WebSocket-shaped shim for the QUIC teleop path.
  *
@@ -29,7 +28,7 @@
  * IK/FK reuse the machine-precision-verified `DlsSolver` + `forwardKinematics`.
  */
 import { QuicTeleopLink } from './webtransport';
-import { KinematicSpecBundle, isChainsSpec } from './kinematics';
+import { KinematicSpecBundle, resolveSpecArms } from './kinematics';
 import { DlsSolver } from './dlsSolver';
 import { Quat, Vec3 } from './quat';
 
@@ -223,13 +222,19 @@ export class QuicPoseSocket {
   setSpec(spec: KinematicSpecBundle): void {
     if (this.specReceived) return;
     try {
-      if (isChainsSpec(spec)) {
+      // Arm count comes from the sides actually present, not from the
+      // `chains` wrapper existing: single-arm rigs (a1z, so101) ship the
+      // wrapper with only `right`, and building both sides unconditionally
+      // dereferenced an undefined `chains.left` and threw before any solver
+      // was set — surfacing to the operator as "QUIC connection failed".
+      const arms = resolveSpecArms(spec);
+      if (arms.bimanual) {
         this.chainSolvers = {
-          left: new DlsSolver(spec.chains.left),
-          right: new DlsSolver(spec.chains.right),
+          left: new DlsSolver(arms.left),
+          right: new DlsSolver(arms.right),
         };
       } else {
-        this.solver = new DlsSolver(spec);
+        this.solver = new DlsSolver(arms.single);
       }
     } catch (e) {
       this.onerror?.(e);

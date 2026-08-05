@@ -514,7 +514,10 @@ export function VRTeleopOverlay({
         const chains = src.chains as
           | { left?: unknown; right?: unknown }
           | undefined;
-        if (chains) {
+        // A `chains` wrapper alone does not mean bimanual: single-arm rigs
+        // (a1z, so101) ship it with only `right` populated. Both sides must
+        // be present, or this drives a second arm the robot does not have.
+        if (chains && chains.left && chains.right) {
           isBimanualRef.current = true;
           setIsBimanual(true);
           mapperLeftRef.current = buildMapper(
@@ -524,7 +527,9 @@ export function VRTeleopOverlay({
             chains.right as Record<string, unknown>, rCalibRightRef,
           );
         } else {
-          mapperRef.current = buildMapper(src, rCalibRef);
+          const single = (chains ? (chains.right ?? chains.left) : src) as
+            Record<string, unknown>;
+          mapperRef.current = buildMapper(single, rCalibRef);
         }
       };
 
