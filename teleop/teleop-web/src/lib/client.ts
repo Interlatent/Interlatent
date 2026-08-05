@@ -31,13 +31,16 @@ export function getApiBase(): string {
 }
 
 /**
- * The hosted backend's CORS allowlist has no dev origins on it, so calling
- * https://interlatent.com straight from http://localhost:3100 fails the
- * preflight (`400 Disallowed CORS origin`). Under `vite dev` we return the
- * empty string instead — a same-origin URL that the dev server's /api proxy
- * (vite.config.ts) forwards to the same backend, server-side, where CORS
- * does not apply. A base pointing anywhere else (self-hosted backend) is
- * left alone: that deployment controls its own allowlist.
+ * Under `vite dev` we return the empty string instead of the hosted base — a
+ * same-origin URL that the dev server's /api proxy (vite.config.ts) forwards to
+ * the same backend, server-side, where CORS does not apply. A base pointing
+ * anywhere else (self-hosted backend) is left alone.
+ *
+ * The hosted deployment's teleop CORS policy now defaults to allowing any
+ * origin on the paths this app calls, so a direct dev-origin call would very
+ * likely work too — but the proxy keeps dev working against a deployment that
+ * has narrowed `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which
+ * would otherwise fail the preflight with `400 Disallowed CORS origin`.
  */
 function resolveApiBase(base: string): string {
   return import.meta.env.DEV && base === DEFAULT_API_BASE ? '' : base;

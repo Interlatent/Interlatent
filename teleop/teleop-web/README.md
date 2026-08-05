@@ -50,12 +50,18 @@ the client routes the default API base through that proxy automatically, so
 local dev needs no backend change. Override the proxy target with
 `TELEOP_API_TARGET=http://localhost:8000 npm run dev`.
 
-The built app has no proxy: whatever origin you serve `dist/` from (the
-HTTPS host the headset loads) must be added to the backend's CORS allowlist
-— `INTERLATENT_TELEOP_CORS_ORIGINS` on the hosted deployment. That is a
-*path-scoped* allowlist covering exactly the routes this app calls (the
-pickers, the two token mints, and recording create/stop); the global
-`INTERLATENT_CORS_ORIGINS` stays tight for the dashboard.
+The built app has no proxy, and needs none: the backend's teleop CORS policy
+(`INTERLATENT_TELEOP_CORS_ORIGINS`, default `["*"]`) admits any origin on
+exactly the routes this app calls — the pickers, the two token mints, and
+recording create/stop. So you can serve `dist/` from any HTTPS host and point a
+headset at it without registering that host anywhere first.
+
+That policy is *path-scoped*: the global `INTERLATENT_CORS_ORIGINS` stays tight
+for everything else, and the wildcard is safe on this path set because the
+origin was never the access control there — every route is authenticated by an
+explicit `x-api-key` header and the policy is uncredentialed, so an allowed
+origin gains nothing without your key. A deployment that wants the origin back
+as a second factor sets `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list.
 
 ## Configuration
 
