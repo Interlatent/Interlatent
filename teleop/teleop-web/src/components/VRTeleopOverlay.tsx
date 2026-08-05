@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { TeleopTokenOut, useTeleopToken } from '../lib/client';
 import { ClutchPoseMapper } from '../lib/teleop/clutchPoseMapper';
 import { QuicPoseSocket } from '../lib/teleop/quicPoseSocket';
+import { describeWtError } from '../lib/teleop/webtransport';
 import {
   Mat3,
   Quat,
@@ -644,8 +645,13 @@ export function VRTeleopOverlay({
           // non-JSON or unknown message — ignore
         }
       };
-      const handleClose = () => {
-        if (!cancelled) setStatus('idle');
+      const handleClose = (reason?: string) => {
+        if (cancelled) return;
+        // A failed open fires onerror THEN onclose. Resetting to 'idle'
+        // unconditionally wiped the 'error' status one tick after it was set,
+        // leaving the button stuck on 'Connecting…' forever.
+        setStatus((s) => (s === 'error' ? s : 'idle'));
+        if (reason) setError((prev) => prev ?? `QUIC session closed — ${reason}`);
       };
 
       // QUIC transport: browser-side IK over WebTransport. The kinematic spec
@@ -691,11 +697,14 @@ export function VRTeleopOverlay({
           maybeReady();
         };
         shim.onmessage = (ev) => handleData(ev.data);
-        shim.onclose = () => handleClose();
-        shim.onerror = () => {
+        shim.onclose = (ev) => handleClose(ev?.reason);
+        shim.onerror = (e) => {
           if (!cancelled) {
             setStatus('error');
-            setError('QUIC connection failed');
+            // Keep the browser's reason. 'QUIC connection failed' on its own
+            // cannot distinguish a blocked UDP path from a rejected token
+            // from a relay that closed the session after accepting it.
+            setError(`QUIC connection failed — ${describeWtError(e)}`);
           }
         };
 

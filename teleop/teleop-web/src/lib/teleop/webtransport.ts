@@ -39,6 +39,25 @@ const MAX_STREAM_BYTES = 512 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** `String(err)` on a WebTransportError yields a bare "WebTransportError:
+ *  Opening handshake failed." and drops the two fields that actually localise
+ *  the fault: `source` ('session' = the QUIC/HTTP-3 layer, 'stream' = after the
+ *  session was up) and `streamErrorCode` (the relay's application close code,
+ *  null when the connection never got that far). Keep them. */
+export function describeWtError(e: unknown): string {
+  if (!e || typeof e !== 'object') return String(e);
+  const err = e as {
+    name?: string;
+    message?: string;
+    source?: string;
+    streamErrorCode?: number | null;
+  };
+  const bits = [`${err.name ?? 'Error'}: ${err.message ?? String(e)}`];
+  if (err.source) bits.push(`source=${err.source}`);
+  if (err.streamErrorCode != null) bits.push(`streamErrorCode=${err.streamErrorCode}`);
+  return bits.join(' ');
+}
+
 export class QuicTeleopLink {
   private wt: WebTransport | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -59,13 +78,26 @@ export class QuicTeleopLink {
 
     const wt = new WT(url);
     this.wt = wt;
-    await wt.ready;
+    // Subscribe to `closed` BEFORE awaiting `ready`. A failed handshake rejects
+    // both, and `closed` usually carries the more specific reason of the two —
+    // subscribing after the await lost it *and* left an unhandled rejection.
+    wt.closed
+      .then(() => this.handleClosed('closed'))
+      .catch((e: unknown) => this.handleClosed(describeWtError(e)));
+    try {
+      await wt.ready;
+    } catch (e) {
+      // The only place the browser's real reason exists. Every layer above
+      // this one collapses it to a generic string, so log it here or it is
+      // gone: nothing else in the app writes to console.error.
+      const detail = describeWtError(e);
+      // eslint-disable-next-line no-console
+      console.error(`[teleop:quic] WebTransport handshake failed for ${url}:`, detail, e);
+      throw new Error(detail);
+    }
     this.writer = wt.datagrams.writable.getWriter();
     this.readLoop(wt.datagrams.readable.getReader());
     this.readUniStreams(wt);
-    wt.closed
-      .then(() => this.handleClosed('closed'))
-      .catch((e: unknown) => this.handleClosed(String(e)));
   }
 
   /** Accept-loop for inbound uni streams (video frames). Each stream is read

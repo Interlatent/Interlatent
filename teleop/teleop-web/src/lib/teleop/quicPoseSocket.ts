@@ -203,8 +203,12 @@ export class QuicPoseSocket {
       .catch((e) => {
         this.readyState = 3;
         this.stopSpecRequests();
+        // `onerror` is optional and the overlay's handler discards its
+        // argument, so without this the reason dies here silently.
+        // eslint-disable-next-line no-console
+        console.error('[teleop:quic] session failed to open:', e);
         this.onerror?.(e);
-        this.onclose?.({ reason: String(e) });
+        this.onclose?.({ reason: e instanceof Error ? e.message : String(e) });
       });
   }
 
