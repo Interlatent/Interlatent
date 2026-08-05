@@ -57,12 +57,21 @@ export function saveSettings(apiBase: string, apiKey: string): void {
 // Fetch core
 // ---------------------------------------------------------------------------
 
-async function request<T>(method: 'GET' | 'POST', path: string): Promise<T> {
+async function request<T>(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: unknown,
+): Promise<T> {
   const headers: Record<string, string> = { 'x-api-key': getApiKey() };
+  // Only set content-type when there is a body: it is on the backend's teleop
+  // CORS `allow_headers`, but sending it on a bodyless GET just widens the
+  // preflight for nothing.
+  if (body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${getApiBase()}${path}`, {
     method,
     headers,
     cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw await toError(res);
   return res.json() as Promise<T>;
@@ -170,7 +179,44 @@ export interface TeleopRecordingOut {
   task?: string;
   robot_kind?: string | null;
   created_at?: string;
+  /** Set when status is `failed` — the reason, worth showing verbatim. */
+  error?: string | null;
   [key: string]: unknown;
+}
+
+/** Loose subset of the backend's NodeOut (site/app/models/schemas.py). The
+ *  create form needs `online` and `current_session_id` to grey out nodes that
+ *  cannot take a recording, and shows `robot_type` so you can tell two nodes
+ *  apart. `online` is derived server-side from the heartbeat window (~30s). */
+export interface NodeOut {
+  id: string;
+  name: string;
+  online?: boolean;
+  status?: string;
+  robot_type?: string | null;
+  /** Non-null while the node is running an inference session. */
+  current_session_id?: string | null;
+  [key: string]: unknown;
+}
+
+/** Loose subset of the backend's EnvironmentOut. Note the id field is
+ *  `environment_id`, which is also the name the create body wants. */
+export interface EnvironmentOut {
+  environment_id: string;
+  slug: string;
+  display_name: string;
+  episode_count?: number;
+  [key: string]: unknown;
+}
+
+/** Body for `POST /api/v1/teleop-recordings` (TeleopRecordingCreate). Only
+ *  the two ids are required; `fps` (30) and `idle_timeout_s` (300) are left to
+ *  the server defaults, and `task` falls back to the environment's
+ *  task_description when omitted. */
+export interface TeleopRecordingCreate {
+  environment_id: string;
+  node_id: string;
+  task?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +229,54 @@ export function listSessions(): Promise<InferenceSessionOut[]> {
 
 export function listTeleopRecordings(): Promise<TeleopRecordingOut[]> {
   return request<TeleopRecordingOut[]>('GET', '/api/v1/teleop-recordings');
+}
+
+export function listNodes(): Promise<NodeOut[]> {
+  return request<NodeOut[]>('GET', '/api/v1/nodes');
+}
+
+export function listEnvironments(): Promise<EnvironmentOut[]> {
+  return request<EnvironmentOut[]>('GET', '/api/v1/environments');
+}
+
+/**
+ * Start a teleop recording. Unlike an inference session this needs no GPU/pod
+ * choice — the backend dispatches an ephemeral recording job itself — so a
+ * node and an environment are the whole input.
+ *
+ * The returned recording is `provisioning`; it flips to `active` only once
+ * that job reports its ingest endpoint, so a caller wanting to drive it must
+ * wait for `active` (see App's pending-recording poll).
+ *
+ * Every precondition is enforced server-side and comes back as a readable
+ * `detail` — 409 for an offline or already-busy node, 503 when the deployment
+ * has no QUIC relay configured, 502 when the recording job won't start — so
+ * callers can surface `Error.message` as-is.
+ */
+export function createTeleopRecording(
+  body: TeleopRecordingCreate,
+): Promise<TeleopRecordingOut> {
+  // Omit an empty task rather than sending "": the backend then falls back to
+  // the environment's task_description (same convention as the `interlatent`
+  // CLI's session start).
+  const task = (body.task ?? '').trim();
+  return request<TeleopRecordingOut>('POST', '/api/v1/teleop-recordings', {
+    environment_id: body.environment_id,
+    node_id: body.node_id,
+    ...(task ? { task } : {}),
+  });
+}
+
+/** Ask the backend to wind the recording down (status → `stopping`). The node
+ *  drops the assignment on its next poll and the episode uploads. */
+export function stopTeleopRecording(
+  recordingId: string,
+): Promise<TeleopRecordingOut> {
+  return request<TeleopRecordingOut>(
+    'POST',
+    `/api/v1/teleop-recordings/${encodeURIComponent(recordingId)}/stop`,
+    {},
+  );
 }
 
 export function mintSessionTeleopToken(sessionId: string): Promise<TeleopTokenOut> {

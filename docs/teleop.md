@@ -60,8 +60,10 @@ to install on the operator's machine beyond a headset's browser.
    `interlatent[teleop-quic]` extra) and the robot kind's data shipped with
    its `interlatent` version — the node is the sole source of the kinematic
    spec the browser solves against.
-2. **Start a teleop recording** from the dashboard. The node picks it up
-   through its normal assignment poll.
+2. **Start a teleop recording** — from the dashboard, or from the teleop web
+   app itself (pick a node + environment and hit *Start recording*; it needs no
+   GPU or policy choice, and enters VR on its own once the recording goes
+   live). Either way the node picks it up through its normal assignment poll.
 3. **Enter VR:** open the session page in the headset's browser (Meta Quest)
    and *Enter VR*. The **grip button is a clutch**: the robot follows your hand
    only while it is held, anchored where the robot's end-effector actually is
@@ -176,8 +178,9 @@ Finally, register the kind's `RobotProfile` in
 
 A **teleop recording** is a full VR-teleop session with no policy loaded — the
 human drives end-to-end and the episode is captured for training. Start one
-from the dashboard; the node picks it up through the same assignment poll as an
-inference session and runs its normal loop with the policy disabled. Engaged
+from the dashboard or from the teleop web app; the node picks it up through the
+same assignment poll as an inference session and runs its normal loop with the
+policy disabled. Engaged
 ticks record `control_source="teleop"`; disengaged ticks hold pose and record
 `control_source="hold"` (keeping the episode continuous). Stopping the
 recording uploads it through the standard dataset path — it lands in the same

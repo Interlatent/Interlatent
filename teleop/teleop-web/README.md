@@ -1,10 +1,22 @@
 # interlatent-teleop-web
 
 A standalone, open-source **WebXR VR teleop producer** for Interlatent robot
-sessions. Open it in the Meta Quest Browser, paste your `ilat_…` API key,
-pick an active inference session (or teleop recording), and enter VR: the
-headset's controllers drive the robot's end effector through the hosted
-WebTransport/QUIC relay — grip is the clutch/deadman, trigger is the gripper.
+sessions. Open it in the Meta Quest Browser, paste your `ilat_…` API key, and
+enter VR: the headset's controllers drive the robot's end effector through the
+hosted WebTransport/QUIC relay — grip is the clutch/deadman, trigger is the
+gripper.
+
+Two ways in:
+
+- **Start your own recording.** Pick a node and an environment and hit *Start
+  recording*. A teleop recording needs no GPU/policy choice — the backend
+  provisions its own recording compute — so those two dropdowns are the whole
+  form. The app waits out provisioning and enters VR when the recording goes
+  live, and offers *Stop* when you're done. This is the full capture cycle
+  without taking the headset off.
+- **Join something already running.** Any active inference session is joinable
+  as a live intervention (the human takes over from the running policy, and
+  those steps record as DAgger corrections).
 
 No robot data ships with the app: the token mint returns the relay URL, and
 the robot's kinematic spec is served by the node itself over the relay.
@@ -40,7 +52,10 @@ local dev needs no backend change. Override the proxy target with
 
 The built app has no proxy: whatever origin you serve `dist/` from (the
 HTTPS host the headset loads) must be added to the backend's CORS allowlist
-— `INTERLATENT_CORS_ORIGINS` on the hosted deployment.
+— `INTERLATENT_TELEOP_CORS_ORIGINS` on the hosted deployment. That is a
+*path-scoped* allowlist covering exactly the routes this app calls (the
+pickers, the two token mints, and recording create/stop); the global
+`INTERLATENT_CORS_ORIGINS` stays tight for the dashboard.
 
 ## Configuration
 
@@ -64,4 +79,5 @@ change to the other.
 
 Local pieces (not copies): `src/lib/client.ts` (typed fetch client replacing
 the dashboard's react-query `api.ts`), `src/App.tsx` (session picker +
-settings shell), and the PWA scaffolding.
+settings shell), `src/components/StartRecordingPanel.tsx` (the create form),
+and the PWA scaffolding.
