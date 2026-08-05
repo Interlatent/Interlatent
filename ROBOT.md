@@ -295,6 +295,13 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image        # terminal 2: the node
 ```
 
+**Pin the interpreter when installing this extra.** dimos pins `<3.13`, so the
+`[dimos]` requirements carry a `python_version < '3.13'` marker: on a 3.13+
+environment they resolve to *nothing*, the install "succeeds", and the first
+sign of trouble is `dimos: command not found`. With uv, name the interpreter —
+`uv sync --extra dimos -p 3.12`, or `uv pip install -p 3.12 'interlatent[dimos]'`
+— rather than taking whatever `python3` happens to be.
+
 Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go *before* `run`
 (`dimos --can-port can0 run interlatent.a1z`), not after; `dimos run ...

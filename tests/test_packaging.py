@@ -213,6 +213,56 @@ def test_dimos_extra_covers_the_shipped_blueprint():
         )
 
 
+def test_mutually_exclusive_extras_stay_lockable():
+    """`uv lock` resolves EVERY extra together, universally, across the whole
+    requires-python range — so one unsatisfiable extra makes the project
+    unlockable for people who asked for a different one entirely. That shipped:
+    almond-axol's undeclared >=3.13 floor meant `uv run dimos run
+    interlatent.a1z` (the [dimos] extra, which almond-axol has nothing to do
+    with) died on "almond-axol==0.1.0 cannot be used".
+
+    Two things keep the lock solvable, and both are load-bearing: the [axol]
+    pins carry a python marker matching almond-axol's own floor, and the extras
+    that genuinely cannot share an environment are declared to uv so it forks
+    the resolution instead of failing it."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    extras = data["project"]["optional-dependencies"]
+
+    for req in extras["axol"]:
+        if req.startswith(("almond-axol", "pyroki")):
+            assert "python_version >= '3.13'" in req, (
+                f"{req!r} lost its python marker — almond-axol requires >=3.13 "
+                "while this project supports >=3.11, which makes `uv lock` "
+                "unsatisfiable for every extra, not just [axol]"
+            )
+
+    # Each set = "at most one of these per environment". The driver extras are
+    # pairwise incompatible (python-can, rerun-sdk, interpreter range) and the
+    # lerobot-based ones collide with them on rerun-sdk under 3.11; [lerobot]
+    # and [so101] deliberately land in different sets so they stay combinable.
+    conflicts = [
+        {member["extra"] for member in group}
+        for group in data["tool"]["uv"]["conflicts"]
+    ]
+    for pair in (
+        {"axol", "yam"}, {"axol", "dimos"}, {"yam", "dimos"},
+        {"yam", "lerobot"}, {"dimos", "lerobot"},
+        {"yam", "so101"}, {"dimos", "so101"},
+    ):
+        assert any(pair <= group for group in conflicts), (
+            f"{sorted(pair)} are not declared conflicting extras — they cannot "
+            "resolve together, so `uv lock` fails for the whole project"
+        )
+    assert not any({"lerobot", "so101"} <= group for group in conflicts), (
+        "[lerobot] and [so101] are the same dependency set; declaring them "
+        "conflicting would forbid a combination that resolves fine"
+    )
+
+
 def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
     """The reference stack must retain the hardware-free visual test path:
     DIMOS's planner/manipulation module renders mock coordinator state in

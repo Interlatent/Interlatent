@@ -86,9 +86,17 @@ teleop-quic = [
 # ONLY uv honors. Under pip those bare names fall through to PyPI and fail — pyroki
 # isn't published there ("No matching distribution"). We mirror that git source as a
 # direct URL here (pinned to almond-axol's rev) so this extra also installs under pip.
+# The `python_version >= '3.13'` markers are LOAD-BEARING, and not only for this
+# extra: `uv lock` resolves every extra together, universally, across the whole
+# `requires-python` range. Unmarked, almond-axol's own >=3.13 floor made that
+# resolution unsatisfiable — so ANY `uv lock`/`uv sync`/`uv run` on this project
+# (e.g. installing the [dimos] extra to run `dimos run interlatent.a1z`) died on
+# "almond-axol==0.1.0 cannot be used", an extra it never asked for. Same reason
+# the [dimos] pins carry the mirror-image `< '3.13'` marker: the two extras'
+# interpreter ranges are disjoint, and only markers tell the resolver that.
 axol = [
-  "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae",
-  "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
+  "almond-axol @ git+https://github.com/almond-bot/axol.git@6f226c1db5d702a74596d240d0c78edb17775bae; python_version >= '3.13'",
+  "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c; python_version >= '3.13'",
   "opencv-python-headless>=4.8",
 ]
 
@@ -256,6 +264,35 @@ namespaces = true
 # Note: lerobot ships this same [tool.uv.sources] mechanism but pins to the
 # *CUDA* (cu128) index; the override below keeps SDK installs on the CPU index.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Mutually exclusive extras.
+#
+# `uv lock` resolves ALL extras into one universal lock, so two extras that can
+# never share an environment make the whole project unlockable — including for
+# somebody who only wants a third extra. The three heavy vendor-driver extras
+# are pairwise that way, each for its own reason:
+#   [axol] vs [yam]    — python-can (almond-axol >=4.6.1 vs i2rt ==4.5.0)
+#   [dimos] vs [yam]   — rerun-sdk (dimos ==0.32.0 vs i2rt >=0.32.2)
+#   [axol] vs [dimos]  — disjoint interpreters (>=3.13 vs <3.13)
+# No robot is two of an Almond Axol, an I2RT YAM, and a dimos stack, so listing
+# them as one mutually-exclusive group (at most one per environment) costs
+# nothing and lets uv fork the resolution instead of failing it.
+#
+# [yam] additionally excludes the lerobot-based extras: i2rt wants
+# rerun-sdk>=0.32.2, and on 3.11 (i2rt's own ceiling) the newest installable
+# lerobot is 0.4.x, which pins rerun-sdk<0.27. YAM is a native adapter and
+# needs nothing from lerobot, so this only forbids a combination that was
+# never installable. Everything else ([nori], [turbo], [teleop-quic],
+# [lerobot]+[so101]) stays freely combinable.
+#
+# uv-only — under pip, `interlatent[axol,yam]` remains what it has always
+# been: unsatisfiable.
+[tool.uv]
+conflicts = [
+  [{ extra = "axol" }, { extra = "yam" }, { extra = "dimos" }, { extra = "lerobot" }],
+  [{ extra = "axol" }, { extra = "yam" }, { extra = "dimos" }, { extra = "so101" }],
+]
+
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
