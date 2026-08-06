@@ -50,6 +50,7 @@ def run_control_loop(
     preview_fn: Optional[Callable[[dict], dict]] = None,
     report_features_fn: Optional[Callable[[list, list], bool]] = None,
     extract_fn: Optional[Callable[[dict, list], Any]] = None,
+    context_fn: Optional[Callable[..., None]] = None,
     profiler: Any = None,
 ) -> None:
     """Drive one episode. Returns when ``should_stop()`` or a guard ends it.
@@ -59,6 +60,13 @@ def run_control_loop(
     ``report_features_fn(state_keys, action_keys)`` returns True once accepted.
     Both are supplied by the caller so this module stays free of the wire
     helpers' import weight.
+
+    ``context_fn(obs, now=...)`` samples the observation into a world-model
+    context ring (ADR 0037). It is called on **every** tick, before
+    arbitration, and deliberately not routed through ``capture_fn``: capture
+    is gated on ``outcome.should_record``, which is False while the arm holds
+    waiting for the next action chunk — exactly the window a world model must
+    keep observing. It must never raise; the ring swallows its own errors.
     """
     period = 1.0 / fps if fps > 0 else 1.0 / 30.0
     pre_tick = getattr(robot, "pre_tick", None)
@@ -80,6 +88,14 @@ def run_control_loop(
             # driven through a supervising daemon it doubles as the keep-alive
             # pump's liveness proof, so skipping it would trip a watchdog.
             obs = robot.get_observation()
+
+            # World-model context (ADR 0037). Sampled on every tick, before
+            # arbitration and independently of recording, so the ring keeps a
+            # steady rate through holds, guards and teleop — the camera saw
+            # what it saw regardless of who ends up driving. Self-decimating
+            # and self-silencing; a no-op for policies with no context window.
+            if context_fn is not None:
+                context_fn(obs, now=loop_start)
 
             # Robot-specific pre-flight, before any movement is arbitrated.
             # The bus does the interrupt's discontinuity bookkeeping (flush /

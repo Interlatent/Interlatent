@@ -85,3 +85,39 @@ def test_rejects_nonpositive_params():
         ButterworthLowPass(cutoff_hz=0.0, sample_hz=30.0)
     with pytest.raises(ValueError):
         ButterworthLowPass(cutoff_hz=3.0, sample_hz=0.0)
+
+
+def test_primed_reflects_delay_line_state():
+    f = ButterworthLowPass(cutoff_hz=3.0, sample_hz=30.0)
+    assert not f.primed
+    f.filter(np.array([1.0], dtype=np.float32))
+    assert f.primed
+    f.reset()
+    assert not f.primed
+    f.seed(np.array([2.0], dtype=np.float32))
+    assert f.primed
+
+
+def test_seed_damps_first_sample_toward_seed():
+    # Seeding from the measured pose means the first policy action is
+    # low-passed relative to that pose instead of passing through unchanged.
+    f = ButterworthLowPass(cutoff_hz=3.0, sample_hz=30.0)
+    measured = np.array([0.0], dtype=np.float32)
+    f.seed(measured)
+    first_policy = np.array([10.0], dtype=np.float32)
+    out = f.filter(first_policy)
+    # Damped: strictly between the seed pose and the raw target.
+    assert 0.0 < out[0] < 10.0
+    # And it converges to the target when the input holds steady.
+    for _ in range(60):
+        out = f.filter(first_policy)
+    assert out[0] == pytest.approx(10.0, abs=1e-3)
+
+
+def test_seed_with_shape_change_still_warm_starts():
+    # A seed of the wrong width must not poison the next filter call —
+    # filter() re-warm-starts when the shape differs.
+    f = ButterworthLowPass(cutoff_hz=3.0, sample_hz=30.0)
+    f.seed(np.array([1.0, 2.0], dtype=np.float32))
+    out = f.filter(np.array([5.0], dtype=np.float32))
+    assert out[0] == pytest.approx(5.0)

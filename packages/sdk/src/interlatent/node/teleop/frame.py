@@ -1,28 +1,26 @@
 """The teleop wire frame — the authoritative node-side parser.
 
-A teleop frame is the JSON message a *producer* (the dashboard keyboard overlay
-or the VR bridge) sends over the WebSocket relay to the node. The node owns this
-parser; each producer re-implements the encoder against this contract (the
-contract is duplicated across the WS boundary by design — see ADR 0009 — so the
-node never depends on a producer package).
+A teleop frame is the JSON message a *producer* (the browser VR producer,
+which solves IK locally) sends over the WebTransport/QUIC relay to the node.
+The node owns this parser; each producer re-implements the encoder against
+this contract (the contract is duplicated across the wire boundary by design
+— see ADR 0009 — so the node never depends on a producer package).
 
-Three modes exist on the wire; the node executes two of them
-(`control.py`):
+Three modes exist on the wire; the node executes ``targets`` (`control.py`):
 
-- ``mode="keys"``    — ``held_keys`` is a set of currently-held key strings; the
-                       node integrates them into an absolute joint target
-                       (``keyboard.next_target``). The dashboard keyboard overlay.
+- ``mode="keys"``    — legacy: ``held_keys`` was a set of currently-held key
+                       strings the removed dashboard keyboard overlay sent;
+                       kept on the wire for back-compat decoding only.
 - ``mode="pose"``    — ``ee_pos``/``ee_quat`` is an absolute 6-DoF end-effector
-                       TARGET in the arm-base frame (browser clutch mapper
-                       output) and ``pinch`` a gripper close amount. Consumed by
-                       the POD-side retarget stage in the relay, which solves IK
-                       and forwards ``mode="targets"`` — a pose frame should
-                       never reach the node (ADR 0009, second amendment); if one
-                       does, the node holds pose.
+                       TARGET in the arm-base frame and ``pinch`` a gripper
+                       close amount. The node never solves IK (ADR 0017 —
+                       IK runs in the browser producer); a pose frame reaching
+                       the node means a misconfigured producer, and the node
+                       holds pose.
 - ``mode="targets"`` — ``joint_targets`` is an absolute joint-target vector
                        (``action_features`` order, robot-native units) the
-                       producer or the pod retarget stage already computed.
-                       Routed through the SafetyGate and executed.
+                       producer already computed. Routed through the
+                       SafetyGate and executed.
 
 Back-compat: a frame with no ``mode`` is treated as ``"keys"``, so the existing
 overlay (which sends no ``mode``) keeps working untouched.

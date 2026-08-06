@@ -235,14 +235,16 @@ name     = "my-arm"
 ## Special case: the dimos adapter (the robot is a running stack)
 
 `--robot dimos` ([`adapters/dimos/`](packages/sdk/src/interlatent/adapters/dimos/),
-`interlatent[dimos]`, python 3.11–3.12) inverts the usual shape: there is no motor
+`interlatent[dimos]`, python 3.12 — 3.11 resolves only off linux/x86_64; see
+*Pin the interpreter* below) inverts the usual shape: there is no motor
 driver, because the "vendor SDK" is a **running dimos process**. The adapter joins
 dimos's LCM/Zenoh bus as a peer — `coordinator_joint_state` + camera `Image`
 topics in, `joint_command` out (consumed by a dimos **servo task** that claims
 every joint *including the gripper* — dimos stomps unclaimed grippers back to
 their startup value while streaming).
 
-Two embodiments ship today: `xarm7` (UFACTORY xArm7) and `a1z` (Galaxea A1Z).
+Three embodiments ship today: `xarm7` (UFACTORY xArm7), `xarm6` (UFACTORY
+xArm6) and `a1z` (Galaxea A1Z).
 Unlike every other adapter, a dimos kind's declaration and profile are **not**
 Python literals in `kinds.py`/`robot_profile.py` — they load at import time
 from [`adapters/dimos/robots/<kind>.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/),
@@ -295,6 +297,31 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image        # terminal 2: the node
 ```
 
+**A1Z on real hardware.** Galaxea's own `a1z` SDK is an undeclared import of
+dimos's `hardware/manipulators/galaxea_a1z/adapter.py`, and dimos ships its pin
+only in `bin/hardware/a1z/setup` — a script that refuses to run outside a dimos
+*source* checkout, so a wheel install could never reach it. The `[dimos]` extra
+now carries that same pinned rev, so `uv sync --extra dimos` is enough. Two
+things it deliberately does **not** install, straight from that setup script:
+`can-utils` on Linux (for `cansend`), and on macOS `brew install libusb` plus
+`uv pip install gs-usb==0.3.1 pyusb==1.3.1` for a USB-CAN adapter. Note also
+that published dimos releases expose A1Z as a *planning model* only — the
+Galaxea driver is not in the installed package's hardware registry — so the
+vendor SDK is necessary but not sufficient for motion; the blueprint
+feature-detects which build you have and falls back to the mock.
+
+**Pin the interpreter when installing this extra — 3.12.** dimos pins `<3.13`,
+so the `[dimos]` requirements carry a `python_version < '3.13'` marker: on a
+3.13+ environment they resolve to *nothing*, the install "succeeds", and the
+first sign of trouble is `dimos: command not found`. The other end is just as
+sharp on **linux/x86_64**, the usual robot host: `dimos[manipulation]` requires
+`a750-control` there, and that package publishes a single cp312 manylinux
+x86_64 wheel with no sdist — so on 3.11 the install fails outright with "No
+matching distribution found for a750-control". 3.12 is the only interpreter
+that works on that host. With uv, name it — `uv sync --extra dimos -p 3.12`, or
+`uv pip install -p 3.12 'interlatent[dimos]'` — rather than taking whatever
+`python3` happens to be.
+
 Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go *before* `run`
 (`dimos --can-port can0 run interlatent.a1z`), not after; `dimos run ...
@@ -311,7 +338,7 @@ registry, and the blueprint feature-detects which you have. Real hardware never
 [`interlatent_robots/README.md`](packages/sdk/src/interlatent_robots/README.md))
 that a dimos kind's own TOML data does not supply — a browser-side IK
 descriptor (`kinematic_spec.json`) and its tuning surface (`ik_config.json`).
-`a1z` ships one; `xarm7` does not yet. For `--robot dimos`, the lookup
+`a1z`, `xarm7` and `xarm6` all ship one. For `--robot dimos`, the lookup
 resolves `--robot-arg kind=` (not the literal string `"dimos"`, which the SDK
 never ships data for, by design — it isn't one robot) — see the
 `teleop_robot_kind` resolution in `node/daemon.py`.

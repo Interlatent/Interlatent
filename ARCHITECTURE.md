@@ -7,9 +7,12 @@ A contributor-facing map of how the pieces fit. User-facing docs live in [docs/]
 Big policies can't run on robot compute, and naive request/response inference makes arms
 stutter. Interlatent's answer is **DRTC — Distributed Real-Time Chunking**:
 
+Both ends of that loop live in this repo — `packages/sdk` is the client, `packages/server`
+is the GPU box it talks to. Interlatent's managed boxes run the same server code.
+
 ```
-robot (client)                              managed GPU pod (cloud)
-──────────────                              ──────────────────────
+robot (client)                              GPU box (managed or your own)
+──────────────                              ─────────────────────────────
  sender thread  ── Observation stream ──▶   gRPC inference endpoint
                                               │ decode payload (npz/jpeg)
                                               │ policy forward()
@@ -56,8 +59,11 @@ removed in 2.0.0.
 ### Teleop (VR remote demonstration)
 
 A human drives the robot remotely in VR and every human-driven step is recorded
-(`control_source="teleop"`) — today for policy-less demonstration recordings;
-mid-policy takeover (live intervention) is coming in a future release. The split is **engine on
+— `control_source="teleop"` for policy-less demonstration recordings,
+`control_source="intervention"` for a mid-policy takeover during a hosted
+inference session (engaging teleop preempts the policy; the node keeps
+shadow-stepping the inference client so handing control back costs ≈1 control
+tick). The split is **engine on
 the platform, thin stub on the client** (see
 [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md)):
 
@@ -74,11 +80,39 @@ network): the per-adapter **delta clamp** (`--robot-arg max_step=…`) caps the 
 joint jump for *all* actions — policy and teleop alike — and the `SafetyGate`
 adds workspace/velocity/deadman limits on the teleop path.
 
+### `packages/server` — pip `interlatent-server`, import `interlatent_server` (GPU side)
+
+The other end of the DRTC loop, and the same code Interlatent's hosted boxes run
+([ADR 0023](docs/adr/0023-self-hosted-policy-server-returns.md)). Run it on your own
+CUDA machine and it registers with the dashboard as a self-hosted compute box — see
+[docs/self-hosting.md](docs/self-hosting.md).
+
+| Area | Modules | Role |
+|---|---|---|
+| Entry point | `cli.py` | `interlatent-serve` — mint/persist a box UUID, detect the GPU, register with the dashboard, then serve |
+| Launcher | `serve_gpu.py`, `credentials.py`, `box_status.py` | Warmup, CPU isolation, gRPC bind, identity (hosted admin key vs owner `ilat_` key), status self-reporting |
+| Servicer | `server/transport.py`, `server/chunk_buffer.py`, `server/schedule.py` | The RPCs, the chunk buffer, and RTC in-painting reconstruction |
+| Policy backends | `server/policy_runtime.py`, `server/lerobot_backend.py`, `server/molmoact2_backend.py` | Load and run the policy; `torch`/`lerobot` are imported lazily so a recording-only box needs neither |
+| Auth | `server/auth.py` | Owner-checked `x-api-key` on every RPC, on by default for self-hosted boxes |
+| Recording | `server/recorder.py`, `storage/lerobot_rebuild.py`, `storage/lerobot_live.py` | Ingest `RecordTicks`, build a LeRobot v3.0 dataset (live-encoded, with a rebuild fallback), upload via backend-issued presigned URLs |
+
+The two Python dists share **no** code — they run on different machines and are versioned
+independently. They meet only at `proto/messages.proto`.
+
+### `teleop/teleop-web`
+
+A standalone WebXR PWA: the VR producer for teleoperation. It solves IK in the browser
+and streams absolute joint targets over WebTransport/QUIC to the node. It is a deliberate
+fork of the dashboard's teleop engine rather than a shared package — see its
+[README](teleop/teleop-web/README.md) for the provenance rule (fixes land in both copies).
+
 ### `proto/`
 
-`messages.proto` is the single wire contract between the SDK and the cloud-managed GPU
-pods. Generated stubs are committed in the SDK; regenerate with
-`./proto/gen_proto.sh`. Compatibility rule: additive changes only.
+`messages.proto` is the single wire contract, and the single source of truth: both
+`packages/sdk` and `packages/server` hold *mirrored* copies plus generated stubs, written
+in one pass by `./proto/gen_proto.sh`. Never edit a mirror — `tests/test_proto_sync.py`
+fails the build when one drifts. Compatibility rule: additive changes only. Details in
+[proto/README.md](proto/README.md).
 
 ## Networking
 
@@ -89,11 +123,17 @@ all work — the client merges chunks the same way regardless of the path's late
 
 ## Relationship to Interlatent Cloud
 
-Inference runs on managed GPU pods through the [Interlatent dashboard](https://interlatent.com).
-The client and node speak the gRPC contract in `proto/messages.proto` to the pod, and
-authenticate to the dashboard with an API key (`ilat_…`) to discover pods, pair nodes, and
-drive sessions. Episode recording happens through those hosted sessions (ADR 0022), so
-collection requires an account; the client, node, and protocol themselves stay Apache-2.0.
-Existing stock LeRobot datasets can be imported through the dashboard's HF import. Cloud-only
-capabilities (managed warm GPUs, hosted datasets and dashboard, Robometer reward labeling)
-live in a separate private codebase.
+The [Interlatent dashboard](https://interlatent.com) is the control plane, and stays the
+control plane whichever GPU runs the policy. The client and node speak the gRPC contract
+in `proto/messages.proto` to the box, and authenticate to the dashboard with an API key
+(`ilat_…`) to discover boxes, pair nodes, and drive sessions.
+
+The **serving stack itself is open** (`packages/server`) — a box you provision on the
+dashboard and a box you run yourself execute the same code, differing only in identity
+(a managed system key vs. your own `ilat_` key) and in who pays for the hardware.
+
+Episode recording happens through hosted sessions (ADR 0022), so collection requires an
+account; the client, node, server, and protocol are all Apache-2.0. Existing stock LeRobot
+datasets can be imported through the dashboard's HF import. What remains private is the
+platform around the boxes: provisioning and warm pools, the dataset/canonical store and
+merge pipeline, offline policy improvement, and the annotation stack.

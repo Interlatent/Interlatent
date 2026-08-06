@@ -144,7 +144,11 @@ pip install interlatent
 > pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
 > ```
 > SO-101's Feetech servos additionally need the Feetech servo SDK; if the serial bus won't
-> open, `pip install feetech-servo-sdk`. See each robot's config doc under
+> open, `pip install feetech-servo-sdk`. `[yam]` currently needs a build constraint under
+> plain pip - i2rt pins `ruckig==0.15.3`, whose sdist-only build fails against
+> scikit-build-core >= 0.10 - so either install it with `uv pip install` (uv honors i2rt's
+> own constraint) or pass one: `echo 'scikit-build-core<0.10' > /tmp/c.txt &&
+> PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'`. See each robot's config doc under
 > [Supported robots](#supported-robots) for full host requirements.
 
 **Requires Python 3.11+.**
@@ -316,11 +320,11 @@ host requirements, `--robot-arg` knobs, camera declarations, and worked examples
 | **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
 | **Almond Axol** (dual arm, **unstable beta**) | `axol` | 16 (7 + gripper per side); radians, gripper 0-1 | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
-| **UFACTORY xArm7 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
+| **UFACTORY xArm7 / xArm6 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|xarm6\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
 | Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
 | Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
 
-The SO-101, YAM, Nori, and dimos (`xarm7`/`a1z`) rows are the kinds that ship a
+The SO-101, YAM, Nori, and dimos (`xarm7`/`xarm6`/`a1z`) rows are the kinds that ship a
 **`RobotProfile`** (the full list lives in `_PROFILES` in
 [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py) —
 dimos kinds resolve there too, just loaded from
@@ -365,23 +369,50 @@ start a session. The node picks it up and the arm starts moving under the policy
 | [`06_connect_hosted.py`](examples/06_connect_hosted.py) - the minimal cloud connect | none |
 | [`07_named_behaviors.py`](examples/07_named_behaviors.py) - named behaviors offline | none (fake arm) or a supported arm |
 
+## What's in this repo
+
+Three deliverables, released independently. The whole path from a robot's motors to a
+policy's actions is here — the client, the server it talks to, and the VR producer that
+lets a human take over mid-rollout.
+
+| Path | Ships as | What it is |
+|---|---|---|
+| [`packages/sdk/`](packages/sdk) | `pip install interlatent` | The SDK on this page: the `Robot` contract, adapters, behaviors, the node daemon, and the DRTC client. |
+| [`packages/server/`](packages/server) | `pip install interlatent-server` | The **DRTC policy server** — the same code that runs Interlatent's hosted GPU boxes, so you can run one on your own hardware. See [self-hosting](docs/self-hosting.md). |
+| [`teleop/teleop-web/`](teleop/teleop-web) | static PWA | The **WebXR VR teleop producer**. Open it in a Quest browser to drive a robot's end effector and record corrections. |
+
+Two shared pieces sit above them: [`proto/messages.proto`](proto/README.md) is the single
+source of truth for the DRTC wire protocol (both Python packages mirror it), and
+[`docker/`](docker/README.md) builds the server image.
+
+The SDK and the server both need to be installable on their own — they run on different
+machines, on different hardware, and are versioned separately. Nothing in one imports the
+other; they meet only at the protocol.
+
 ## Open source vs. Interlatent Cloud
 
 This SDK is open source and yours to run, but it's built to plug into the
-[dashboard](https://interlatent.com), which runs inference on managed GPUs and orchestrates
-your pods, nodes, and sessions - so you never operate GPUs, warm pools, or storage.
+[dashboard](https://interlatent.com), which orchestrates your boxes, nodes, and sessions.
+The dashboard is the control plane either way — what's optional is whose GPU runs the
+policy.
 
 | Capability | Open source | [Interlatent](https://interlatent.com) |
 |---|:---:|:---:|
 | One interface + safety model across robots | ✅ | ✅ |
 | Drive robots directly (behaviors, manual moves) | ✅ | ✅ |
 | Robot node daemon + DRTC client | ✅ | ✅ |
-| Run a VLA policy on your robot | - (needs a GPU pod) | ✅ managed warm GPUs, no cold starts |
+| Policy server (DRTC) | ✅ `interlatent-server` on your GPU | ✅ managed warm GPUs, no cold starts |
+| Run a VLA policy on your robot | ✅ bring your own GPU box | ✅ provisioned for you |
+| VR teleoperation + DAgger corrections | ✅ | ✅ |
 | CLI for pods / nodes / sessions | ✅ | ✅ + full dashboard |
 | Hosted, versioned datasets | DIY | ✅ managed, shareable |
 | Auto policy analysis & reports | ❌ | ✅ |
 | GPU autoscaling & warm pools | ❌ | ✅ |
 | Support / SLA | community | ✅ |
+
+A self-hosted box still registers with the dashboard (your API key, your hardware) — see
+[ADR 0023](docs/adr/0023-self-hosted-policy-server-returns.md) for why "hosted control
+plane, BYO compute" rather than a fully standalone mode.
 
 ## Documentation
 
@@ -394,6 +425,8 @@ your pods, nodes, and sessions - so you never operate GPUs, warm pools, or stora
 - [Teleoperation](docs/teleop.md) - drive the robot in VR to collect demonstrations, safety, recordings
 - [Node encoding & GPU acceleration](docs/node-encoding.md) - the JPEG backend chain, Jetson GPUJPEG setup, bandwidth budgeting
 - [Going to cloud](docs/going-to-cloud.md)
+- [Self-hosting the policy server](docs/self-hosting.md) - run `interlatent-server` on your own GPU
+- [The DRTC wire protocol](proto/README.md) - the source of truth, and how to change it
 - [Architecture](ARCHITECTURE.md) - for contributors
 
 ## Contributing

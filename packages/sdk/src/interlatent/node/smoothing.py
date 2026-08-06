@@ -101,6 +101,28 @@ class ButterworthLowPass:
         """
         self._x1 = self._x2 = self._y1 = self._y2 = None
 
+    @property
+    def primed(self) -> bool:
+        """Whether the delay line holds state (i.e. ``filter`` will smooth
+        rather than warm-start from its input)."""
+        return self._x1 is not None
+
+    def seed(self, x: np.ndarray) -> None:
+        """Prime the whole delay line to ``x`` without emitting a sample.
+
+        Used at teleop→policy handback: seeding from the robot's *measured*
+        pose makes the first policy action get low-passed relative to where
+        the human actually left the arm, instead of passing through
+        unfiltered (the warm-start in :meth:`filter` seeds from the first
+        policy action itself, which provides zero damping on exactly the
+        human→policy jump it should be damping).
+        """
+        x = np.asarray(x, dtype=np.float32).reshape(-1)
+        self._x1 = x.copy()
+        self._x2 = x.copy()
+        self._y1 = x.copy()
+        self._y2 = x.copy()
+
     def filter(self, x: np.ndarray) -> np.ndarray:
         """Filter one joint vector and return the smoothed vector (same shape).
 

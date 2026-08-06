@@ -74,3 +74,33 @@ def test_next_action_step_is_cursor():
     sched.merge([sa(0, 1), sa(1, 1), sa(2, 1)])
     sched.pop_next()
     assert sched.next_action_step() == 1
+
+
+def test_flush_barrier_rejects_in_flight_pre_barrier_chunk():
+    # An Infer dispatched before a teleop takeover must not install its
+    # actions after the takeover's barrier flush.
+    sched = ActionSchedule()
+    sched.merge([sa(0, ts=5), sa(1, ts=5)])
+    assert sched.flush(barrier_ts=10) == 2
+    # In-flight chunk stamped before the barrier: rejected entirely.
+    assert sched.merge([sa(1, ts=8), sa(2, ts=8)]) == 0
+    assert sched.queue_depth() == 0
+    # Cursor untouched by the barrier flush.
+    assert sched.cursor() == 0
+
+
+def test_flush_barrier_accepts_newer_chunk():
+    sched = ActionSchedule()
+    sched.flush(barrier_ts=10)
+    assert sched.merge([sa(0, ts=11), sa(1, ts=12)]) == 2
+    assert sched.pop_next().action_step == 0
+
+
+def test_flush_barrier_is_monotonic():
+    # A later flush with a smaller (or absent) barrier never lowers the floor.
+    sched = ActionSchedule()
+    sched.flush(barrier_ts=10)
+    sched.flush(barrier_ts=3)
+    sched.flush()
+    assert sched.merge([sa(0, ts=9)]) == 0
+    assert sched.merge([sa(0, ts=11)]) == 1

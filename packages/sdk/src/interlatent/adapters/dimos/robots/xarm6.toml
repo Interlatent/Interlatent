@@ -1,0 +1,75 @@
+# UFACTORY xArm6 behind a dimos ControlCoordinator.
+#
+# Same shape as xarm7.toml (same vendor, same dimos XArmAdapter, same gripper),
+# one fewer joint -- but NOT a truncation of it: the xArm6 wrist is a different
+# kinematic arrangement, so the per-joint limits below are the xArm6's own, not
+# xarm7's list with an entry dropped. See the J3 note in [profile].
+#
+# Joint names come from dimos's `make_joints("arm", 6)` (dimos/control/
+# components.py) with the hardware id the reference blueprint uses; the
+# gripper is declared separately (`gripper_joints=["arm/gripper"]`) and
+# driven via the coordinator's `set_gripper_position("arm", ...)` RPC, not
+# the joint_command stream directly (though it still rides joint_command --
+# see adapters/dimos/blueprints.py's _servo_task comment).
+name = "xarm6"
+profile_name = "dimos_xarm6"
+dimos_arm_joints = [
+    "arm/joint1", "arm/joint2", "arm/joint3",
+    "arm/joint4", "arm/joint5", "arm/joint6",
+]
+dimos_gripper_joint = "arm/gripper"
+gripper_hardware_id = "arm"
+
+# --- teleop safety profile (node/teleop/robot_profile.py, registered as
+# "dimos_xarm6") ---
+#
+# Units: RADIANS (dimos JointState convention). Position limits are transcribed
+# from dimos's own bundled `xarm_description/urdf/xarm6/xarm6.urdf` <limit>
+# tags, read with packages/sdk/scripts/dimos_profile_gen.py (the documented
+# path -- see ROBOT.md "Grabbing kinematic data from dimos"), and match the
+# UFACTORY xArm6 datasheet ranges -- NOT dimos's XArmAdapter.get_limits()
+# +-2pi placeholder, which is wrong for J2/J3/J5. Order: arm_joint1..6, then
+# gripper.
+#
+# Note J3 = [-3.927, 0.19198] (-225deg..11deg): that is the NEGATIVE MIRROR of
+# xarm7's J4 = [-0.19198, 3.927], not a copy. Sign-flipping it (the obvious
+# transcription slip when working from the xarm7 profile) would put the entire
+# usable elbow range outside the clamp and leave the arm unable to leave its
+# rest pose.
+#
+# Velocity caps: the URDF declares 3.14 rad/s (motor max) on every joint --
+# far too fast for a per-tick clamp that is the ONLY limit in this path (dimos
+# applies none to streamed joint_command), so these are deliberately capped
+# well below (heavier proximal joints tighter, mirroring xarm7's posture and
+# the URDF's own effort tiers: 50/50/32 N.m proximal vs 32/32/20 distal), and
+# should only be widened after reading the `DRTC-DEBUG joints` log on real
+# hardware.
+#
+# Rest pose: dimos's own xarm6 initial pose (`_XARM6_INITIAL_JOINTS_DEG` in
+# dimos/hardware/manipulators/xarm/adapter.py) = [0, -40, -50, 0, 90, 0] deg,
+# converted to radians. Unlike xarm7's near-zero pose this is a genuine
+# elbow-up ready stance, and every element sits inside the limits above.
+# Gripper open.
+[profile]
+joint_limits = [
+    [-6.283185307179586, 6.283185307179586],  # arm_joint1 (full rotation)
+    [-2.059, 2.0944],                          # arm_joint2 (-118deg..120deg)
+    [-3.927, 0.19198],                         # arm_joint3 (-225deg..11deg)
+    [-6.283185307179586, 6.283185307179586],  # arm_joint4 (full rotation)
+    [-1.69297, 3.141592653589793],             # arm_joint5 (-97deg..180deg)
+    [-6.283185307179586, 6.283185307179586],  # arm_joint6 (full rotation)
+    # Gripper: dimos maps the xArm SDK's 0-850 pulse scale (~85mm stroke)
+    # x0.001 into its "meters" convention, so the dimos-side range is
+    # [0, 0.85]. 0 closed, 0.85 open. Same gripper as xarm7. Verify on hardware.
+    [0.0, 0.85],
+]
+max_velocity = [1.0, 1.0, 1.0, 1.5, 1.5, 1.5, 2.0]
+rest_pose = [
+    0.0,
+    -0.6981317007977318,  # -40deg
+    -0.8726646259971648,  # -50deg
+    0.0,
+    1.5707963267948966,   #  90deg
+    0.0,
+    0.85,                 # gripper open
+]

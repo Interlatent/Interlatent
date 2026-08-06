@@ -99,6 +99,39 @@ def test_dimos_blueprint_entry_point_declared():
         data = tomllib.load(fh)
     eps = data["project"]["entry-points"]["dimos.blueprints"]
     assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
+    assert eps["xarm6"] == "interlatent.adapters.dimos.blueprints:xarm6"
+    assert eps["a1z"] == "interlatent.adapters.dimos.blueprints:a1z"
+
+
+def test_every_declared_dimos_kind_has_a_blueprint_entry_point():
+    """A kind's TOML alone makes it selectable with ``--robot-arg kind=`` but
+    gives it no session stack to talk to.
+
+    ``robots/*.toml`` is the kind registry, ``[project.entry-points."dimos.
+    blueprints"]`` is the ``dimos run interlatent.<kind>`` registry, and
+    nothing structural keeps them in step — adding only the TOML yields a kind
+    that configures fine and then fails at connect against whatever stack the
+    operator improvised, which is exactly the silently-ignored-command trap
+    ADR 0018 exists to close. Pin them equal instead.
+    """
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        eps = tomllib.load(fh)["project"]["entry-points"]["dimos.blueprints"]
+
+    robots = (
+        REPO / "packages" / "sdk" / "src" / "interlatent" / "adapters" / "dimos" / "robots"
+    )
+    declared = set()
+    for path in robots.glob("*.toml"):
+        with open(path, "rb") as fh:
+            declared.add(tomllib.load(fh)["name"])
+
+    assert declared == set(eps), (
+        f"kinds declared in robots/*.toml {sorted(declared)} != blueprint entry "
+        f"points {sorted(eps)}"
+    )
 
 
 def test_dimos_blueprints_actually_build_against_the_installed_dimos():
@@ -205,11 +238,82 @@ def test_dimos_extra_covers_the_shipped_blueprint():
     extra = data["project"]["optional-dependencies"]["dimos"]
 
     assert any(req.startswith("dimos[manipulation]") for req in extra), extra
+    # ...and `dimos run interlatent.a1z` on real hardware needs Galaxea's own
+    # SDK, which dimos imports (galaxea_a1z/adapter.py) but pins only inside a
+    # bash script that refuses to run outside a dimos source checkout.
+    assert any(req.startswith("a1z @ git+") for req in extra), (
+        "the Galaxea a1z SDK pin is missing from the [dimos] extra — nothing "
+        "else installs it for a wheel-installed dimos"
+    )
     for undeclared in ("python-socketio", "starlette", "uvicorn"):
         assert any(req.startswith(undeclared) for req in extra), (
             f"{undeclared} missing from the [dimos] extra — it is an undeclared "
             "import of dimos's camera/websocket_vis modules (as of 0.0.14b1)"
         )
+
+
+def test_mutually_exclusive_extras_stay_lockable():
+    """`uv lock` resolves EVERY extra together, universally, across the whole
+    requires-python range — so one unsatisfiable extra makes the project
+    unlockable for people who asked for a different one entirely. That shipped:
+    almond-axol's undeclared >=3.13 floor meant `uv run dimos run
+    interlatent.a1z` (the [dimos] extra, which almond-axol has nothing to do
+    with) died on "almond-axol==0.1.0 cannot be used".
+
+    Two things keep the lock solvable, and both are load-bearing: the [axol]
+    pins carry a python marker matching almond-axol's own floor, and the extras
+    that genuinely cannot share an environment are declared to uv so it forks
+    the resolution instead of failing it."""
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    extras = data["project"]["optional-dependencies"]
+
+    # Parse, don't substring-match: a marker appended to a URL requirement
+    # WITHOUT whitespace before the `;` reads as valid TOML and as a correct
+    # marker to the eye, but PEP 508 swallows it into the URL and setuptools
+    # rejects the whole file ("project.optional-dependencies.axol[0] must be
+    # pep508"). uv accepts it, so nothing catches it until an install.
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    for name, reqs in ({"project": data["project"]["dependencies"]} | extras).items():
+        for req in reqs:
+            try:
+                Requirement(req)
+            except InvalidRequirement as exc:
+                raise AssertionError(f"[{name}] {req!r} is not PEP 508: {exc}") from exc
+
+    for req in extras["axol"]:
+        if req.startswith(("almond-axol", "pyroki")):
+            assert "python_version >= '3.13'" in req, (
+                f"{req!r} lost its python marker — almond-axol requires >=3.13 "
+                "while this project supports >=3.11, which makes `uv lock` "
+                "unsatisfiable for every extra, not just [axol]"
+            )
+
+    # Each set = "at most one of these per environment". The driver extras are
+    # pairwise incompatible (python-can, rerun-sdk, interpreter range) and the
+    # lerobot-based ones collide with them on rerun-sdk under 3.11; [lerobot]
+    # and [so101] deliberately land in different sets so they stay combinable.
+    conflicts = [
+        {member["extra"] for member in group}
+        for group in data["tool"]["uv"]["conflicts"]
+    ]
+    for pair in (
+        {"axol", "yam"}, {"axol", "dimos"}, {"yam", "dimos"},
+        {"yam", "lerobot"}, {"dimos", "lerobot"},
+        {"yam", "so101"}, {"dimos", "so101"},
+    ):
+        assert any(pair <= group for group in conflicts), (
+            f"{sorted(pair)} are not declared conflicting extras — they cannot "
+            "resolve together, so `uv lock` fails for the whole project"
+        )
+    assert not any({"lerobot", "so101"} <= group for group in conflicts), (
+        "[lerobot] and [so101] are the same dependency set; declaring them "
+        "conflicting would forbid a combination that resolves fine"
+    )
 
 
 def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
@@ -298,23 +402,96 @@ def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
         "reaches the planner"
     )
 
-    # 4. And the xarm7 kind reaches that builder with the real model config.
-    xarm7_builder = _function_named(tree, "_build_xarm7")
-    models = [
-        keyword.value
-        for node in ast.walk(xarm7_builder)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == builder.name
-        for keyword in node.keywords
-        if keyword.arg == sanitized.id
-    ]
-    assert len(models) == 1, f"_build_xarm7 must pass one {sanitized.id}= : {models}"
-    assert (
-        isinstance(models[0], ast.Call)
-        and isinstance(models[0].func, ast.Name)
-        and models[0].func.id == "make_xarm7_model_config"
-    ), f"expected make_xarm7_model_config(...), got {ast.dump(models[0])}"
+    # 4. And each vendor kind reaches that builder with its OWN model config —
+    #    xarm6 and xarm7 are near-identical compositions over one shared
+    #    dimos module, so a copy-paste that leaves `make_xarm7_model_config`
+    #    in `_build_xarm6` would build, run, and drive a 6-DOF arm through a
+    #    7-DOF planning model.
+    for kind, expected_factory in (
+        ("xarm7", "make_xarm7_model_config"),
+        ("xarm6", "make_xarm6_model_config"),
+    ):
+        kind_builder = _function_named(tree, f"_build_{kind}")
+        models = [
+            keyword.value
+            for node in ast.walk(kind_builder)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == builder.name
+            for keyword in node.keywords
+            if keyword.arg == sanitized.id
+        ]
+        assert len(models) == 1, (
+            f"_build_{kind} must pass one {sanitized.id}= : {models}"
+        )
+        assert (
+            isinstance(models[0], ast.Call)
+            and isinstance(models[0].func, ast.Name)
+            and models[0].func.id == expected_factory
+        ), f"expected {expected_factory}(...), got {ast.dump(models[0])}"
+
+
+def test_dimos_xarm_builders_bind_their_own_dof_and_vendor_address():
+    """xarm6 and xarm7 are the same composition over one shared dimos module,
+    differing only in DOF and which ``global_config`` address gates real
+    hardware. Both mistakes a copy-paste makes here are silent:
+
+    - wrong DOF -> ``_resolve_hardware`` builds a mock/real component with the
+      other arm's joint count, and the adapter's connect-time verification
+      fails against a kind TOML that was right all along;
+    - wrong address field -> ``--xarm7-ip`` would decide whether an xArm6
+      session binds real motors or a mock, so setting the correct
+      ``--xarm6-ip`` silently downgrades to mock hardware.
+
+    Neither shows up as an import error, so pin them structurally.
+    """
+    blueprint = (
+        REPO / "packages" / "sdk" / "src" / "interlatent" / "adapters" / "dimos"
+        / "blueprints.py"
+    )
+    tree = ast.parse(blueprint.read_text(encoding="utf-8"))
+
+    for kind, dof in (("xarm7", 7), ("xarm6", 6)):
+        fn = _function_named(tree, f"_build_{kind}")
+        resolve_calls = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_resolve_hardware"
+        ]
+        assert len(resolve_calls) == 1, f"_build_{kind}: {resolve_calls}"
+        call = resolve_calls[0]
+
+        # DOF is the third positional arg (real_factory, hw_id, dof).
+        assert len(call.args) == 3, ast.dump(call)
+        assert isinstance(call.args[2], ast.Constant) and call.args[2].value == dof, (
+            f"_build_{kind} must pass dof={dof}, got {ast.dump(call.args[2])}"
+        )
+
+        # And the address gate reads THIS vendor's own global_config field.
+        gate = [kw.value for kw in call.keywords if kw.arg == "address_configured"]
+        assert len(gate) == 1, f"_build_{kind} must gate on address_configured"
+        attrs = {
+            node.attr for node in ast.walk(gate[0]) if isinstance(node, ast.Attribute)
+        }
+        assert f"{kind}_ip" in attrs, (
+            f"_build_{kind} must gate real hardware on global_config.{kind}_ip, "
+            f"saw {sorted(attrs)}"
+        )
+
+        # The vendor symbols it imports must be that kind's, not the sibling's.
+        imported = {
+            alias.name
+            for node in ast.walk(fn)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert f"{kind}_hardware" in imported, imported
+        sibling = "xarm6" if kind == "xarm7" else "xarm7"
+        assert not any(sibling in name for name in imported), (
+            f"_build_{kind} imports {sibling} symbols: {sorted(imported)}"
+        )
 
 
 def test_dimos_native_loop_registered():

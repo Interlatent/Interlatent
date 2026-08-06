@@ -19,7 +19,8 @@ The long-running `interlatent-node` daemon on the robot. It pairs to the account
 with an API key, polls the dashboard, and converges to whatever inference session
 the dashboard assigns it. The DRTC GPU endpoint is provided per-session by the
 dashboard. _Avoid_: calling this a "coordinator" — there is no self-hosted control
-plane; the dashboard is the control plane.
+plane; the dashboard is the control plane (the *compute* may be self-hosted — see
+**GPU pod** — but session assignment always comes from the dashboard).
 
 **Session**:
 A live binding of a node (or a hand-written `connect_drtc()` loop) to a policy URI
@@ -28,9 +29,13 @@ running on a managed **GPU pod**. Created from the dashboard or via
 DRTC link and triggers any recorded dataset to be built/published.
 
 **GPU pod**:
-A managed cloud GPU that loads a policy and serves action chunks over the DRTC
-gRPC protocol. Pods are provisioned and warm-pooled by the dashboard, not
-self-hosted. List the pods available to your account with `interlatent gpus ls`.
+A GPU box that loads a policy and serves action chunks over the DRTC gRPC
+protocol. Two flavors, one protocol: **managed** pods the dashboard provisions
+and warm-pools, and **self-hosted** pods — your own hardware running
+`interlatent-serve` from the `interlatent-server` dist (`packages/server/`),
+registered to your account with your API key (see `docs/self-hosting.md`).
+Either way the dashboard assigns sessions and the node dials the pod directly.
+List the pods available to your account with `interlatent gpus ls`.
 
 **Preflight**:
 A non-destructive connectivity check (`interlatent-preflight`) that opens a real
@@ -141,8 +146,10 @@ independent.
 
 **Teleop receiver stub**:
 The node-side half of hosted VR teleop (`interlatent.node.teleop`) — remote
-human demonstration today; mid-policy takeover (live intervention) is coming in
-a future release. A
+human demonstration, and mid-policy takeover (live **intervention**: engaging
+teleop while a policy session runs preempts the policy and records
+`control_source="intervention"`; the node shadow-steps the client so handback
+is ≈1 control tick — ADR 0034 in the platform repo). A
 `TeleopChannel` opens a channel to the hosted relay and decodes `TeleopFrame`s;
 the control loop applies engaged `mode="targets"` frames (absolute joint vectors
 the **platform** already computed) through the **SafetyGate** before driving the
@@ -254,7 +261,9 @@ rebuilt into `annotation.interlatent.control_source`.
 
 **Dimos adapter**:
 Vendor adapter `interlatent.adapters.dimos` (`--robot dimos`,
-`interlatent[dimos]`, python 3.11–3.12) for robots managed by a **running
+`interlatent[dimos]`, python 3.12 — 3.11 resolves only off linux/x86_64, where
+`dimos[manipulation]`'s `a750-control` is cp312-wheel-only; see ROBOT.md) for
+robots managed by a **running
 [dimos](https://github.com/dimensionalOS/dimos) stack**. Unlike every other
 adapter there is no motor driver: the adapter joins dimos's LCM/Zenoh bus as an
 **external peer** — `coordinator_joint_state` + camera topics in,

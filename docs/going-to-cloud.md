@@ -1,11 +1,15 @@
 # Going to cloud
 
-Interlatent runs inference on managed cloud GPU pods through the
-[Interlatent dashboard](https://interlatent.com). The robot-side stack in this repo is
-open source and yours to run; the dashboard brings the compute, storage, and labeling.
+Interlatent runs inference on GPU pods coordinated through the
+[Interlatent dashboard](https://interlatent.com) — managed pods the dashboard provisions,
+or **your own GPU** running the open-source [`interlatent-server`](self-hosting.md)
+(it registers with the dashboard and behaves identically). The robot-side stack in this
+repo is open source and yours to run; the dashboard brings the control plane, storage,
+and labeling.
 
 - **"I don't own a GPU that serves Pi0 at low latency."** Managed pods run on warm pools —
-  no box to rent, no cold starts, no torch.compile babysitting.
+  no box to rent, no cold starts, no torch.compile babysitting. (Own a GPU after all?
+  See [self-hosting](self-hosting.md).)
 - **"I want my data stored, versioned, and viewable."** Episodes record into a hosted
   canonical LeRobot dataset per environment, with a dashboard episode viewer.
 - **"I want automatic policy analysis."** Hosted sessions get policy analysis and reports
@@ -53,7 +57,8 @@ interlatent session stop  <session-id>
 
 ## What stays true either way
 
-- The client, node, CLI, and wire protocol in this repo are Apache-2.0.
+- The client, node, CLI, **policy server** (`packages/server/`), and wire protocol in
+  this repo are Apache-2.0.
 - Datasets are standard LeRobot v3.0 in both directions: hosted recordings are
   exportable, and datasets you collected elsewhere can be imported — no lock-in.
   (Recording itself happens through a hosted session, so it needs an account.)

@@ -1,5 +1,121 @@
 # Changelog
 
+## Unreleased
+
+### `--warmup-image-keys` fills a partial backend warmup target
+
+The fallback added above only ran when the backend returned *no* target, but the
+backend answers with the policy the box registered (`_register` posts
+`warmup_policy`) even with no env attached — and then `image_keys` is empty. That
+lands in the target branch, which never consulted the operator's flag, so a
+MolmoAct2 pre-warm was unreachable: the guard skips for want of cameras, and there
+is no env to go configure. The override now fills an empty `image_keys` and only
+that; keys the backend did supply still win, and now say so in the log instead of
+leaving the flag silently inert.
+
+### MolmoAct2: camera ORDER is now reconciled against the checkpoint
+
+lerobot's MolmoAct2 processor collects frames by iterating `cfg.image_keys` **in
+order**, and released checkpoints state that order — `MolmoAct2-BimanualYAM`'s
+`norm_stats.json` declares `[top, left, right]`, and its model card spells it out
+("`images` should preserve camera order"). The node's order is just the order the
+operator passed `--camera` flags, so it agreed only by luck. A permutation was
+accepted by every layer and fed the overhead view where the model expects a wrist
+view: wrong actions, no error, nothing in the logs.
+
+The backend took the node's list unconditionally, on the assumption that "the
+released checkpoint's `camera_keys` are empty". That is true of SO100/101 and false
+of BimanualYAM. `_reconcile_camera_keys` now compares the two:
+
+- same set, different order → reordered to the checkpoint's, with a warning naming
+  both. The names match exactly, so the intent is unambiguous.
+- different count → `RuntimeError` at session open, naming both sides, instead of a
+  silent misfeed.
+- same count, different names → node order kept (a deployment may rename cameras;
+  position is then the only signal) and warned about, because nothing verifies it.
+- checkpoint declares no `camera_keys` → unchanged.
+
+### `interlatent-serve` logs the endpoint it registered
+
+`--advertise-address` without a port gets `--port` appended — the *container's*
+port, which is wrong whenever a provider proxies an external one (RunPod's TCP
+proxy, a NAT forward). The box serves happily and the node gets `UNAVAILABLE:
+Connection refused` against a port nobody listens on. Registration now logs the
+resolved endpoint and how to override it.
+
+### A self-hosted box no longer ignores its own `--warmup-policy`
+
+Pre-warm config is backend-first: whatever `GET /compute/boxes/{id}/warmup-target`
+returns wins, because it derives the policy *and* the camera keys from the attached
+environment, so the warm can't disagree with what the node later asks for. The
+fallback when that fetch returns nothing was gated on `_has_box_identity()` — but
+that is true for an owner `ilat_` key too, not just the dashboard's admin key it was
+written for. So on a self-hosted box, `interlatent-serve --warmup-policy ...` was
+silently dropped the moment registration succeeded, which is always. It now falls
+back for owner-key and unidentified boxes; a dashboard-provisioned box still skips,
+which is the case the rule was guarding.
+
+- Added `--warmup-image-keys` / `DRTC_WARMUP_IMAGE_KEYS`. MolmoAct2 can't build its
+  feature dict without camera keys, so before this there was no way to pre-warm one
+  outside the dashboard — it was skipped with a message pointing at a Compute page
+  you may not have wanted to use yet. Bare names are normalized
+  (`cam_high` → `observation.images.cam_high`). Match the node's `--camera` names:
+  `PolicyRuntime` caches on `(backend, policy_uri)` and ignores session metadata on
+  reuse, so a mismatched warm is *inherited* by the first real session, not discarded.
+- The skip log said "Box has system identity" for owner-key boxes, which sent you
+  looking for an admin key that was never there.
+
+### `docker/install-bare-metal.sh` — the image's layers, without the image
+
+Provisions a GPU box to run `interlatent-serve` directly: Python ≥ 3.12 check, torch
+matched to the driver's CUDA from `nvidia-smi`, ffmpeg, lerobot at the commit
+`docker/Dockerfile` pins (parsed from it, so the pin has one home), proto stubs
+regenerated against the installed protobuf, and an optional systemd unit using
+`KillSignal=SIGINT` so shutdown reports `stopped` instead of leaving a ghost box.
+
+### `interlatent-server` 0.1.0 — the policy server is open source (ADR 0023)
+
+The DRTC serving stack moved out of the closed engine into `packages/server/`,
+published as a second dist. `pip install 'interlatent-server[lerobot]'` on a CUDA
+machine, run `interlatent-serve --advertise-address <ip>`, and the box registers with
+the dashboard as a self-hosted compute box. Same server code, same wire protocol, same
+episode recording as Interlatent's managed boxes. See [docs/self-hosting.md](docs/self-hosting.md).
+
+- Fixed: the dist could not be imported at all. Two relative imports carried over from
+  the engine's package layout (`...cloud.box_status`, `...storage.lerobot_*`) resolved
+  past the top of `interlatent_server`, and the recorder's dataset writers
+  (`storage/lerobot_rebuild.py`, `storage/lerobot_live.py`) were never moved with it.
+  The wheel built and passed `twine check` regardless — `packages/server/tests/test_import_surface.py`
+  now walks and imports every module, on a bare install with no torch and no lerobot.
+- `[lerobot]` now declares `pyarrow` and `av` explicitly. They arrive transitively, but
+  without them the recorder's parquet post-edits (episode-uuid injection, `control_source`
+  int→string) warn and skip, producing a session the merge cannot fold.
+- Added a release workflow: tag `interlatent-server-v<version>` or `interlatent-v<version>`
+  to publish via PyPI Trusted Publishing. The tag version must match `pyproject.toml`.
+
+### `proto/messages.proto` is the single source of truth
+
+Both packages carry mirrored copies plus generated stubs; `./proto/gen_proto.sh` writes
+all of them in one pass, and `tests/test_proto_sync.py` fails the build if a mirror
+drifts or the two packages' descriptors disagree. Pin `grpcio-tools==1.74.0` to
+regenerate — a different version rewrites the stubs' version stamps and the diff reads
+as a protocol change.
+
+- `RecordTickRequest.control_source` now documents all four values
+  (`policy` / `teleop` / `intervention` / `hold`). Both copies described two, and the
+  server's called an intervention a teleop — the distinction ADR 0034 introduced, and
+  the one training upweights. Comment-only; the wire is unchanged.
+
+### CI
+
+- `packages/sdk/tests/` now runs. 36 tests — loop runner, movement arbitration, Nori
+  guard, and the ADR 0034 intervention coverage — were never executed, because the test
+  step named only `tests/`.
+- New `server` job: import surface, auth/CLI tests, lint, dependency resolution, wheel
+  completeness, `twine check`, and a clean-venv install of the built wheel.
+- New `teleop-web` job: `npm ci`, `tsc --noEmit`, and a production build for the WebXR
+  producer, which landed with no build gate.
+
 ## 2.0.0 — 2026-07-18
 
 ### BREAKING: client-side collection removed (ADR 0022)

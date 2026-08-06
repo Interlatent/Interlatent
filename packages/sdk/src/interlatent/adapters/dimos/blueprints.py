@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     # every vendor type path, and a type-only import is not worth reintroducing
     # that coupling.
     xarm7: Any
+    xarm6: Any
     a1z: Any
 
 try:
@@ -269,6 +270,41 @@ def _build_xarm7():
 
 
 # ---------------------------------------------------------------------------
+# UFACTORY xArm6 + gripper
+# ---------------------------------------------------------------------------
+
+
+def _build_xarm6():
+    """Identical composition to xarm7, against the 6-DOF half of the same
+    vendor module: dimos's ``xarm/config.py`` ships ``xarm6_hardware`` /
+    ``make_xarm6_model_config`` / ``XARM6_SIM_PATH`` alongside the xarm7
+    trio (both are thin wrappers over one shared ``make_xarm_*`` pair
+    parameterized by ``dof``), and ``global_config`` carries its own
+    ``xarm6_ip``. So unlike A1Z there is no lineage fork to feature-detect
+    here -- the only per-kind facts are the DOF count and which vendor
+    symbols to bind.
+    """
+    from dimos.robot.manipulators.xarm.config import (
+        XARM6_SIM_PATH,
+        make_xarm6_model_config,
+        xarm6_hardware,
+    )
+
+    return _streaming_blueprint(
+        _resolve_hardware(
+            partial(xarm6_hardware, gripper=True),
+            "arm",
+            6,
+            has_gripper=True,
+            address_configured=bool(global_config.xarm6_ip),
+            # Same gripper convention as xarm7: raw meters passthrough (both None).
+        ),
+        model=make_xarm6_model_config(name="arm", add_gripper=True),
+        sim_path=XARM6_SIM_PATH,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Galaxea A1Z + gripper
 # ---------------------------------------------------------------------------
 
@@ -332,7 +368,7 @@ def _build_a1z():
 # Entry points, resolved per kind
 # ---------------------------------------------------------------------------
 
-_BUILDERS = {"xarm7": _build_xarm7, "a1z": _build_a1z}
+_BUILDERS = {"xarm7": _build_xarm7, "xarm6": _build_xarm6, "a1z": _build_a1z}
 _CACHE: dict = {}
 
 
@@ -366,4 +402,4 @@ def __dir__() -> list:
     return sorted([*globals(), *_BUILDERS])
 
 
-__all__ = ["xarm7", "a1z"]
+__all__ = ["xarm7", "xarm6", "a1z"]
