@@ -249,7 +249,13 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
     1. **The backend warmup target**, whenever the fetch returns one. It
        carries policy_uri AND image_keys AND the inference knobs together,
        all derived from the env attached in the dashboard, so warm and
-       first-session configs agree by construction.
+       first-session configs agree by construction. A target can be
+       *partial* though — the backend answers with the policy the box
+       registered even when no env is attached, and then image_keys is
+       empty. ``image_keys_override`` fills exactly that hole (it never
+       overrides keys the backend did supply), because otherwise a
+       MolmoAct2 pre-warm is unreachable: the guard below skips for want
+       of cameras and there is no env to go configure.
     2. **A dashboard-provisioned box** (system identity: ``INTERLATENT_BOX_ID``
        + ``INTERLATENT_API_BASE`` + ``INTERLATENT_ADMIN_KEY``) with no target
        skips pre-warm. The backend is that box's only configuration source —
@@ -286,14 +292,39 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
             return
         meta: dict[str, str] = {}
         image_keys = target.get("image_keys") or []
+        override_keys = _normalize_image_keys(image_keys_override)
         if image_keys:
             meta["image_keys"] = ",".join(str(k) for k in image_keys)
             log.info("Resolved %d camera image_keys: %s", len(image_keys), image_keys)
+            if override_keys and override_keys != [str(k) for k in image_keys]:
+                # Never silently inert: the operator passed a flag and the
+                # backend outranks it. Say which one is in effect and why.
+                log.warning(
+                    "Ignoring --warmup-image-keys %s — the backend's warmup "
+                    "target supplied %s, and it wins because it feeds the "
+                    "node's cameras and this warm from the same env, so the "
+                    "two cannot disagree. Change the env's camera_names to "
+                    "override.", override_keys, image_keys,
+                )
+        elif override_keys:
+            # A target with a policy but no cameras. Filling that hole from
+            # the operator's flag is not overriding the backend — the backend
+            # supplied nothing here, and without it a MolmoAct2 pre-warm is
+            # unreachable (its guard below skips, and there is no env to fix).
+            meta["image_keys"] = ",".join(override_keys)
+            log.info(
+                "Backend warmup target carries no image_keys (no env attached, "
+                "or the env has no camera_names); using --warmup-image-keys %s. "
+                "These must match the node's --camera names — the runtime cache "
+                "is keyed on (backend, policy_uri), so the first real session "
+                "inherits this warm.", override_keys,
+            )
         else:
             log.warning(
                 "Warmup target for policy %s returned an EMPTY image_keys list "
                 "— the attached env has no camera_names configured. Set camera "
-                "names in the env's Configuration tab.", policy_uri,
+                "names in the env's Configuration tab, or pass "
+                "--warmup-image-keys.", policy_uri,
             )
         nis = target.get("num_inference_steps")
         if nis is not None:

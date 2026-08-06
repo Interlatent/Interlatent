@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### `--warmup-image-keys` fills a partial backend warmup target
+
+The fallback added above only ran when the backend returned *no* target, but the
+backend answers with the policy the box registered (`_register` posts
+`warmup_policy`) even with no env attached — and then `image_keys` is empty. That
+lands in the target branch, which never consulted the operator's flag, so a
+MolmoAct2 pre-warm was unreachable: the guard skips for want of cameras, and there
+is no env to go configure. The override now fills an empty `image_keys` and only
+that; keys the backend did supply still win, and now say so in the log instead of
+leaving the flag silently inert.
+
 ### MolmoAct2: camera ORDER is now reconciled against the checkpoint
 
 lerobot's MolmoAct2 processor collects frames by iterating `cfg.image_keys` **in

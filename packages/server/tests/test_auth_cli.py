@@ -622,6 +622,32 @@ check(
     str(loads),
 )
 
+# A PARTIAL target — the backend answers with the registered warmup_policy but
+# no cameras when no env is attached. Without the fill-in below, a MolmoAct2
+# pre-warm is unreachable: the guard skips for want of image_keys and there is
+# no env to go configure.
+loads = _warm(OWNER, {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []},
+              policy="ignored", image_keys="top,left,right")
+check(
+    "empty image_keys in the target are filled from --warmup-image-keys",
+    len(loads) == 1
+    and loads[0]["session_metadata"]["image_keys"]
+    == "observation.images.top,observation.images.left,observation.images.right",
+    str(loads),
+)
+check(
+    "a partial target with no override still skips MolmoAct2",
+    _warm(OWNER, {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []}) == [],
+)
+loads = _warm(OWNER, {"policy_uri": "org/act", "image_keys": ["observation.images.a"]},
+              image_keys="top,left,right")
+check(
+    "image_keys the backend DID supply are not overridden",
+    len(loads) == 1
+    and loads[0]["session_metadata"]["image_keys"] == "observation.images.a",
+    str(loads),
+)
+
 # Rule 2: a provisioned box with no target does NOT fall back.
 check(
     "provisioned box + no target -> no fallback to --warmup-policy",
