@@ -6,8 +6,10 @@ adapter streams `joint_command` to a dimos servo task, reads
 `coordinator_joint_state` + camera `Image` topics, and calls the coordinator's
 gripper RPC. See ADR 0018.
 
-Two embodiments (`--robot-arg kind=...`) are supported today: `xarm7` (used in
-the walkthrough below) and `a1z` (Galaxea A1Z — same shape and same
+Three embodiments (`--robot-arg kind=...`) are supported today: `xarm7` (used
+in the walkthrough below), `xarm6` (UFACTORY xArm6 — same vendor, same units
+and same gripper as `xarm7`; substitute `xarm6` for `xarm7` everywhere below
+and use `--xarm6-ip`), and `a1z` (Galaxea A1Z — same shape and same
 hardware-free-by-default UX; read
 ["Units and conventions (a1z)"](#units-and-conventions-a1z) for its gripper
 unit divergence before using it).
@@ -22,7 +24,8 @@ interlatent-node run --robot dimos \
   --camera wrist=/color_image
 ```
 
-Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
+Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`,
+`--xarm6-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go **before** `run`:
 
 ```bash
@@ -37,7 +40,8 @@ The reference blueprint includes DIMOS's `ManipulationModule` with **Viser as
 its default visualization backend**. Viser serves its browser UI at
 `http://127.0.0.1:8095` by default (the DIMOS log also prints the URL).
 
-With no `xarm7_ip` configured, DIMOS selects its in-memory mock xArm adapter.
+With no `xarm7_ip` configured (`xarm6_ip` for `xarm6`), DIMOS selects its
+in-memory mock xArm adapter.
 This is the recommended hardware-free path: run the same two commands, omit
 `--camera` if the test does not need images, and watch policy/manual commands
 move the mock robot in Viser. This exercises the real
@@ -55,7 +59,7 @@ below.
 
 | key | default | meaning |
 |---|---|---|
-| `kind` | **required** | Declared embodiment (`xarm7` \| `a1z`). Verified against the live stack at connect — a mismatch fail-closes with every problem listed. |
+| `kind` | **required** | Declared embodiment (`xarm7` \| `xarm6` \| `a1z`). Verified against the live stack at connect — a mismatch fail-closes with every problem listed. |
 | `transport` | follow `DIMOS_TRANSPORT`/.env | `lcm` \| `zenoh`. Both processes MUST agree or they silently cannot see each other. |
 | `joint_state_topic` | `/coordinator_joint_state` | Joint state subscription. |
 | `joint_command_topic` | `/joint_command` | Servo command publish. |
@@ -73,10 +77,15 @@ keys.** Cameras are optional for manual moves.
 There is deliberately **no `verify=false`**: connect-time verification is
 fail-closed by design.
 
-## Units and conventions (xarm7)
+## Units and conventions (xarm7 / xarm6)
+
+Both UFACTORY kinds share this section — same vendor, same dimos `XArmAdapter`,
+same gripper, same units. `xarm6` differs only in joint count and in its
+per-joint position limits (see the note at the end).
 
 - Arm joints: **radians**, dimos names `arm/joint1..arm/joint7` mapped to
-  feature keys `arm_joint1.pos..arm_joint7.pos` (`/`→`_`), gripper last.
+  feature keys `arm_joint1.pos..arm_joint7.pos` (`/`→`_`), gripper last —
+  `arm/joint1..arm/joint6` → `arm_joint1.pos..arm_joint6.pos` for `xarm6`.
 - Gripper: dimos maps the xArm SDK's 0–850 pulse scale (~85 mm stroke) ×0.001
   into its "meters" convention → range `[0, 0.85]`, 0 closed. The gripper
   **rides the `joint_command` stream** like any other joint (and the servo
@@ -93,6 +102,13 @@ fail-closed by design.
   last commanded gripper value.
 - Timestamps: staleness is gated on local arrival time, not the producer `ts`
   (same-host loopback; immune to clock skew).
+- **`xarm6` is not `xarm7` with a joint removed.** The 6-DOF wrist is a
+  different arrangement, so `robots/xarm6.toml` carries the xArm6's own limits
+  transcribed from dimos's bundled `xarm6.urdf`. Most visibly, xarm6's J3 is
+  `[-3.927, 0.19198]` (−225°..11°) — the *negative mirror* of xarm7's J4
+  `[-0.19198, 3.927]`. Its rest pose is also a real elbow-up stance
+  (`[0, −40°, −50°, 0, 90°, 0]`, dimos's own `_XARM6_INITIAL_JOINTS_DEG`),
+  not xarm7's near-zero pose.
 
 ## Units and conventions (a1z)
 
@@ -198,7 +214,9 @@ actions) needs a separate data bundle the adapter's own kind/profile TOML does
 not supply: `interlatent_robots/<kind>/` — a browser-side IK descriptor
 (`kinematic_spec.json`) and its tuning surface (`ik_config.json`), see
 [`interlatent_robots/README.md`](../../../interlatent_robots/README.md).
-Both `a1z` and `xarm7` ship one.
+Both `a1z` and `xarm7` ship one; `xarm6` does not yet — so an xArm6 runs the
+manual/policy joint path today, and a QUIC session on it logs `no local
+kinematic_spec` and starts without the VR channel.
 
 The lookup is keyed by the specific embodiment, not `--robot`: for
 `--robot dimos` sessions, `node/daemon.py` resolves `--robot-arg kind=` (since

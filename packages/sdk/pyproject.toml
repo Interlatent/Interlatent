@@ -223,6 +223,7 @@ interlatent = "interlatent.cli.main:main"
 # module's import guard turns a missing [dimos] extra into one actionable error.
 [project.entry-points."dimos.blueprints"]
 xarm7 = "interlatent.adapters.dimos.blueprints:xarm7"
+xarm6 = "interlatent.adapters.dimos.blueprints:xarm6"
 a1z = "interlatent.adapters.dimos.blueprints:a1z"
 
 [project.urls]

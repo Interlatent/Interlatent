@@ -242,7 +242,8 @@ topics in, `joint_command` out (consumed by a dimos **servo task** that claims
 every joint *including the gripper* — dimos stomps unclaimed grippers back to
 their startup value while streaming).
 
-Two embodiments ship today: `xarm7` (UFACTORY xArm7) and `a1z` (Galaxea A1Z).
+Three embodiments ship today: `xarm7` (UFACTORY xArm7), `xarm6` (UFACTORY
+xArm6) and `a1z` (Galaxea A1Z).
 Unlike every other adapter, a dimos kind's declaration and profile are **not**
 Python literals in `kinds.py`/`robot_profile.py` — they load at import time
 from [`adapters/dimos/robots/<kind>.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/),
@@ -331,7 +332,7 @@ registry, and the blueprint feature-detects which you have. Real hardware never
 [`interlatent_robots/README.md`](packages/sdk/src/interlatent_robots/README.md))
 that a dimos kind's own TOML data does not supply — a browser-side IK
 descriptor (`kinematic_spec.json`) and its tuning surface (`ik_config.json`).
-Both `a1z` and `xarm7` ship one. For `--robot dimos`, the lookup
+Both `a1z` and `xarm7` ship one; `xarm6` does not yet. For `--robot dimos`, the lookup
 resolves `--robot-arg kind=` (not the literal string `"dimos"`, which the SDK
 never ships data for, by design — it isn't one robot) — see the
 `teleop_robot_kind` resolution in `node/daemon.py`.

@@ -33,6 +33,17 @@ def test_xarm7_kind_feature_keys_order_and_shape():
     assert XARM7.feature_keys[-1] == "arm_gripper.pos"
 
 
+def test_xarm6_kind_feature_keys_order_and_shape():
+    xarm6 = get_kind("xarm6")
+    assert xarm6.dimos_arm_joints == tuple(f"arm/joint{i}" for i in range(1, 7))
+    assert xarm6.dimos_gripper_joint == "arm/gripper"
+    assert xarm6.feature_keys == tuple(
+        f"arm_joint{i}.pos" for i in range(1, 7)
+    ) + ("arm_gripper.pos",)
+    assert xarm6.feature_keys[-1] == "arm_gripper.pos"
+    assert xarm6.profile_name == "dimos_xarm6"
+
+
 def test_a1z_kind_feature_keys_order_and_shape():
     assert A1Z.dimos_arm_joints == tuple(f"arm/joint{i}" for i in range(1, 7))
     assert A1Z.dimos_gripper_joint == "arm/gripper"
@@ -43,7 +54,7 @@ def test_a1z_kind_feature_keys_order_and_shape():
 
 
 def test_name_map_is_bijective_and_inverts():
-    for kind in (XARM7, A1Z):
+    for kind in (XARM7, get_kind("xarm6"), A1Z):
         for dimos_name, feature in zip(kind.dimos_joint_names, kind.feature_keys):
             assert feature_key_for(dimos_name) == feature
             assert kind.dimos_name_for(feature) == dimos_name
@@ -99,6 +110,11 @@ def test_defaults():
 def test_defaults_a1z():
     cfg = build_adapter_config({"kind": "a1z"}, None)
     assert cfg.kind is A1Z
+
+
+def test_defaults_xarm6():
+    cfg = build_adapter_config({"kind": "xarm6"}, None)
+    assert cfg.kind is get_kind("xarm6")
 
 
 def test_knobs_parse_and_cameras_map_to_topics():
@@ -164,6 +180,62 @@ def test_dimos_xarm7_limits_sanity():
         assert lo <= rest <= hi
     # Velocity caps well below the 3.14 rad/s motor max for arm joints.
     assert all(v <= 1.5 for v in profile.max_velocity[:7])
+
+
+def test_dimos_xarm6_profile_registered_and_aligned_with_kind():
+    profile = get_profile("dimos_xarm6")
+    assert profile is not None
+    assert list(profile.joint_names) == [
+        k.removesuffix(".pos") for k in get_kind("xarm6").feature_keys
+    ]
+
+
+def test_dimos_xarm6_limits_sanity():
+    profile = get_profile("dimos_xarm6")
+    assert profile is not None
+    lims = dict(zip(profile.joint_names, profile.joint_limits))
+    # Transcribed from dimos's bundled xarm6.urdf <limit> tags — J2/J3/J5 are
+    # NOT the +-2pi placeholder dimos's XArmAdapter.get_limits() reports.
+    assert lims["arm_joint2"] == (-2.059, 2.0944)
+    assert lims["arm_joint3"] == (-3.927, 0.19198)
+    assert lims["arm_joint5"] == (-1.69297, 3.141592653589793)
+    # Gripper: same UFACTORY gripper as xarm7 — dimos "meters", not A1Z's
+    # normalized fraction.
+    assert lims["arm_gripper"] == (0.0, 0.85)
+    for (lo, hi), rest in zip(profile.joint_limits, profile.rest_pose):
+        assert lo <= rest <= hi
+    # Velocity caps well below the URDF's 3.14 rad/s motor max on all 6 joints.
+    assert all(v <= 1.5 for v in profile.max_velocity[:6])
+
+
+def test_dimos_xarm6_is_not_a_truncated_xarm7():
+    """xArm6 is a different wrist, not xArm7 minus a joint.
+
+    The transcription trap this pins: xarm6's J3 is ``[-3.927, 0.19198]``, the
+    exact NEGATIVE MIRROR of xarm7's J4 ``[-0.19198, 3.927]``. Copying the
+    xarm7 profile and deleting a row (or keeping xarm7's sign) puts the whole
+    usable elbow range outside the clamp — the SafetyGate would pin every
+    command to ~0.19 rad and the arm could never leave its -0.87 rad rest
+    pose, which reads on hardware as "the arm is dead", not as a limit bug.
+    """
+    six = get_profile("dimos_xarm6")
+    seven = get_profile("dimos_xarm7")
+    assert six is not None and seven is not None
+
+    six_lims = dict(zip(six.joint_names, six.joint_limits))
+    seven_lims = dict(zip(seven.joint_names, seven.joint_limits))
+
+    lo, hi = six_lims["arm_joint3"]
+    assert (lo, hi) == (-3.927, 0.19198)
+    assert (lo, hi) != seven_lims["arm_joint4"], "J3 copied with xarm7's sign"
+    assert hi < 0.2, "xarm6 J3 opens downward (elbow-up); a positive-major range is flipped"
+    # And the rest pose actually exercises that negative range, so a flipped
+    # sign cannot pass by sitting harmlessly at zero.
+    rest = dict(zip(six.joint_names, six.rest_pose))
+    assert rest["arm_joint3"] < 0
+    assert lo <= rest["arm_joint3"] <= hi
+
+    assert len(six.joint_names) == 7 and len(seven.joint_names) == 8
 
 
 def test_dimos_a1z_profile_registered_and_aligned_with_kind():

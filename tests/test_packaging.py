@@ -100,6 +100,39 @@ def test_dimos_blueprint_entry_point_declared():
         data = tomllib.load(fh)
     eps = data["project"]["entry-points"]["dimos.blueprints"]
     assert eps["xarm7"] == "interlatent.adapters.dimos.blueprints:xarm7"
+    assert eps["xarm6"] == "interlatent.adapters.dimos.blueprints:xarm6"
+    assert eps["a1z"] == "interlatent.adapters.dimos.blueprints:a1z"
+
+
+def test_every_declared_dimos_kind_has_a_blueprint_entry_point():
+    """A kind's TOML alone makes it selectable with ``--robot-arg kind=`` but
+    gives it no session stack to talk to.
+
+    ``robots/*.toml`` is the kind registry, ``[project.entry-points."dimos.
+    blueprints"]`` is the ``dimos run interlatent.<kind>`` registry, and
+    nothing structural keeps them in step — adding only the TOML yields a kind
+    that configures fine and then fails at connect against whatever stack the
+    operator improvised, which is exactly the silently-ignored-command trap
+    ADR 0018 exists to close. Pin them equal instead.
+    """
+    import tomllib
+
+    pyproject = REPO / "packages" / "sdk" / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        eps = tomllib.load(fh)["project"]["entry-points"]["dimos.blueprints"]
+
+    robots = (
+        REPO / "packages" / "sdk" / "src" / "interlatent" / "adapters" / "dimos" / "robots"
+    )
+    declared = set()
+    for path in robots.glob("*.toml"):
+        with open(path, "rb") as fh:
+            declared.add(tomllib.load(fh)["name"])
+
+    assert declared == set(eps), (
+        f"kinds declared in robots/*.toml {sorted(declared)} != blueprint entry "
+        f"points {sorted(eps)}"
+    )
 
 
 def test_dimos_blueprints_actually_build_against_the_installed_dimos():
@@ -370,23 +403,96 @@ def test_dimos_xarm7_blueprint_declares_manipulation_with_viser():
         "reaches the planner"
     )
 
-    # 4. And the xarm7 kind reaches that builder with the real model config.
-    xarm7_builder = _function_named(tree, "_build_xarm7")
-    models = [
-        keyword.value
-        for node in ast.walk(xarm7_builder)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == builder.name
-        for keyword in node.keywords
-        if keyword.arg == sanitized.id
-    ]
-    assert len(models) == 1, f"_build_xarm7 must pass one {sanitized.id}= : {models}"
-    assert (
-        isinstance(models[0], ast.Call)
-        and isinstance(models[0].func, ast.Name)
-        and models[0].func.id == "make_xarm7_model_config"
-    ), f"expected make_xarm7_model_config(...), got {ast.dump(models[0])}"
+    # 4. And each vendor kind reaches that builder with its OWN model config —
+    #    xarm6 and xarm7 are near-identical compositions over one shared
+    #    dimos module, so a copy-paste that leaves `make_xarm7_model_config`
+    #    in `_build_xarm6` would build, run, and drive a 6-DOF arm through a
+    #    7-DOF planning model.
+    for kind, expected_factory in (
+        ("xarm7", "make_xarm7_model_config"),
+        ("xarm6", "make_xarm6_model_config"),
+    ):
+        kind_builder = _function_named(tree, f"_build_{kind}")
+        models = [
+            keyword.value
+            for node in ast.walk(kind_builder)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == builder.name
+            for keyword in node.keywords
+            if keyword.arg == sanitized.id
+        ]
+        assert len(models) == 1, (
+            f"_build_{kind} must pass one {sanitized.id}= : {models}"
+        )
+        assert (
+            isinstance(models[0], ast.Call)
+            and isinstance(models[0].func, ast.Name)
+            and models[0].func.id == expected_factory
+        ), f"expected {expected_factory}(...), got {ast.dump(models[0])}"
+
+
+def test_dimos_xarm_builders_bind_their_own_dof_and_vendor_address():
+    """xarm6 and xarm7 are the same composition over one shared dimos module,
+    differing only in DOF and which ``global_config`` address gates real
+    hardware. Both mistakes a copy-paste makes here are silent:
+
+    - wrong DOF -> ``_resolve_hardware`` builds a mock/real component with the
+      other arm's joint count, and the adapter's connect-time verification
+      fails against a kind TOML that was right all along;
+    - wrong address field -> ``--xarm7-ip`` would decide whether an xArm6
+      session binds real motors or a mock, so setting the correct
+      ``--xarm6-ip`` silently downgrades to mock hardware.
+
+    Neither shows up as an import error, so pin them structurally.
+    """
+    blueprint = (
+        REPO / "packages" / "sdk" / "src" / "interlatent" / "adapters" / "dimos"
+        / "blueprints.py"
+    )
+    tree = ast.parse(blueprint.read_text(encoding="utf-8"))
+
+    for kind, dof in (("xarm7", 7), ("xarm6", 6)):
+        fn = _function_named(tree, f"_build_{kind}")
+        resolve_calls = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_resolve_hardware"
+        ]
+        assert len(resolve_calls) == 1, f"_build_{kind}: {resolve_calls}"
+        call = resolve_calls[0]
+
+        # DOF is the third positional arg (real_factory, hw_id, dof).
+        assert len(call.args) == 3, ast.dump(call)
+        assert isinstance(call.args[2], ast.Constant) and call.args[2].value == dof, (
+            f"_build_{kind} must pass dof={dof}, got {ast.dump(call.args[2])}"
+        )
+
+        # And the address gate reads THIS vendor's own global_config field.
+        gate = [kw.value for kw in call.keywords if kw.arg == "address_configured"]
+        assert len(gate) == 1, f"_build_{kind} must gate on address_configured"
+        attrs = {
+            node.attr for node in ast.walk(gate[0]) if isinstance(node, ast.Attribute)
+        }
+        assert f"{kind}_ip" in attrs, (
+            f"_build_{kind} must gate real hardware on global_config.{kind}_ip, "
+            f"saw {sorted(attrs)}"
+        )
+
+        # The vendor symbols it imports must be that kind's, not the sibling's.
+        imported = {
+            alias.name
+            for node in ast.walk(fn)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert f"{kind}_hardware" in imported, imported
+        sibling = "xarm6" if kind == "xarm7" else "xarm7"
+        assert not any(sibling in name for name in imported), (
+            f"_build_{kind} imports {sibling} symbols: {sorted(imported)}"
+        )
 
 
 def test_dimos_native_loop_registered():

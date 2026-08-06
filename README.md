@@ -316,11 +316,11 @@ host requirements, `--robot-arg` knobs, camera declarations, and worked examples
 | **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
 | **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
 | **Almond Axol** (dual arm, **unstable beta**) | `axol` | 16 (7 + gripper per side); radians, gripper 0-1 | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
-| **UFACTORY xArm7 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
+| **UFACTORY xArm7 / xArm6 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|xarm6\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
 | Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
 | Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
 
-The SO-101, YAM, Nori, and dimos (`xarm7`/`a1z`) rows are the kinds that ship a
+The SO-101, YAM, Nori, and dimos (`xarm7`/`xarm6`/`a1z`) rows are the kinds that ship a
 **`RobotProfile`** (the full list lives in `_PROFILES` in
 [`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py) —
 dimos kinds resolve there too, just loaded from
