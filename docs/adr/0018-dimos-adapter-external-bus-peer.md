@@ -154,5 +154,6 @@ probe-fallback verification gap until that changes upstream.
 needs its own per-kind data bundle (`interlatent_robots/<kind>/`, ADR 0017)
 that a `DimosKind`/`RobotProfile` does not supply, and the lookup keys off
 the specific embodiment (`--robot-arg kind=`), not `--robot dimos` — a gap
-fixed in `node/daemon.py` alongside A1Z's bundle. `xarm7` does not have one
-yet.
+fixed in `node/daemon.py` alongside A1Z's bundle. `xarm7` now ships one too,
+generated from the xArm7 URDF that `dimos[manipulation]` already carries as
+package data — see `adapters/dimos/CONFIG.md` for its tuning caveats.
