@@ -43,7 +43,7 @@ import socket
 import struct
 import subprocess
 import time
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 

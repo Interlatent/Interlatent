@@ -36,7 +36,6 @@ cross-fade in :mod:`chunk_seam` instead.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
