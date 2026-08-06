@@ -526,6 +526,159 @@ with mock.patch(
         check("network failure -> SystemExit naming the URL", "Could not reach" in str(e))
 
 
+# ------------------------------------------------------------ serve_gpu warmup
+print("serve_gpu._warmup() config precedence")
+
+import types  # noqa: E402
+
+import interlatent_server.serve_gpu as serve_gpu  # noqa: E402
+
+# _warmup imports policy_runtime + molmoact2_backend lazily; both pull torch
+# and the whole backend registry. Stub them so this file stays runnable with
+# nothing heavier than grpcio + httpx installed.
+#
+# Applied via patch.dict per call, NOT installed globally: a stray
+# `interlatent_server.server` left in sys.modules shadows the real package for
+# every later test in the same pytest process — test_import_surface walks that
+# package and reported it half-empty.
+_LOADS: list[dict] = []
+
+
+def _backend_stubs() -> dict:
+    pkg = types.ModuleType("interlatent_server.server")
+    pkg.__path__ = []  # marks it a package so submodule imports resolve
+
+    pr = types.ModuleType("interlatent_server.server.policy_runtime")
+
+    class _PolicyRuntime:
+        @staticmethod
+        def load(**kw):
+            _LOADS.append(kw)
+            return object()
+
+    pr.PolicyRuntime = _PolicyRuntime
+
+    m2 = types.ModuleType("interlatent_server.server.molmoact2_backend")
+    m2.resolve_backend = lambda backend, uri: backend
+
+    return {
+        "interlatent_server.server": pkg,
+        "interlatent_server.server.policy_runtime": pr,
+        "interlatent_server.server.molmoact2_backend": m2,
+    }
+
+
+OWNER = dict(
+    INTERLATENT_BOX_ID="b1",
+    INTERLATENT_API_BASE="https://x.com",
+    INTERLATENT_API_KEY="ilat_owner",
+)
+SYSTEM = dict(
+    INTERLATENT_BOX_ID="b1",
+    INTERLATENT_API_BASE="https://x.com",
+    INTERLATENT_ADMIN_KEY="sys-secret",
+)
+
+
+def _warm(env: dict, target, policy="", image_keys=""):
+    """Run _warmup under `env` with the backend fetch stubbed to `target`."""
+    _LOADS.clear()
+    with _Env(**env), mock.patch.dict(sys.modules, _backend_stubs()), \
+            mock.patch.object(
+                serve_gpu, "_fetch_warmup_target_from_backend",
+                mock.Mock(return_value=target),
+            ):
+        serve_gpu._warmup(policy, image_keys)
+    return list(_LOADS)
+
+
+# _normalize_image_keys
+check(
+    "bare camera names get the observation.images. prefix",
+    serve_gpu._normalize_image_keys("top, wrist")
+    == ["observation.images.top", "observation.images.wrist"],
+    str(serve_gpu._normalize_image_keys("top, wrist")),
+)
+check(
+    "already-qualified keys pass through unchanged",
+    serve_gpu._normalize_image_keys("observation.images.top")
+    == ["observation.images.top"],
+)
+check("empty / blank entries are dropped", serve_gpu._normalize_image_keys(" , ") == [])
+
+# _is_provisioned_box — the distinction the old code collapsed
+with _Env(**SYSTEM):
+    check("admin key -> provisioned box", serve_gpu._is_provisioned_box() is True)
+with _Env(**OWNER):
+    check("owner key -> NOT a provisioned box", serve_gpu._is_provisioned_box() is False)
+    check("owner key still counts as an identity", serve_gpu._has_box_identity() is True)
+
+# Rule 1: a backend target wins over the operator's flag.
+loads = _warm(OWNER, {"policy_uri": "org/from-backend", "image_keys": ["a"]},
+              policy="org/from-flag")
+check(
+    "backend target beats --warmup-policy",
+    len(loads) == 1 and loads[0]["policy_uri"] == "org/from-backend",
+    str(loads),
+)
+
+# Rule 2: a provisioned box with no target does NOT fall back.
+check(
+    "provisioned box + no target -> no fallback to --warmup-policy",
+    _warm(SYSTEM, None, policy="org/act") == [],
+)
+
+# Rule 3: the regression this fixes — a self-hosted box ignored its own flag
+# because _has_box_identity() is true for an owner key too.
+loads = _warm(OWNER, None, policy="org/act")
+check(
+    "self-hosted box + no target -> honors --warmup-policy",
+    len(loads) == 1 and loads[0]["policy_uri"] == "org/act",
+    str(loads),
+)
+loads = _warm({}, None, policy="org/act")
+check(
+    "no identity at all -> honors --warmup-policy",
+    len(loads) == 1 and loads[0]["policy_uri"] == "org/act",
+)
+check("no target and no flag -> nothing loaded", _warm(OWNER, None) == [])
+
+# MolmoAct2 cannot build its feature dict without image_keys.
+check(
+    "MolmoAct2 without image_keys is skipped, not attempted",
+    _warm(OWNER, None, policy="allenai/MolmoAct2-BimanualYAM") == [],
+)
+loads = _warm(OWNER, None, policy="allenai/MolmoAct2-BimanualYAM",
+              image_keys="cam_high,cam_left_wrist")
+check(
+    "MolmoAct2 with --warmup-image-keys warms, keys normalized",
+    len(loads) == 1
+    and loads[0]["session_metadata"]["image_keys"]
+    == "observation.images.cam_high,observation.images.cam_left_wrist",
+    str(loads),
+)
+
+
+# ------------------------------------------------------------- cli._serve_argv
+print("cli._serve_argv()")
+
+_args = types.SimpleNamespace(
+    host="0.0.0.0", port=50051, warmup_policy="", warmup_image_keys="",
+)
+check("bare argv carries host+port only", cli._serve_argv(_args)[1:]
+      == ["--host", "0.0.0.0", "--port", "50051"])
+
+_args.warmup_policy = "allenai/MolmoAct2-BimanualYAM"
+_args.warmup_image_keys = "cam_high"
+argv = cli._serve_argv(_args)
+check(
+    "both warmup flags are forwarded to serve_gpu",
+    "--warmup-policy" in argv and "--warmup-image-keys" in argv
+    and argv[argv.index("--warmup-image-keys") + 1] == "cam_high",
+    str(argv),
+)
+
+
 print(f"All {PASSED} server auth/CLI checks passed.")
 
 

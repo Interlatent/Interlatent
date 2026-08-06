@@ -102,13 +102,25 @@ def _pin_affinity(cores: list[int]) -> None:
 def _has_box_identity() -> bool:
     """True when this box carries an identity to talk to the backend —
     dashboard-provisioned (admin key) or self-hosted (owner ilat_ key,
-    registered via ``interlatent-serve``). An identified box's warmup
-    config comes ONLY from the backend fetch; the static
-    --warmup-policy / DRTC_WARMUP_POLICY path is for boxes run outside it.
+    registered via ``interlatent-serve``). Gates whether the warmup-target
+    fetch is worth attempting at all.
     """
     from interlatent_server import credentials
 
     return credentials.resolve() is not None
+
+
+def _is_provisioned_box() -> bool:
+    """True only for a DASHBOARD-PROVISIONED box (system/admin key).
+
+    Distinct from :func:`_has_box_identity` on purpose: a provisioned box's
+    warmup config comes solely from the backend, while a self-hosted box's
+    operator may pass ``--warmup-policy`` directly. See :func:`_warmup`.
+    """
+    from interlatent_server import credentials
+
+    creds = credentials.resolve()
+    return creds is not None and creds.is_system
 
 
 def _fetch_warmup_target_from_backend() -> dict | None:
@@ -194,7 +206,32 @@ def _fetch_warmup_target_from_backend() -> dict | None:
         return None
 
 
-def _warmup(policy_uri_override: str) -> str | None:
+_IMAGE_KEY_PREFIX = "observation.images."
+
+
+def _normalize_image_keys(raw: str) -> list[str]:
+    """Parse ``--warmup-image-keys`` into full LeRobot feature keys.
+
+    Accepts either form in one comma-separated list: bare camera names
+    (``top,wrist``) or already-qualified keys
+    (``observation.images.top``). Bare names get the prefix, because that
+    is the form the node builds from its ``--camera <name>=<device>``
+    flags and the only one a policy's feature dict will match — a bare
+    ``top`` would warm a runtime whose cameras can never bind.
+    """
+    keys: list[str] = []
+    for part in str(raw or "").split(","):
+        name = part.strip()
+        if not name:
+            continue
+        keys.append(
+            name if name.startswith("observation.")
+            else f"{_IMAGE_KEY_PREFIX}{name}"
+        )
+    return keys
+
+
+def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | None:
     """Load + compile a policy at startup so its torch.compile artifacts
     land in the on-disk inductor cache before the first real session.
 
@@ -207,22 +244,35 @@ def _warmup(policy_uri_override: str) -> str | None:
     Returns None when warmup succeeded or was deliberately skipped (no
     policy / unsatisfiable half-config), neither of which is degraded.
 
-    Single source of truth: if the box has system identity
-    (``INTERLATENT_BOX_ID`` + ``INTERLATENT_API_BASE`` +
-    ``INTERLATENT_ADMIN_KEY``), the backend warmup-target fetch is the
-    ONLY config source — policy_uri AND image_keys AND inference knobs
-    together, all derived from the env attached in the dashboard. If that
-    fetch fails we skip pre-warm and let the first session compile; we do
-    NOT fall back to a static policy, because a policy-without-cameras
-    warm is an unsatisfiable half-state for MolmoAct2 and silently hides
-    the real failure.
+    Config precedence, in order:
 
-    Manual escape hatch: ``policy_uri_override`` (from ``--warmup-policy``
-    / ``DRTC_WARMUP_POLICY``) is used ONLY when the box has no system
-    identity — i.e. serve_gpu is being run outside the dashboard
-    provisioner (local dev, smoke tests) with a self-describing
-    checkpoint (SmolVLA / Pi0 / ACT). MolmoAct2 still can't warm there
-    (no image_keys) and is skipped with a clear message.
+    1. **The backend warmup target**, whenever the fetch returns one. It
+       carries policy_uri AND image_keys AND the inference knobs together,
+       all derived from the env attached in the dashboard, so warm and
+       first-session configs agree by construction.
+    2. **A dashboard-provisioned box** (system identity: ``INTERLATENT_BOX_ID``
+       + ``INTERLATENT_API_BASE`` + ``INTERLATENT_ADMIN_KEY``) with no target
+       skips pre-warm. The backend is that box's only configuration source —
+       falling back to a static policy would hide the real failure behind a
+       half-configured warm.
+    3. **Everyone else** — a self-hosted (owner-key) box, or no identity at
+       all — falls back to ``policy_uri_override`` /
+       ``image_keys_override`` (``--warmup-policy`` /
+       ``--warmup-image-keys``, or ``DRTC_WARMUP_POLICY`` /
+       ``DRTC_WARMUP_IMAGE_KEYS``). An operator who typed the flag is
+       standing right there; refusing it because a box happens to be
+       registered is not the "silent fallback" case rule 2 guards against.
+
+    Rule 3 previously keyed on ``_has_box_identity()``, which is true for an
+    owner key too — so ``interlatent-serve --warmup-policy ...`` silently
+    ignored the flag the moment the box registered, which is always.
+
+    Caveat on rule 3: ``PolicyRuntime`` caches on ``(backend, policy_uri)``
+    and ignores per-session metadata on reuse, so image_keys that DON'T
+    match the node's cameras don't just waste the warm — the first real
+    session inherits the wrong-camera runtime. Rule 1 can't hit this (same
+    source feeds both); a hand-typed list can. Match the node's
+    ``--camera <name>=<device>`` names exactly.
     """
     from interlatent_server.server.policy_runtime import PolicyRuntime
 
@@ -251,30 +301,36 @@ def _warmup(policy_uri_override: str) -> str | None:
         iam = (target.get("inference_action_mode") or "").strip()
         if iam:
             meta["inference_action_mode"] = iam
-    elif _has_box_identity():
-        # Dashboard box that couldn't fetch its target (see the warning
-        # above for which step failed). The backend is the single source of
-        # truth here — do NOT fall back to a static policy, which would hide
-        # the failure behind a half-configured warm. Skip; first session
-        # compiles.
+    elif _is_provisioned_box():
+        # Dashboard-provisioned box that couldn't fetch its target (see the
+        # warning above for which step failed). The backend is the single
+        # source of truth here — do NOT fall back to a static policy, which
+        # would hide the failure behind a half-configured warm. Skip; first
+        # session compiles.
         log.warning(
-            "Box has system identity but the warmup-target fetch did not "
-            "return a target — skipping pre-warm (the first real session will "
-            "compile instead). Not falling back to a static policy.",
+            "Box has system (dashboard-provisioned) identity but the "
+            "warmup-target fetch did not return a target — skipping pre-warm "
+            "(the first real session will compile instead). Not falling back "
+            "to a static policy: the backend is this box's only config source.",
         )
-        return
+        return None
     else:
-        # No system identity: serve_gpu is running outside the dashboard
-        # provisioner. Use the explicit --warmup-policy / DRTC_WARMUP_POLICY.
+        # Self-hosted box, or none at all: the operator's own
+        # --warmup-policy / --warmup-image-keys is the config source.
         policy_uri = (policy_uri_override or "").strip()
         if not policy_uri:
-            return
-        log.info(
-            "No box identity — using manual --warmup-policy %s. This path "
-            "carries no image_keys (self-describing checkpoints only).",
-            policy_uri,
-        )
+            return None
         meta = {}
+        keys = _normalize_image_keys(image_keys_override)
+        if keys:
+            meta["image_keys"] = ",".join(keys)
+        log.info(
+            "No warmup target from the backend — using the operator-supplied "
+            "--warmup-policy %s (image_keys=%s). Attach this box to an "
+            "environment in the dashboard to have the target supplied "
+            "automatically.",
+            policy_uri, meta.get("image_keys") or "none",
+        )
 
     # MolmoAct2's released checkpoint can't load without image_keys.
     # If we somehow got here without them (no env attached + a manual
@@ -283,11 +339,13 @@ def _warmup(policy_uri_override: str) -> str | None:
     if "molmoact" in policy_uri.lower() and "image_keys" not in meta:
         log.warning(
             "Pre-warm skipped for MolmoAct2 policy %s — no image_keys "
-            "available. Attach this box to an env (with cameras "
-            "configured) in the dashboard so the warmup contract is "
-            "complete.", policy_uri,
+            "available, and its checkpoint cannot build its feature dict "
+            "without them. Either attach this box to an env (with cameras "
+            "configured) in the dashboard, or pass --warmup-image-keys "
+            "<name>[,<name>...] naming the SAME cameras the node runs with.",
+            policy_uri,
         )
-        return
+        return None
 
     log.info(
         "Pre-warming policy %s (session_metadata keys=%s) ...",
@@ -466,7 +524,17 @@ def main() -> None:
         "--warmup-policy",
         default=os.environ.get("DRTC_WARMUP_POLICY", ""),
         help="Optional HF repo / local path to load + compile at startup "
-        "so the first robot session is fast.",
+        "so the first robot session is fast. Used when the backend returns "
+        "no warmup target; a dashboard-provisioned box ignores it.",
+    )
+    p.add_argument(
+        "--warmup-image-keys",
+        default=os.environ.get("DRTC_WARMUP_IMAGE_KEYS", ""),
+        help="Comma-separated camera names (or full observation.images.* "
+        "keys) to pre-warm --warmup-policy with. Required for MolmoAct2, "
+        "which cannot load without them. MUST match the node's --camera "
+        "names: the runtime cache is keyed on (backend, policy_uri), so a "
+        "mismatched warm is inherited by the first real session.",
     )
     p.add_argument(
         "--insecure",
@@ -556,7 +624,7 @@ def main() -> None:
     # DRTC_WARMUP_POLICY to trigger warmup.
     warmup_warning: str | None = None
     if _has_box_identity() or args.warmup_policy:
-        warmup_warning = _warmup(args.warmup_policy)
+        warmup_warning = _warmup(args.warmup_policy, args.warmup_image_keys)
 
     # Owner-checked RPC auth is the default on a self-hosted box (owner-key
     # identity). Provisioned boxes (system identity) keep the historical

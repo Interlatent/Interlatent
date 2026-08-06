@@ -103,7 +103,8 @@ environment on the Compute page.
 | `INTERLATENT_BOX_NAME` | hostname | Display name on the Compute page. |
 | `INTERLATENT_BOX_ID` | minted once | Stable box UUID; persisted at `~/.interlatent/box-id`. |
 | `INTERLATENT_INSECURE` | *(unset)* | `1` disables the owner check on the gRPC port. Air-gapped networks only. |
-| `DRTC_WARMUP_POLICY` | *(unset)* | HF repo / local path to load + compile at startup. |
+| `DRTC_WARMUP_POLICY` | *(unset)* | HF repo / local path to load + compile at startup. Used only when the box has no env attached in the dashboard — an attached env's warmup target always wins. |
+| `DRTC_WARMUP_IMAGE_KEYS` | *(unset)* | Comma-separated camera names (`cam_high,cam_left_wrist`) to pre-warm `DRTC_WARMUP_POLICY` with. **Required for MolmoAct2**, which can't build its feature dict without them. Must match the node's `--camera` names — the runtime cache is keyed on `(backend, policy_uri)`, so a mismatched warm is inherited by the first real session rather than discarded. |
 | `HF_TOKEN` | *(unset)* | HF token for private policies — read by `huggingface_hub` directly. |
 
 Anything after the image name is forwarded to the server, so CLI flags still work:

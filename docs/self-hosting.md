@@ -39,7 +39,28 @@ The `interlatent-cache` volume persists torch.compile artifacts and HF model
 downloads — without it every restart re-pays the multi-minute compile for
 VLA-class policies.
 
+## Bare metal (no Docker)
+
+From a checkout on the GPU machine:
+
+```bash
+sudo ./docker/install-bare-metal.sh          # system deps, venv, torch, lerobot
+sudo ./docker/install-bare-metal.sh --systemd \
+  --api-key ilat_xxx --advertise-address 203.0.113.7
+```
+
+It provisions what the image otherwise gives you for free: a Python ≥ 3.12, a
+torch matched to the driver's CUDA (auto-detected from `nvidia-smi`), ffmpeg
+for the dataset writers, lerobot at the same commit `docker/Dockerfile` pins
+(read out of that file, so the two can't drift), and protobuf stubs
+regenerated against the installed runtime. `--systemd` writes a unit that
+restarts on failure and stops with `SIGINT` so the box reports `stopped`
+rather than leaving a ghost `ready` row. `--no-system` skips apt if you don't
+have root. Re-running is safe.
+
 ## pip
+
+If you'd rather do it by hand:
 
 ```bash
 pip install 'interlatent-server[lerobot]'   # CUDA torch; install on the GPU machine
@@ -47,6 +68,12 @@ pip install 'interlatent-server[lerobot]'   # CUDA torch; install on the GPU mac
 INTERLATENT_API_KEY=ilat_xxx interlatent-serve \
   --advertise-address <IP-your-robots-can-reach> --port 50051
 ```
+
+Two caveats the script exists to absorb: PyPI lerobot has no MolmoAct2 (the
+image pins a git ref for it), and `pyproject.toml` declares `protobuf>=4.25`
+while the checked-in stubs assert a ≥ 6.31.1 runtime — fine on a fresh
+resolve, an import error if anything holds protobuf lower. `./proto/gen_proto.sh`
+regenerates them.
 
 ## What happens
 
@@ -56,7 +83,11 @@ INTERLATENT_API_KEY=ilat_xxx interlatent-serve \
    box — no orphan rows, and a stopped box comes back `ready`.
 2. Attach the box to an environment on the Compute page; at boot it fetches
    its warmup target (policy + camera keys) and pre-warms before reporting
-   `ready`.
+   `ready`. Until you do, the fetch 404s and the box falls back to your own
+   `--warmup-policy` / `--warmup-image-keys` if you passed them — MolmoAct2
+   needs both, since it can't load without camera keys. Once an env is
+   attached its target wins, because it feeds the node's cameras and the
+   warm from one source and so can't disagree with itself.
 3. Launch sessions from the dashboard as usual. Recordings stream to the box
    and upload through backend-issued presigned URLs — **no cloud credentials
    ever live on your machine**, only your own revocable API key.

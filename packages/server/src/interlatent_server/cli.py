@@ -178,6 +178,22 @@ def _register(
     )
 
 
+def _serve_argv(args) -> list[str]:
+    """The argv handed to :func:`serve_gpu.main`.
+
+    ``interlatent-serve`` delegates in-process rather than exec'ing, so the
+    forwarding is a literal argv rebuild. Both call sites go through here —
+    when they didn't, ``--warmup-image-keys`` was easy to add to one and
+    forget in the other.
+    """
+    argv = [sys.argv[0], "--host", args.host, "--port", str(args.port)]
+    if args.warmup_policy:
+        argv += ["--warmup-policy", args.warmup_policy]
+    if args.warmup_image_keys:
+        argv += ["--warmup-image-keys", args.warmup_image_keys]
+    return argv
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="interlatent-serve",
@@ -212,7 +228,16 @@ def main() -> None:
         "--warmup-policy",
         default=os.environ.get("DRTC_WARMUP_POLICY", ""),
         help="Optional HF repo / local path to pre-warm when no env is "
-        "attached in the dashboard yet.",
+        "attached in the dashboard yet. Once an env IS attached, the "
+        "backend's warmup target wins.",
+    )
+    p.add_argument(
+        "--warmup-image-keys",
+        default=os.environ.get("DRTC_WARMUP_IMAGE_KEYS", ""),
+        help="Comma-separated camera names to pre-warm --warmup-policy "
+        "with (e.g. 'top,wrist'). Required for MolmoAct2. Must match the "
+        "node's --camera names — see serve_gpu for why a mismatch is worse "
+        "than no warm at all.",
     )
     p.add_argument(
         "--insecure", action="store_true",
@@ -233,10 +258,7 @@ def main() -> None:
 
     if args.no_register:
         os.environ.pop("INTERLATENT_BOX_ID", None)
-        sys.argv = [sys.argv[0], "--host", args.host, "--port", str(args.port)]
-        if args.warmup_policy:
-            sys.argv += ["--warmup-policy", args.warmup_policy]
-        sys.argv += ["--insecure"]
+        sys.argv = _serve_argv(args) + ["--insecure"]
         serve_gpu.main()
         return
 
@@ -283,9 +305,7 @@ def main() -> None:
     # Never inherit a stray system secret into the BYO identity.
     os.environ.pop("INTERLATENT_ADMIN_KEY", None)
 
-    sys.argv = [sys.argv[0], "--host", args.host, "--port", str(args.port)]
-    if args.warmup_policy:
-        sys.argv += ["--warmup-policy", args.warmup_policy]
+    sys.argv = _serve_argv(args)
     if args.insecure:
         sys.argv += ["--insecure"]
     try:

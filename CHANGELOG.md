@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### A self-hosted box no longer ignores its own `--warmup-policy`
+
+Pre-warm config is backend-first: whatever `GET /compute/boxes/{id}/warmup-target`
+returns wins, because it derives the policy *and* the camera keys from the attached
+environment, so the warm can't disagree with what the node later asks for. The
+fallback when that fetch returns nothing was gated on `_has_box_identity()` — but
+that is true for an owner `ilat_` key too, not just the dashboard's admin key it was
+written for. So on a self-hosted box, `interlatent-serve --warmup-policy ...` was
+silently dropped the moment registration succeeded, which is always. It now falls
+back for owner-key and unidentified boxes; a dashboard-provisioned box still skips,
+which is the case the rule was guarding.
+
+- Added `--warmup-image-keys` / `DRTC_WARMUP_IMAGE_KEYS`. MolmoAct2 can't build its
+  feature dict without camera keys, so before this there was no way to pre-warm one
+  outside the dashboard — it was skipped with a message pointing at a Compute page
+  you may not have wanted to use yet. Bare names are normalized
+  (`cam_high` → `observation.images.cam_high`). Match the node's `--camera` names:
+  `PolicyRuntime` caches on `(backend, policy_uri)` and ignores session metadata on
+  reuse, so a mismatched warm is *inherited* by the first real session, not discarded.
+- The skip log said "Box has system identity" for owner-key boxes, which sent you
+  looking for an admin key that was never there.
+
+### `docker/install-bare-metal.sh` — the image's layers, without the image
+
+Provisions a GPU box to run `interlatent-serve` directly: Python ≥ 3.12 check, torch
+matched to the driver's CUDA from `nvidia-smi`, ffmpeg, lerobot at the commit
+`docker/Dockerfile` pins (parsed from it, so the pin has one home), proto stubs
+regenerated against the installed protobuf, and an optional systemd unit using
+`KillSignal=SIGINT` so shutdown reports `stopped` instead of leaving a ghost box.
+
 ### `interlatent-server` 0.1.0 — the policy server is open source (ADR 0023)
 
 The DRTC serving stack moved out of the closed engine into `packages/server/`,
