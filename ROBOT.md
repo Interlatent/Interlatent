@@ -235,7 +235,8 @@ name     = "my-arm"
 ## Special case: the dimos adapter (the robot is a running stack)
 
 `--robot dimos` ([`adapters/dimos/`](packages/sdk/src/interlatent/adapters/dimos/),
-`interlatent[dimos]`, python 3.11–3.12) inverts the usual shape: there is no motor
+`interlatent[dimos]`, python 3.12 — 3.11 resolves only off linux/x86_64; see
+*Pin the interpreter* below) inverts the usual shape: there is no motor
 driver, because the "vendor SDK" is a **running dimos process**. The adapter joins
 dimos's LCM/Zenoh bus as a peer — `coordinator_joint_state` + camera `Image`
 topics in, `joint_command` out (consumed by a dimos **servo task** that claims
@@ -309,12 +310,17 @@ Galaxea driver is not in the installed package's hardware registry — so the
 vendor SDK is necessary but not sufficient for motion; the blueprint
 feature-detects which build you have and falls back to the mock.
 
-**Pin the interpreter when installing this extra.** dimos pins `<3.13`, so the
-`[dimos]` requirements carry a `python_version < '3.13'` marker: on a 3.13+
-environment they resolve to *nothing*, the install "succeeds", and the first
-sign of trouble is `dimos: command not found`. With uv, name the interpreter —
-`uv sync --extra dimos -p 3.12`, or `uv pip install -p 3.12 'interlatent[dimos]'`
-— rather than taking whatever `python3` happens to be.
+**Pin the interpreter when installing this extra — 3.12.** dimos pins `<3.13`,
+so the `[dimos]` requirements carry a `python_version < '3.13'` marker: on a
+3.13+ environment they resolve to *nothing*, the install "succeeds", and the
+first sign of trouble is `dimos: command not found`. The other end is just as
+sharp on **linux/x86_64**, the usual robot host: `dimos[manipulation]` requires
+`a750-control` there, and that package publishes a single cp312 manylinux
+x86_64 wheel with no sdist — so on 3.11 the install fails outright with "No
+matching distribution found for a750-control". 3.12 is the only interpreter
+that works on that host. With uv, name it — `uv sync --extra dimos -p 3.12`, or
+`uv pip install -p 3.12 'interlatent[dimos]'` — rather than taking whatever
+`python3` happens to be.
 
 Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go *before* `run`

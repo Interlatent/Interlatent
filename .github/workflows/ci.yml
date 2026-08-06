@@ -329,19 +329,30 @@ jobs:
           # job. [yam] pulls i2rt straight from a git HEAD (no released metadata,
           # moves under us) and gates pyrealsense2 to x86_64, so a red here is
           # usually upstream churn rather than a defect in our declaration.
-          # Keep the signal, drop the gate.
+          # Keep the signal, drop the gate. As of 2026-08-06 it is red on every
+          # leg for a reason worth naming: i2rt pins `ruckig==0.15.3`, which
+          # publishes an sdist ONLY, and that sdist no longer builds — its
+          # deprecated `cmake.targets` is rejected by scikit-build-core >= 0.10
+          # ("Use build.targets instead"). i2rt pins the build backend below
+          # that in `[tool.uv] build-constraint-dependencies`, which only uv
+          # honors; pip needs the constraint supplied by the caller (see the
+          # [yam] note in packages/sdk/pyproject.toml).
           #
-          # [axol] is advisory for a different reason: almond-axol depends on
-          # dimos[manipulation], which requires a750-control under
-          # `sys_platform == "linux" and platform_machine == "x86_64"`. That
-          # package is not published on PyPI, so the resolve fails on the x86
-          # runners (ARM skips it — the marker is false there). Nothing in this
-          # repo can fix that; the durable fix is upstream, either publishing
-          # a750-control or dropping it from dimos's manipulation extra. Until
-          # then this is a real user-facing break for `pip install
-          # 'interlatent[axol]'` on linux/x86_64, so it stays visible as a
-          # WARN rather than being silenced or removed.
-          ADVISORY = {"yam", "axol"}
+          # [axol] and [dimos] are advisory for one shared upstream reason:
+          # dimos[manipulation] requires a750-control under
+          # `sys_platform == "linux" and platform_machine == "x86_64"`, and
+          # a750-control publishes exactly one artifact — 0.1.1, a cp312
+          # manylinux x86_64 wheel, no sdist. So on linux/x86_64 the dimos
+          # manipulation stack resolves under Python 3.12 and NOTHING else:
+          # this matrix's py3.11 x86 leg dies on "No matching distribution
+          # found for a750-control", while ARM skips it (the marker is false)
+          # and py3.12 x86 passes. Nothing in this repo can fix that — the
+          # durable fix is upstream (a cp311 wheel, an sdist, or dropping the
+          # dep). Until then it is a real user-facing break for `pip install
+          # 'interlatent[dimos]'` on linux/x86_64 + 3.11, so it stays visible
+          # as a WARN rather than being silenced or removed, and ROBOT.md tells
+          # operators to pin 3.12.
+          ADVISORY = {"yam", "axol", "dimos"}
 
           PYPROJECT = Path("packages/sdk/pyproject.toml")
           project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]

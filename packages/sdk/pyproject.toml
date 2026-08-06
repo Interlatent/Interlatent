@@ -111,6 +111,17 @@ axol = [
 # dependency — only i2rt + RGB camera libs.
 # PYTHON VERSION: i2rt/raiden pin YAM to Python >=3.11,<3.12; confirm i2rt's actual
 # floor on install — it may constrain this extra's interpreter below the SDK's range.
+# INSTALL UNDER pip NEEDS A BUILD CONSTRAINT (2026-08-06): i2rt pins
+# `ruckig==0.15.3`, which publishes an sdist only — so it is compiled on every
+# install, on every platform — and that build now fails outright, because ruckig's
+# deprecated `cmake.targets` is rejected by scikit-build-core >= 0.10 ("Use
+# build.targets instead of cmake.targets"). i2rt's own fix is
+# `[tool.uv] build-constraint-dependencies = ["scikit-build-core<0.10"]`, which ONLY
+# uv honors: `uv pip install 'interlatent[yam]'` works, plain pip does not. Under pip,
+# supply the same constraint yourself — it applies to isolated build envs too:
+#   printf 'scikit-build-core<0.10\n' > /tmp/c.txt
+#   PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'
+# Drop this note when i2rt moves off 0.15.3 (ruckig ships wheels again at 0.19.x).
 # Host requirement NOT pinned here: the ZED SDK + its `pyzed` Python bindings (not on
 # PyPI) are needed only for ZED cameras; RealSense cameras use pyrealsense2 below.
 # Linux + SocketCAN is required (the arms speak CAN; cameras are RGB-only).
@@ -168,7 +179,15 @@ nori = [
 # dimos stack; both processes must agree on DIMOS_TRANSPORT (lcm|zenoh).
 # PYTHON VERSION: dimos pins <3.13 while the SDK allows >=3.11 — this extra
 # resolves only on 3.11/3.12 (axol-precedent: the sharper floor/ceiling is
-# documented on the extra, not imposed on the base package).
+# documented on the extra, not imposed on the base package). On **linux/x86_64
+# the real floor is 3.12**, and it is not ours to relax: dimos[manipulation]
+# requires a750-control under `sys_platform == "linux" and platform_machine ==
+# "x86_64"`, and a750-control ships exactly one artifact — 0.1.1, a cp312
+# manylinux x86_64 wheel, no sdist. On 3.11 x86_64 the install dies with "No
+# matching distribution found for a750-control"; other arches never evaluate the
+# marker. Narrowing our own marker to 3.12 would only trade a loud failure for a
+# silent no-op install, so the marker stays `< '3.13'` and CI carries [dimos] as
+# advisory (.github/workflows/ci.yml, extras-resolve).
 # HEAVY: dimos unconditionally pulls open3d, rerun-sdk, opencv-contrib,
 # numba, and pinocchio. Expect a multi-GB environment.
 dimos = [

@@ -144,7 +144,11 @@ pip install interlatent
 > pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
 > ```
 > SO-101's Feetech servos additionally need the Feetech servo SDK; if the serial bus won't
-> open, `pip install feetech-servo-sdk`. See each robot's config doc under
+> open, `pip install feetech-servo-sdk`. `[yam]` currently needs a build constraint under
+> plain pip - i2rt pins `ruckig==0.15.3`, whose sdist-only build fails against
+> scikit-build-core >= 0.10 - so either install it with `uv pip install` (uv honors i2rt's
+> own constraint) or pass one: `echo 'scikit-build-core<0.10' > /tmp/c.txt &&
+> PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'`. See each robot's config doc under
 > [Supported robots](#supported-robots) for full host requirements.
 
 **Requires Python 3.11+.**

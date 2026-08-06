@@ -261,7 +261,9 @@ rebuilt into `annotation.interlatent.control_source`.
 
 **Dimos adapter**:
 Vendor adapter `interlatent.adapters.dimos` (`--robot dimos`,
-`interlatent[dimos]`, python 3.11–3.12) for robots managed by a **running
+`interlatent[dimos]`, python 3.12 — 3.11 resolves only off linux/x86_64, where
+`dimos[manipulation]`'s `a750-control` is cp312-wheel-only; see ROBOT.md) for
+robots managed by a **running
 [dimos](https://github.com/dimensionalOS/dimos) stack**. Unlike every other
 adapter there is no motor driver: the adapter joins dimos's LCM/Zenoh bus as an
 **external peer** — `coordinator_joint_state` + camera topics in,
