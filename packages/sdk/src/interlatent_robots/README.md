@@ -43,20 +43,25 @@ incomplete, mis-named, or missing from the tree.
 Regenerate the spec after any `ik_config.json` or URDF change, or the browser solver
 and the pod solver silently disagree.
 
-**Exception: `a1z`'s `kinematic_spec.json` was NOT produced by the official
-generator** — this environment has no access to
+**Exception: the three dimos-mediated kinds' `kinematic_spec.json` files were
+NOT produced by the official generator** — `a1z`, `xarm7` and `xarm6`. This
+environment has no access to
 `interlatent.inference.server.retarget.kinematic_spec` (the platform repo).
-It was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
-URDF's `<origin>`/`<axis>`/`<limit>` tags directly) plus per-joint `tool0`
-computed from the URDF's own `gripper_eef_joint` fixed-joint offset — both are
-genuine URDF properties, and `packaging/verify_urdf.py`'s FK-parity check
-confirms this geometry against a MuJoCo-compiled model to ~1e-16 m. The
-solver-tuning fields that aren't URDF properties at all — `damping`,
+Each was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
+URDF's `<origin>`/`<axis>`/`<limit>` tags directly) plus a `tool0` taken from
+the URDF's own terminal fixed joint — both are genuine URDF properties, and
+`packaging/verify_urdf.py`'s FK-parity check confirms this geometry against a
+MuJoCo-compiled model to ~1e-16 m.
+
+The solver-tuning fields that aren't URDF properties at all — `damping`,
 `webxr_to_base_R`, `pos_reach_limit`/`rot_reach_limit`, `w_rot` — are copied
-verbatim from `yam`'s `right` chain as a starting template (A1Z judged "near
-identical" in scale/DOF), genuinely unverified against real A1Z hardware.
-Regenerate this kind's spec with the official tool the next time it's
-available rather than treating this file as authoritative long-term.
+from a nearest-neighbour kind as a starting template and are **unverified
+against that robot's real hardware** in every case. The copy chain is
+`yam` → `a1z` (judged "near identical" in scale/DOF) → `xarm7` → `xarm6`
+(same vendor, wrist family, gripper and units). Nothing in that chain was
+tuned for the arm it ended up on, and FK parity does not exercise any of it.
+Regenerate these kinds' specs with the official tool the next time it's
+available rather than treating these files as authoritative long-term.
 
 ## Meshes are not used (IK needs no geometry)
 

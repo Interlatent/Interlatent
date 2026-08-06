@@ -259,6 +259,7 @@ namespaces = true
 "interlatent_robots.a1z" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.so101" = ["*.urdf", "*.json", "*.lock"]
 "interlatent_robots.xarm7" = ["*.urdf", "*.json", "*.lock"]
+"interlatent_robots.xarm6" = ["*.urdf", "*.json", "*.lock"]
 
 [tool.setuptools.exclude-package-data]
 # ik_config.json is the hand-authored curation source for the MuJoCo

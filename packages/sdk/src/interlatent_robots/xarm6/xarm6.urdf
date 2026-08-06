@@ -1,0 +1,199 @@
+<robot name="UF_ROBOT">
+  <link name="world" />
+  <joint name="world_joint" type="fixed">
+    <parent link="world" />
+    <child link="link_base" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+  </joint>
+  <ros2_control name="uf_robot_hardware/UFRobotSystemHardware" type="system">
+    <hardware>
+      <plugin>uf_robot_hardware/UFRobotSystemHardware</plugin>
+      <param name="hw_ns">xarm</param>
+      <param name="velocity_control">False</param>
+      <param name="prefix">P</param>
+      <param name="robot_ip">R</param>
+      <param name="report_type">normal</param>
+      <param name="dof">6</param>
+      <param name="baud_checkset">True</param>
+      <param name="default_gripper_baud">2000000</param>
+      <param name="robot_type">xarm</param>
+      <param name="add_gripper">False</param>
+      <param name="add_bio_gripper">False</param>
+    </hardware>
+    <joint name="joint1">
+      <command_interface name="position">
+        <param name="min">-6.283185307179586</param>
+        <param name="max">6.283185307179586</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+    <joint name="joint2">
+      <command_interface name="position">
+        <param name="min">-2.059</param>
+        <param name="max">2.0944</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+    <joint name="joint3">
+      <command_interface name="position">
+        <param name="min">-3.927</param>
+        <param name="max">0.19198</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+    <joint name="joint4">
+      <command_interface name="position">
+        <param name="min">-6.283185307179586</param>
+        <param name="max">6.283185307179586</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+    <joint name="joint5">
+      <command_interface name="position">
+        <param name="min">-1.69297</param>
+        <param name="max">3.141592653589793</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+    <joint name="joint6">
+      <command_interface name="position">
+        <param name="min">-6.283185307179586</param>
+        <param name="max">6.283185307179586</param>
+      </command_interface>
+      <command_interface name="velocity">
+        <param name="min">-3.14</param>
+        <param name="max">3.14</param>
+      </command_interface>
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+    </joint>
+  </ros2_control>
+  <link name="link_base">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.09103" />
+      <mass value="2.7" />
+      <inertia ixx="0.00494875" ixy="-3.5E-06" ixz="1.25E-05" iyy="0.00494174" iyz="1.67E-06" izz="0.002219" />
+    </inertial>
+  </link>
+  <link name="link1">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.00022 0.02951 -0.0124" />
+      <mass value="2.3814" />
+      <inertia ixx="0.0058562" ixy="-1.79e-05" ixz="3.55e-06" iyy="0.0050316" iyz="-0.000888336" izz="0.003536652" />
+    </inertial>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="link_base" />
+    <child link="link1" />
+    <origin rpy="0 0 0" xyz="0 0 0.267" />
+    <axis xyz="0 0 1" />
+    <limit effort="50.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link2">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.03881 -0.22783 0.03496" />
+      <mass value="2.2675" />
+      <inertia ixx="0.028315776" ixy="0.005" ixz="0.00066546" iyy="0.0058" iyz="-0.0045741" izz="0.0273447" />
+    </inertial>
+  </link>
+  <joint name="joint2" type="revolute">
+    <parent link="link1" />
+    <child link="link2" />
+    <origin rpy="-1.5708 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="50.0" lower="-2.059" upper="2.0944" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link3">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.07041 0.11631 0.0107" />
+      <mass value="1.875" />
+      <inertia ixx="0.0063483" ixy="-0.0015397" ixz="0.00096858" iyy="0.00379758" iyz="0.00186567" izz="0.00595768" />
+    </inertial>
+  </link>
+  <joint name="joint3" type="revolute">
+    <parent link="link2" />
+    <child link="link3" />
+    <origin rpy="0 0 0" xyz="0.0535 -0.2845 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="32.0" lower="-3.927" upper="0.19198" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link4">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.00018 0.01798 -0.02291" />
+      <mass value="1.3192" />
+      <inertia ixx="0.004896" ixy="-6.925e-06" ixz="-1.418e-05" iyy="0.00445694" iyz="-0.00023186" izz="0.00134332" />
+    </inertial>
+  </link>
+  <joint name="joint4" type="revolute">
+    <parent link="link3" />
+    <child link="link4" />
+    <origin rpy="-1.5708 0 0" xyz="0.0775 0.3425 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="32.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link5">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0651 0.03096 0.00315" />
+      <mass value="1.33854" />
+      <inertia ixx="0.00146378" ixy="-0.000450624" ixz="0.000284306" iyy="0.00184192" iyz="0.000130866" izz="0.002333524" />
+    </inertial>
+  </link>
+  <joint name="joint5" type="revolute">
+    <parent link="link4" />
+    <child link="link5" />
+    <origin rpy="1.5708 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="32.0" lower="-1.69297" upper="3.141592653589793" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link6">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 -0.00677 -0.01098" />
+      <mass value="0.17" />
+      <inertia ixx="9.3e-05" ixy="-0.0" ixz="-0.0" iyy="5.87e-05" iyz="-3.6e-06" izz="0.000132" />
+    </inertial>
+  </link>
+  <joint name="joint6" type="revolute">
+    <parent link="link5" />
+    <child link="link6" />
+    <origin rpy="-1.5708 0 0" xyz="0.076 0.097 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="20.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.14" />
+    <dynamics damping="1.0" friction="1.0" />
+  </joint>
+  <link name="link_eef" />
+  <joint name="joint_eef" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <parent link="link6" />
+    <child link="link_eef" />
+  </joint>
+</robot>

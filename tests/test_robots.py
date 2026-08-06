@@ -181,7 +181,9 @@ def _source_kinds() -> list[Path]:
 def test_source_tree_has_kinds():
     """Guard the guard: if the layout moves, the checks below must not silently
     pass by iterating an empty dir."""
-    assert [p.name for p in _source_kinds()] == ["a1z", "nori", "so101", "xarm7", "yam"]
+    assert [p.name for p in _source_kinds()] == [
+        "a1z", "nori", "so101", "xarm6", "xarm7", "yam"
+    ]
 
 
 @pytest.mark.parametrize("kind_dir", _source_kinds(), ids=lambda p: p.name)
@@ -235,6 +237,52 @@ def test_real_nori_data_resolves():
     assert not robots.has_meshes("nori")
     src_ik = json.loads((_SRC_KINDS_DIR / "nori" / "ik_config.json").read_text(encoding="utf-8"))
     assert list(src_ik["chains"]) == ["left", "right"]
+
+
+def test_real_xarm6_data_matches_the_dimos_kind():
+    """A dimos kind's teleop bundle and its wire declaration are two separate
+    data sources that MUST agree, and nothing else checks it.
+
+    `interlatent_robots/xarm6/` decides which action-vector slot the browser
+    drives; `adapters/dimos/robots/xarm6.toml` decides what that vector means
+    on the wire. They are edited independently, and a disagreement is silent
+    in the worst way: IK still solves, the session still runs, and the arm
+    moves the wrong joint — or drives the gripper index into a wrist joint.
+    Ordering is the contract everywhere else in this SDK (base.py raises when
+    action_features and the profile diverge); this is the same contract across
+    the teleop seam.
+    """
+    from interlatent.adapters.dimos.kinds import get_kind
+    from interlatent.node.teleop.robot_profile import get_profile
+
+    assert robots.is_installed("xarm6")
+    chain = robots.load("xarm6").kinematic_spec["chains"]["right"]
+    features = [f.removesuffix(".pos") for f in get_kind("xarm6").feature_keys]
+
+    # Arm joints occupy their own index, in kind order; gripper takes the last.
+    assert [j["action_index"] for j in chain["joints"]] == [0, 1, 2, 3, 4, 5]
+    assert [j["name"].replace("joint", "arm_joint") for j in chain["joints"]] == (
+        features[:-1]
+    )
+    assert chain["gripper"]["action_index"] == len(features) - 1 == 6
+    assert features[-1] == "arm_gripper"
+
+    # Gripper range is [open, closed] — the reverse of the profile's [lo, hi].
+    profile = get_profile("dimos_xarm6")
+    lo, hi = profile.joint_limits[-1]
+    assert chain["gripper"]["range"] == [hi, lo]
+
+    # Per-joint rest pose and limits are the profile's, not the generator's
+    # zero-defaults (the generator emits q_rest 0.0 and says to override).
+    assert [j["q_rest"] for j in chain["joints"]] == list(profile.rest_pose[:-1])
+    assert [tuple(j["limit"]) for j in chain["joints"]] == list(
+        profile.joint_limits[:-1]
+    )
+
+    # xArm6's wrist is offset (joint6 sits off the joint4/joint5 crossing), so
+    # it is NOT a spherical wrist and must not claim the decoupled 6-DOF
+    # specialization other 6-DOF kinds use.
+    assert chain["solver_type"] == "weighted_dls"
 
 
 def test_real_so101_data_resolves():

@@ -214,9 +214,7 @@ actions) needs a separate data bundle the adapter's own kind/profile TOML does
 not supply: `interlatent_robots/<kind>/` — a browser-side IK descriptor
 (`kinematic_spec.json`) and its tuning surface (`ik_config.json`), see
 [`interlatent_robots/README.md`](../../../interlatent_robots/README.md).
-Both `a1z` and `xarm7` ship one; `xarm6` does not yet — so an xArm6 runs the
-manual/policy joint path today, and a QUIC session on it logs `no local
-kinematic_spec` and starts without the VR channel.
+`a1z`, `xarm7` and `xarm6` all ship one.
 
 The lookup is keyed by the specific embodiment, not `--robot`: for
 `--robot dimos` sessions, `node/daemon.py` resolves `--robot-arg kind=` (since
@@ -255,6 +253,30 @@ The `solver_type` is recorded as `weighted_dls` rather than A1Z's
 `decoupled_6dof`, which is a 6-DOF specialization and wrong for a redundant
 7-DOF arm; the browser ignores the field and always runs its generic weighted
 DLS (`dlsSolver.ts`), so this is a labelling fix, not a behavior change.
+
+`xarm6`'s bundle is built the same way — `dimos_kinematic_spec_gen.py` over the
+xArm6 URDF `dimos[manipulation]` ships (`data/xarm_description/urdf/xarm6/
+xarm6.urdf`, stripped to kinematics-only), `verify_urdf.py` passing at FK
+parity ~5e-16 m over 512 configs — and inherits the same **untuned solver
+fields**, copied here from `xarm7` (same vendor, same wrist family, same
+gripper and units) rather than from A1Z. `webxr_to_base_R` is again the first
+thing to suspect if hand motion drives the wrong axis on real hardware.
+
+Two things differ from `xarm7`, both in xArm6's favour:
+
+- **No limit intersection was needed.** dimos ships xArm6's URDF with the full
+  ±2π ranges rather than the `limited=true` ±3.110 variant it ships for xArm7,
+  and those limits already equal `robots/xarm6.toml`'s datasheet-derived
+  profile on all six joints. The spec therefore carries the URDF's limits
+  unmodified, and `tests/test_robots.py` pins spec-vs-profile equality so a
+  future divergence fails loudly instead of silently needing the xarm7
+  treatment.
+- **`weighted_dls` is right for a positive reason here**, not just by
+  elimination. xArm6 *is* a 6-DOF arm, so `decoupled_6dof` looks applicable —
+  but that specialization assumes a spherical wrist, and xArm6's is offset
+  (`joint6` sits at `[0.076, 0.097, 0]` off the `joint4`/`joint5` crossing, the
+  same offset wrist xArm7 has). The last three axes never meet at a point, so
+  the decoupling does not hold.
 
 ## The blueprint contract
 

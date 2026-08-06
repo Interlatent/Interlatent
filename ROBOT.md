@@ -332,7 +332,7 @@ registry, and the blueprint feature-detects which you have. Real hardware never
 [`interlatent_robots/README.md`](packages/sdk/src/interlatent_robots/README.md))
 that a dimos kind's own TOML data does not supply — a browser-side IK
 descriptor (`kinematic_spec.json`) and its tuning surface (`ik_config.json`).
-Both `a1z` and `xarm7` ship one; `xarm6` does not yet. For `--robot dimos`, the lookup
+`a1z`, `xarm7` and `xarm6` all ship one. For `--robot dimos`, the lookup
 resolves `--robot-arg kind=` (not the literal string `"dimos"`, which the SDK
 never ships data for, by design — it isn't one robot) — see the
 `teleop_robot_kind` resolution in `node/daemon.py`.

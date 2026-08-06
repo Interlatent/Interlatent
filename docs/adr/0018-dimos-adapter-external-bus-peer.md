@@ -154,6 +154,8 @@ probe-fallback verification gap until that changes upstream.
 needs its own per-kind data bundle (`interlatent_robots/<kind>/`, ADR 0017)
 that a `DimosKind`/`RobotProfile` does not supply, and the lookup keys off
 the specific embodiment (`--robot-arg kind=`), not `--robot dimos` — a gap
-fixed in `node/daemon.py` alongside A1Z's bundle. `xarm7` now ships one too,
-generated from the xArm7 URDF that `dimos[manipulation]` already carries as
-package data — see `adapters/dimos/CONFIG.md` for its tuning caveats.
+fixed in `node/daemon.py` alongside A1Z's bundle. `xarm7` and `xarm6` now ship
+one too, each generated from the URDF that `dimos[manipulation]` already
+carries as package data — so every dimos kind this SDK declares has one. See
+`adapters/dimos/CONFIG.md` for their tuning caveats: the geometry is verified,
+the solver tuning is inherited and untuned.
