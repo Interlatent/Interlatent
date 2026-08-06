@@ -154,8 +154,12 @@ your nodes' egress IPs.
 
 1. Create a Pod → **GPU Cloud** → RTX 4090 / A100 / H100.
 2. **Container Image**: your pushed tag (e.g. `ghcr.io/you/interlatent-server:latest`).
-3. **Expose TCP port** `50051`. RunPod gives you a public TCP proxy address — use it as
-   `INTERLATENT_ADVERTISE_ADDRESS`.
+3. **Expose TCP port** `50051`. RunPod proxies it at a *different* external port —
+   e.g. `202.181.159.212:10608` → container `50051`. Put the **full external
+   `host:port`** in `INTERLATENT_ADVERTISE_ADDRESS`; leave `INTERLATENT_PORT` at
+   `50051` (what the server binds inside the container). A bare host gets the
+   container port appended, and nodes then dial a port nothing listens on —
+   `UNAVAILABLE: Connection refused`, while the box logs look perfectly healthy.
 4. **Volume Mount** → `/root/.cache` (≥ 50 GB for SmolVLA).
 5. **Environment**: `INTERLATENT_API_KEY`, `INTERLATENT_ADVERTISE_ADDRESS`, optionally
    `DRTC_WARMUP_POLICY` and `HF_TOKEN`.

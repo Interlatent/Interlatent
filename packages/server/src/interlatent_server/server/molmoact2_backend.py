@@ -34,6 +34,77 @@ from .policy_runtime import register_backend
 log = logging.getLogger(__name__)
 
 
+def _reconcile_camera_keys(
+    declared: list[str], ckpt_keys: list[str], policy_uri: str
+) -> list[str]:
+    """Reconcile the node's camera keys against the checkpoint's own.
+
+    **Order is load-bearing.** lerobot's MolmoAct2 processor collects frames
+    by iterating ``cfg.image_keys`` in order, and the model card states the
+    order explicitly ("The camera order for this checkpoint is top, left,
+    right" / "``images`` should preserve camera order"). A permuted list is
+    accepted by every layer and silently feeds the overhead view where the
+    model expects a wrist view — wrong actions, no error.
+
+    The node's order is just the order the operator passed ``--camera``
+    flags (or listed camera_names in the env), so it agrees with the
+    checkpoint only by luck.
+
+    Rules, when the checkpoint declares ``camera_keys``:
+
+    - same set, different order -> **reorder to the checkpoint's order**.
+      The names match exactly, so the intent is unambiguous.
+    - different count -> raise. There is no defensible mapping, and the
+      failure at inference would be silent.
+    - same count, different names -> keep the node's order and warn. A
+      deployment may legitimately rename cameras, and position is then the
+      only signal we have; but nothing verifies it, so say so.
+
+    A checkpoint with no ``camera_keys`` (released SO100/101) is a no-op —
+    the node's list is the only source, exactly as before.
+    """
+    if not ckpt_keys:
+        log.info(
+            "MolmoAct2 checkpoint %s declares no camera_keys; using the "
+            "node's %d key(s) in the order given: %s",
+            policy_uri, len(declared), declared,
+        )
+        return declared
+
+    if declared == ckpt_keys:
+        return declared
+
+    if set(declared) == set(ckpt_keys):
+        log.warning(
+            "MolmoAct2 camera ORDER mismatch for %s: the node/env declared %s "
+            "but the checkpoint was trained with %s. Same cameras, so "
+            "reordering to the checkpoint's order — the processor feeds "
+            "frames in image_keys order and a permutation is silently wrong "
+            "(overhead view where a wrist view is expected). Fix the order of "
+            "the node's --camera flags / the env's camera_names to silence "
+            "this.", policy_uri, declared, ckpt_keys,
+        )
+        return list(ckpt_keys)
+
+    if len(declared) != len(ckpt_keys):
+        raise RuntimeError(
+            f"Camera count mismatch for MolmoAct2 checkpoint {policy_uri!r}: "
+            f"the node/env will stream {len(declared)} camera(s) {declared} "
+            f"but the checkpoint was trained with {len(ckpt_keys)} "
+            f"{ckpt_keys}. Configure exactly those cameras (names are matched "
+            "verbatim; order matters) and retry."
+        )
+
+    log.warning(
+        "MolmoAct2 camera NAME mismatch for %s: the node/env declared %s but "
+        "the checkpoint names %s. Counts match, so the node's order is used "
+        "positionally — verify %s really is the checkpoint's %r, or rename the "
+        "node's cameras to match.",
+        policy_uri, declared, ckpt_keys, declared[0], ckpt_keys[0],
+    )
+    return declared
+
+
 # ---------------------------------------------------------------------------
 # Released-checkpoint detection + routing
 # ---------------------------------------------------------------------------
@@ -161,9 +232,12 @@ class MolmoAct2Backend(LeRobotBackend):
             checkpoint's ``norm_stats.json`` (selected by ``norm_tag``);
           - the camera image keys come from the session metadata (the
             node maps ``--camera name=device`` to
-            ``observation.images.<name>``) — the released checkpoint's
-            ``camera_keys`` are empty, so this is the one piece that
-            must arrive from outside;
+            ``observation.images.<name>``), reconciled against the
+            checkpoint's own ``camera_keys`` by
+            :func:`_reconcile_camera_keys`. NOT every released checkpoint
+            leaves ``camera_keys`` empty — SO100/101 do, but e.g.
+            BimanualYAM declares ``[top, left, right]``, and taking the
+            node's order over it silently permutes the model's inputs;
           - ``action_dim`` comes from the dashboard session (the robot's
             real action width), falling back to the checkpoint's
             ``action_stats`` dimension.
@@ -227,13 +301,14 @@ class MolmoAct2Backend(LeRobotBackend):
                 "none derivable from the checkpoint's action_stats."
             )
 
-        # Camera keys: node-supplied (CSV) wins; fall back to whatever the
-        # norm metadata names (empty on released SO100/101 checkpoints).
+        # Camera keys: node-supplied (CSV), reconciled against whatever the
+        # checkpoint's norm metadata declares.
         image_keys = [
             k.strip() for k in str(meta.get("image_keys", "")).split(",") if k.strip()
         ]
+        ckpt_keys = [str(k) for k in (tag_meta.get("camera_keys") or [])]
         if not image_keys:
-            image_keys = [str(k) for k in (tag_meta.get("camera_keys") or [])]
+            image_keys = list(ckpt_keys)
         if not image_keys:
             raise RuntimeError(
                 "MolmoAct2 requires at least one camera image key, but none were "
@@ -241,6 +316,7 @@ class MolmoAct2Backend(LeRobotBackend):
                 "checkpoint's norm_stats carries no camera_keys. Start the node "
                 "with --camera <name>=<device>."
             )
+        image_keys = _reconcile_camera_keys(image_keys, ckpt_keys, policy_uri)
 
         inference_action_mode = (
             meta.get("inference_action_mode") or "continuous"

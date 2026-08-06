@@ -172,9 +172,18 @@ def _register(
             f"Box registration failed: {e}\n"
             f"Could not reach {url} — check the network and --api-base."
         )
+    # Log the endpoint verbatim: this is the address the dashboard hands
+    # nodes, and the failure it hides is silent on this side. A bare
+    # --advertise-address gets --port appended, which is the CONTAINER's
+    # port — wrong whenever a provider proxies an external port to it
+    # (RunPod's TCP proxy, a NAT forward). The box serves happily, the
+    # node gets ECONNREFUSED against a port nobody listens on.
     log.info(
-        "Registered self-hosted box %r (%s) — status %s on the Compute page",
-        body.get("name"), box_id, body.get("status"),
+        "Registered self-hosted box %r (%s) at %s — status %s on the "
+        "Compute page. Nodes will dial that address verbatim; if your "
+        "provider proxies an external port, pass it as "
+        "--advertise-address host:external-port.",
+        body.get("name"), box_id, endpoint, body.get("status"),
     )
 
 

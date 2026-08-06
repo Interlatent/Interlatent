@@ -659,6 +659,71 @@ check(
 )
 
 
+# -------------------------------------------- molmoact2 camera reconciliation
+print("molmoact2._reconcile_camera_keys()")
+
+# Load by file path: importing interlatent_server.server.molmoact2_backend
+# normally would pull lerobot_backend -> torch. Only the module-level helper
+# is under test, so stub its two import-time dependencies.
+_m2_pkg = types.ModuleType("interlatent_server.server")
+_m2_pkg.__path__ = []
+_m2_stubs = {
+    "interlatent_server.server": _m2_pkg,
+    "interlatent_server.server.lerobot_backend": types.ModuleType("lb"),
+    "interlatent_server.server.policy_runtime": types.ModuleType("pr"),
+}
+_m2_stubs["interlatent_server.server.lerobot_backend"].LeRobotBackend = type(
+    "LeRobotBackend", (), {}
+)
+_m2_stubs["interlatent_server.server.lerobot_backend"]._resolve_crossfade = lambda *a: None
+_m2_stubs["interlatent_server.server.policy_runtime"].register_backend = (
+    lambda *a, **k: (lambda cls: cls)
+)
+
+with mock.patch.dict(sys.modules, _m2_stubs):
+    # Dotted name so `from .lerobot_backend import ...` resolves against the
+    # stubbed parent package rather than failing on "no known parent".
+    _m2_spec = importlib.util.spec_from_file_location(
+        "interlatent_server.server.molmoact2_backend",
+        SRC / "interlatent_server" / "server" / "molmoact2_backend.py",
+    )
+    m2 = importlib.util.module_from_spec(_m2_spec)
+    _m2_spec.loader.exec_module(m2)
+
+# The real BimanualYAM contract: norm_stats camera_keys, model-card order.
+YAM = ["observation.images.top", "observation.images.left", "observation.images.right"]
+NODE_ORDER = [
+    "observation.images.left", "observation.images.right", "observation.images.top",
+]
+
+check(
+    "matching order passes through untouched",
+    m2._reconcile_camera_keys(list(YAM), list(YAM), "u") == YAM,
+)
+check(
+    "permuted node order is reordered to the checkpoint's",
+    m2._reconcile_camera_keys(NODE_ORDER, list(YAM), "u") == YAM,
+    str(m2._reconcile_camera_keys(NODE_ORDER, list(YAM), "u")),
+)
+check(
+    "a checkpoint with no camera_keys leaves the node's list alone",
+    m2._reconcile_camera_keys(NODE_ORDER, [], "u") == NODE_ORDER,
+)
+check(
+    "same count, different names -> node order kept (positional)",
+    m2._reconcile_camera_keys(["a", "b", "c"], list(YAM), "u") == ["a", "b", "c"],
+)
+try:
+    m2._reconcile_camera_keys(["observation.images.top"], list(YAM), "u")
+    check("camera COUNT mismatch raises", False, "no raise")
+except RuntimeError as e:
+    check(
+        "camera COUNT mismatch raises, naming both sides",
+        "1 camera(s)" in str(e) and "3" in str(e),
+        str(e),
+    )
+
+
 # ------------------------------------------------------------- cli._serve_argv
 print("cli._serve_argv()")
 

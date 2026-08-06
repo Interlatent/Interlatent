@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### MolmoAct2: camera ORDER is now reconciled against the checkpoint
+
+lerobot's MolmoAct2 processor collects frames by iterating `cfg.image_keys` **in
+order**, and released checkpoints state that order — `MolmoAct2-BimanualYAM`'s
+`norm_stats.json` declares `[top, left, right]`, and its model card spells it out
+("`images` should preserve camera order"). The node's order is just the order the
+operator passed `--camera` flags, so it agreed only by luck. A permutation was
+accepted by every layer and fed the overhead view where the model expects a wrist
+view: wrong actions, no error, nothing in the logs.
+
+The backend took the node's list unconditionally, on the assumption that "the
+released checkpoint's `camera_keys` are empty". That is true of SO100/101 and false
+of BimanualYAM. `_reconcile_camera_keys` now compares the two:
+
+- same set, different order → reordered to the checkpoint's, with a warning naming
+  both. The names match exactly, so the intent is unambiguous.
+- different count → `RuntimeError` at session open, naming both sides, instead of a
+  silent misfeed.
+- same count, different names → node order kept (a deployment may rename cameras;
+  position is then the only signal) and warned about, because nothing verifies it.
+- checkpoint declares no `camera_keys` → unchanged.
+
+### `interlatent-serve` logs the endpoint it registered
+
+`--advertise-address` without a port gets `--port` appended — the *container's*
+port, which is wrong whenever a provider proxies an external one (RunPod's TCP
+proxy, a NAT forward). The box serves happily and the node gets `UNAVAILABLE:
+Connection refused` against a port nobody listens on. Registration now logs the
+resolved endpoint and how to override it.
+
 ### A self-hosted box no longer ignores its own `--warmup-policy`
 
 Pre-warm config is backend-first: whatever `GET /compute/boxes/{id}/warmup-target`
