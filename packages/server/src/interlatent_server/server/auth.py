@@ -26,7 +26,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-DEFAULT_API_BASE = "https://interlatent.com/api/v1"
+# Absolute, not relative, and deliberately so: `tests/test_auth_cli.py` loads
+# this file by path (with no package) to avoid importing
+# `interlatent_server.server`, whose __init__ registers the policy backends and
+# drags in torch. A relative import breaks that; this one only executes the
+# light top-level __init__ plus a stdlib-only module.
+from interlatent_server.coordinator import api_v1
+
 DEFAULT_TTL_S = 60.0
 
 _MAX_CACHE_ENTRIES = 1024
@@ -54,15 +60,13 @@ def _auth_probe_executor() -> ThreadPoolExecutor:
         return _auth_executor
 
 
-def validate_api_key(token: str, *, api_base: str = DEFAULT_API_BASE) -> bool:
+def validate_api_key(token: str, *, api_base: str) -> bool:
     """One-shot validation. Returns True iff the backend accepts the key."""
     if not token:
         return False
     import httpx
 
-    base = api_base.rstrip("/")
-    if not base.endswith("/api/v1"):
-        base = f"{base}/api/v1"
+    base = api_v1(api_base)
     try:
         r = httpx.get(
             f"{base}/environments",
@@ -154,7 +158,7 @@ class CachedValidator:
 
 
 def build_api_key_validator(
-    api_base: str = DEFAULT_API_BASE,
+    api_base: str,
     ttl_s: float = DEFAULT_TTL_S,
 ) -> CachedValidator:
     """Cached "is this a valid Interlatent key?" check."""
@@ -164,7 +168,7 @@ def build_api_key_validator(
 
 
 def validate_key_for_box(
-    token: str, *, box_id: str, api_base: str = DEFAULT_API_BASE
+    token: str, *, box_id: str, api_base: str
 ) -> bool:
     """One-shot owner check: True iff the backend confirms `token` may
     drive box `box_id` (i.e. it is the box owner's key, or the system
@@ -173,9 +177,7 @@ def validate_key_for_box(
         return False
     import httpx
 
-    base = api_base.rstrip("/")
-    if not base.endswith("/api/v1"):
-        base = f"{base}/api/v1"
+    base = api_v1(api_base)
     try:
         r = httpx.get(
             f"{base}/compute/boxes/{box_id}/authz",
@@ -190,7 +192,7 @@ def validate_key_for_box(
 def build_box_key_validator(
     *,
     box_id: str,
-    api_base: str = DEFAULT_API_BASE,
+    api_base: str,
     ttl_s: float = DEFAULT_TTL_S,
 ) -> CachedValidator:
     """Owner-scoped `check(token)`, same cache as

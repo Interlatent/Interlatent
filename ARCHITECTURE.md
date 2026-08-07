@@ -45,7 +45,8 @@ Key properties:
 | Integration | `inference/integration/connect.py` | `connect_drtc()` — one-call session against a cloud-provisioned GPU pod (`api_key=`) |
 | Node daemon | `node/` (cli, daemon, control) | `interlatent-node` — long-running daemon that pairs to your account, polls the dashboard, and runs assigned inference sessions on real hardware (LeRobot robot classes) |
 | Teleop stub | `node/teleop/` (channel, frame, safety, robot_profile) | Thin receiver for hosted VR teleop (remote human demonstration) — see below |
-| Dashboard CLI | `cli/` | `interlatent` — thin client over the dashboard API: `gpus ls`, `nodes ls`, `session ls\|start\|stop` |
+| CLI | `cli/` | `interlatent` — session manager: `up`/`down`/`status` to run a coordinator, `gpu`, `gpus ls`, `nodes ls`, `session ls\|start\|stop`, `config` |
+| Coordinator | `coordinator/` | The control plane itself: `protocol` (the frozen contract), `state`, `server` (`/api/v1/*` only), `auth`, `relay` (vendored WebTransport relay), `certs` |
 | Tick spool | `inference/client/spool.py` | Write-through disk journal for the RecordTick uplink: delete-after-ack, drain-done at close, hard-stop when full (ADR 0023) |
 | JPEG encode | `node/jpeg.py` | Capability-adaptive frame encoder: PyTurboJPEG → OpenCV → PIL, resolved at runtime (`interlatent[turbo]`) |
 | HTTP client | `_client.py` | `Interlatent` — environments/episodes API surface used by the daemon and CLI |
@@ -123,10 +124,22 @@ all work — the client merges chunks the same way regardless of the path's late
 
 ## Relationship to Interlatent Cloud
 
-The [Interlatent dashboard](https://interlatent.com) is the control plane, and stays the
-control plane whichever GPU runs the policy. The client and node speak the gRPC contract
-in `proto/messages.proto` to the box, and authenticate to the dashboard with an API key
-(`ilat_…`) to discover boxes, pair nodes, and drive sessions.
+There are **two contracts in this system**, and keeping them apart explains most of the
+layout. `proto/messages.proto` is the *data* plane: the gRPC the client and node speak to
+a GPU box. [`docs/coordinator-protocol.md`](docs/coordinator-protocol.md) is the *control*
+plane: the HTTP a node, a box, the CLI and the teleop app speak to whatever assigns them
+work. Both are additive-only.
+
+The service on the other end of that second contract is a **coordinator**. The
+[Interlatent dashboard](https://interlatent.com) is one implementation of it — currently
+the only one, with a self-hosted implementation landing in the CLI. They are two
+deployments of one contract, not two modes: nothing in the SDK branches on which it is
+talking to. See [ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md), which
+supersedes ADR 0023's "the dashboard remains the only control plane".
+
+A coordinator is never in the data path. DRTC is direct node↔box, so a running session
+survives the coordinator's absence — the node keeps driving the robot and its poll and
+heartbeat simply backoff-retry.
 
 The **serving stack itself is open** (`packages/server`) — a box you provision on the
 dashboard and a box you run yourself execute the same code, differing only in identity

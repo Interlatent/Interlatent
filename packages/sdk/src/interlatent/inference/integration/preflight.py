@@ -90,7 +90,8 @@ def _fetch_schema(environment: str, api_key: str, api_base: str | None) -> dict:
     try:
         from ..._http import HTTPClient
         from ..._resources import EnvironmentsResource
-        base = api_base or os.environ.get("INTERLATENT_API_BASE") or "https://interlatent.com"
+        from ..._coordinator import resolve
+        base = resolve(api_base, purpose="preflight")
         http = HTTPClient(base_url=base, api_key=api_key)
         cfg = EnvironmentsResource(http).get(environment)
         return cfg if isinstance(cfg, dict) else {}

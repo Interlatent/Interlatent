@@ -1,5 +1,155 @@
 # Changelog
 
+## 3.0.0 — the SDK detaches from the platform
+
+**Breaking.** A coordinator address is now required everywhere. Anything that
+invoked `interlatent`, `interlatent-preflight`, `interlatent-serve` or
+`Interlatent()` without one was relying on a hardcoded `https://interlatent.com`
+that no longer exists. The fix is one line:
+
+```bash
+export INTERLATENT_COORDINATOR=https://interlatent.com   # or your own
+```
+
+Paired nodes are unaffected: `node.toml` has always stored the address, and the
+old `api_base` key is still read.
+
+### The CLI is a session manager, not a thin client
+
+`interlatent up` runs a **coordinator** on your machine — the control plane that
+pairs nodes, tracks GPU boxes, and brokers inference and teleop sessions:
+
+```bash
+interlatent up                                   # prints an operator key, once
+interlatent gpu add --name rig --url 10.0.0.7:50051
+interlatent session start --node arm --gpu rig --policy lerobot/smolvla_base
+interlatent config --output-dir /data/lerobot    # where recordings land
+interlatent down                                 # refuses while a session is live
+```
+
+The same verbs drive the hosted dashboard with `--coordinator
+https://interlatent.com`. That is the whole point: **one protocol, two
+implementations, no second set of verbs.** ADR 0023 blamed a coordinator for the
+2026-06 collapse; the actual cause it names is that the old one served a bespoke
+`/admin/*` *alongside* `/api/v1/*`, forking every operator flow. This one serves
+`/api/v1/*` only. See
+[ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md).
+
+`interlatent down` waits for nodes to converge to idle before exiting, because
+the node's teardown is what sends `CloseSession` — the only trigger for the
+dataset build. Stopping a session unassigns it; it never kills anything.
+
+### Recording without an account
+
+`sinks.py` returns: a finished dataset publishes to the hosted inbox, **a local
+directory, or an S3-compatible bucket**, the latter two merging on stop into one
+flat training-ready LeRobot dataset. `docs/concepts.md` has documented this since
+2026-07 and it has not been true since 2026-06; it is true again.
+
+Configure it once on the coordinator and it is stamped onto every session it
+issues. A box publishing locally needs no API key and never contacts a control
+plane — the recorder's auth gate now asks the *destination* whether a key is
+required instead of demanding one unconditionally.
+
+### Teleop runs without a hosted service
+
+`interlatent up` can serve the WebTransport relay itself (`pip install
+'interlatent[teleop-relay]'`), ported from the deployment that already ran it.
+Because no public CA issues certificates for `10.0.0.5`, the coordinator mints a
+short-lived ECDSA P-256 certificate and hands its SHA-256 to the browser as
+`serverCertificateHashes`, rotating well inside the 14-day cap Chromium imposes.
+Nodes pin it with `INTERLATENT_TELEOP_CA_FILE` — a real trust anchor, rather
+than `INTERLATENT_TELEOP_INSECURE`, which disables chain *and* hostname checking
+together and would have undone the auth model at the teleop layer.
+
+**The teleop browser now reconnects.** It never has: `onClose` fired once and
+nothing re-dialled, so any relay blip ended the VR session permanently and the
+operator had to take the headset off. It now runs the same 1→15 s re-mint-and-
+redial ladder the node has always had, and clears `specReceived` so a
+reconnected browser re-requests its kinematic spec. This fixes a real fragility
+against the hosted relay too, not just the embedded one.
+
+### The coordinator is the token authority
+
+Not "the network is the trust boundary" — that was deleted ADR 0001's stance and
+it is rejected, not restored. `interlatent up` mints an `ilop_` operator key
+(`O_CREAT|O_EXCL`, 0600 — no write-then-chmod window), the coordinator issues
+scoped `ilnode_` and `ilbox_` credentials, and **only hashes are persisted**. A
+node's token is refused on another node's routes.
+
+One trap worth naming: `/compute/boxes/{id}/authz` accepts the operator key
+*and* any node token the coordinator issued, because the node presents
+`drtc_api_key or token` on the box's gRPC metadata. Accepting only the operator
+key returns `UNAUTHENTICATED` for every `Infer`.
+
+### One coordinator address, resolved in one place
+
+Eight hardcoded copies of `https://interlatent.com` in two incompatible
+spellings (bare origin vs `/api/v1`-suffixed), reconciled at runtime by three
+separate fixups, collapse into `interlatent._coordinator.resolve()` and a twin
+in the server dist. One convention: a coordinator address is a bare origin, and
+callers append `/api/v1/…`. `INTERLATENT_API_BASE` is still read for one minor,
+with a warning.
+
+Also gone: `DEFAULT_DRTC_URL`, which pointed at one specific Modal deployment.
+`INTERLATENT_BYPASS_KEY` becomes `INTERLATENT_EXTRA_HEADERS`, so the SDK stops
+naming a hosting vendor in its own configuration surface.
+
+### The control-plane contract has a name: the coordinator protocol
+
+The HTTP surface the node, the GPU box, the CLI and the teleop web app have
+always spoken to the dashboard is now written down as the **Interlatent
+Coordinator Protocol** — `docs/coordinator-protocol.md`, with a machine-readable
+twin at `interlatent.coordinator.protocol` and a test
+(`tests/test_coordinator_protocol.py`) that fails if the two disagree by so much
+as a reworded summary.
+
+Nothing changes at runtime yet; this is the contract being frozen before it
+grows a second implementation. Routes are tiered: **mandatory** (a node cannot
+pair, a box cannot boot, or every RPC is rejected without them), **optional**
+(every SDK caller already degrades on 404 — teleop, for instance, simply turns
+itself off for the session), and **coordinator-only** (the hosted dashboard 404s
+these by design, and the CLI should say so by name).
+
+Two implicit contracts are promoted to documented ones because they were
+discoverable only by reading the source: `GET /api/v1/environments` doubles as
+the auth probe a GPU box uses to validate any presented key, and
+`DELETE /api/v1/inference/sessions/{id}` **must** unassign rather than kill
+anything — `CloseSession` is the only trigger for the dataset build and the
+server's idle-GC discards recordings whose session was never closed.
+
+See [ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md), which
+supersedes ADR 0023's "the dashboard remains the only control plane". The short
+version: ADR 0023 blamed a coordinator for a collapse that was actually caused
+by *two* control-plane surfaces (`/api/v1/*` and a bespoke `/admin/*`) forking
+every operator flow. One protocol with two implementations is not that, and the
+`/api/v1`-only rule is what keeps the distinction real.
+
+### A failed publish no longer deletes the episode it just built
+
+`SessionRecorder.upload()` ended in `finally: self._cleanup_working_dir()`, and the
+dataset lives *inside* that working dir — both lanes build it there (`dataset/v3`
+for the rebuild lane, `live/v3` for the ADR-0016 live-encode one). So any
+exception between "dataset is complete on disk" and "backend acked the upload"
+logged a traceback and then `rmtree`'d the finished LeRobot dataset. The episode
+was unrecoverable: the ticks are deleted with the staging, and the node already
+dropped its spool entries as they were acked over gRPC.
+
+Every step before that point is careful about this — a rebuild failure returns
+early, zero-step sessions skip, the 409 case is tolerated — but the one path where
+the data is *most* valuable, because it survived the whole build, was the one that
+threw it away. It only ever fired on a hosted outage, which is why it went
+unnoticed; with local and S3 destinations landing next, a wrong bucket or an
+expired credential makes it routine.
+
+On publish failure the built dataset is now moved out of the working directory to
+`~/.interlatent/failed-publish/<episode_id>/` (override with
+`INTERLATENT_FAILED_PUBLISH_DIR`) and the path is logged at ERROR. Repeated
+failures for one episode id get a `.1`, `.2` suffix rather than clobbering. The
+working directory is still cleaned up — this is not a change of tidiness policy,
+only a refusal to count a finished dataset as garbage. Quarantine is itself
+best-effort and cannot mask the original upload exception.
+
 ## Unreleased
 
 ### `--warmup-image-keys` fills a partial backend warmup target

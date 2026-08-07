@@ -28,11 +28,13 @@ import sys
 from typing import Any
 
 from .._exceptions import APIError, AuthenticationError, NotFoundError
+from .._coordinator import resolve
 from .._http import HTTPClient
 
-DEFAULT_API_BASE = os.environ.get(
-    "INTERLATENT_API_BASE", "https://interlatent.com"
-).rstrip("/")
+#: Resolved per-invocation, not at import: the env var must be readable after
+#: this module loads (tests set it, and `interlatent up` exports it).
+def _default_api_base() -> str:
+    return resolve(purpose="cli")
 
 
 # ----------------------------------------------------------------------
@@ -44,13 +46,18 @@ def _make_client(args: argparse.Namespace) -> HTTPClient:
     """Build an authenticated dashboard client or exit with a clear error."""
     api_key = getattr(args, "api_key", None) or os.environ.get("INTERLATENT_API_KEY", "")
     if not api_key:
+        # A locally-run coordinator already minted one; use it rather than
+        # making the operator copy a key from `interlatent up`'s output.
+        from ..coordinator.auth import load_operator_key
+        api_key = load_operator_key() or ""
+    if not api_key:
         print(
-            "error: no Interlatent API key. Pass --api-key or set "
-            "INTERLATENT_API_KEY (get one from the dashboard).",
+            "error: no API key. Pass --api-key, set INTERLATENT_API_KEY, or "
+            "run `interlatent up` (which mints an operator key for you).",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    base = (getattr(args, "api_base", None) or DEFAULT_API_BASE).rstrip("/")
+    base = resolve(getattr(args, "api_base", None), purpose="cli")
     return HTTPClient(base_url=base, api_key=api_key)
 
 
@@ -300,24 +307,191 @@ def cmd_behavior(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------------
 # argparse wiring
+
+# ----------------------------------------------------------------------
+# Running a coordinator of your own
+# ----------------------------------------------------------------------
+
+
+def cmd_up(args: argparse.Namespace) -> int:
+    from ..coordinator import supervisor
+    code, message = supervisor.start(args.port, host=args.host)
+    print(message, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    from ..coordinator import supervisor
+    code, message = supervisor.stop(args.force, args.grace)
+    print(message, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    from ..coordinator import supervisor
+    code, message = supervisor.status()
+    print(message)
+    return code
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    from ..coordinator import supervisor
+    return supervisor.logs(args.follow, args.lines)
+
+
+def cmd_gpu(args: argparse.Namespace) -> int:
+    """Register/remove a GPU box. `add` is POST compute/boxes/register --
+    the same route interlatent-serve calls, not a coordinator-only verb."""
+    client = _make_client(args)
+    if args.gpu_cmd == "add":
+        body = {
+            "box_id": args.box_id or args.name,
+            "name": args.name,
+            "endpoint": args.url,
+            "provider": "manual",
+        }
+        if args.warm_policy:
+            body["warmup_policy"] = args.warm_policy
+        out = client.request(
+            "POST", "/api/v1/compute/boxes/register", json_body=body
+        )
+        print(f"✓ registered {out.get('name')} at {args.url}")
+        return 0
+    if args.gpu_cmd == "rm":
+        client.request("DELETE", f"/api/v1/gpus/{args.name}")
+        print(f"✓ removed {args.name}")
+        return 0
+    return cmd_gpus(args)
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Set the recording destination stamped onto every session.
+
+    Coordinator-only: the hosted dashboard 404s this, and says so by name.
+    """
+    client = _make_client(args)
+    recording: dict = {}
+    if args.output_dir:
+        recording["output_dir"] = args.output_dir
+    if args.s3_uri:
+        recording["s3_uri"] = args.s3_uri
+        for key, val in (
+            ("s3_endpoint_url", args.s3_endpoint_url),
+            ("s3_access_key", args.s3_access_key),
+            ("s3_secret_key", args.s3_secret_key),
+            ("s3_region", args.s3_region),
+        ):
+            if val:
+                recording[key] = val
+
+    try:
+        if not recording:
+            out = client.request("GET", "/api/v1/coordinator/recording")
+        else:
+            out = client.request(
+                "PUT", "/api/v1/coordinator/recording",
+                json_body={"recording": recording},
+            )
+    except NotFoundError:
+        print(
+            "error: this coordinator does not manage recording destinations "
+            "(the hosted dashboard configures them per-environment instead).",
+            file=sys.stderr,
+        )
+        return 2
+    dest = out.get("recording") or {}
+    print(json.dumps(dest, indent=2) if dest else
+          "none — sessions will run but NOT be saved")
+    return 0
+
+
 # ----------------------------------------------------------------------
 
 
 def _add_auth_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--api-key", default=None,
                    help="Interlatent API key (ilat_…). Falls back to INTERLATENT_API_KEY.")
-    p.add_argument("--api-base", default=DEFAULT_API_BASE,
-                   help=f"Dashboard base URL (default: {DEFAULT_API_BASE}).")
+    p.add_argument("--coordinator", "--api-base", dest="api_base", default=None,
+                   help="Coordinator base URL, e.g. http://10.0.0.5:8900 or "
+                        "https://interlatent.com. Env: INTERLATENT_COORDINATOR.")
     p.add_argument("--json", action="store_true", help="Emit raw JSON instead of a table.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="interlatent",
-        description="Command-line client for the Interlatent dashboard: list "
-        "your GPU boxes and robot nodes, and start/stop cloud inference sessions.",
+        description="Session manager for Interlatent robot fleets. Run a "
+        "coordinator of your own (`up`), register GPU boxes and nodes "
+        "against it, and start/stop inference sessions — or point the "
+        "same commands at the hosted dashboard with --coordinator.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # -- running a coordinator of your own ------------------------------
+    p_up = sub.add_parser(
+        "up", help="Start a coordinator on this machine (background daemon)."
+    )
+    p_up.add_argument("--port", type=int, default=8900)
+    p_up.add_argument(
+        "--host", default="0.0.0.0",
+        help="Bind address. Default binds all interfaces so robots on the "
+             "LAN can reach it; use 127.0.0.1 to keep it local.",
+    )
+    p_up.set_defaults(func=cmd_up)
+
+    p_down = sub.add_parser("down", help="Stop the local coordinator.")
+    p_down.add_argument(
+        "--force", action="store_true",
+        help="Stop even with active sessions: unassigns each one and waits "
+             "for the nodes to tear down (which is what publishes datasets).",
+    )
+    p_down.add_argument(
+        "--grace", type=float, default=30.0,
+        help="Seconds to wait for nodes to converge to idle under --force.",
+    )
+    p_down.set_defaults(func=cmd_down)
+
+    p_status = sub.add_parser("status", help="Is the local coordinator up?")
+    p_status.set_defaults(func=cmd_status)
+
+    p_logs = sub.add_parser("logs", help="Tail the local coordinator's log.")
+    p_logs.add_argument("-f", "--follow", action="store_true")
+    p_logs.add_argument("-n", "--lines", type=int, default=50)
+    p_logs.set_defaults(func=cmd_logs)
+
+    p_config = sub.add_parser(
+        "config",
+        help="Get/set the recording destination stamped onto every session.",
+    )
+    p_config.add_argument("--output-dir", default=None,
+                          help="Publish datasets into this local directory.")
+    p_config.add_argument("--s3-uri", default=None,
+                          help="Publish to s3://bucket/prefix.")
+    p_config.add_argument("--s3-endpoint-url", default=None,
+                          help="For S3-compatible stores (MinIO, R2, ...).")
+    p_config.add_argument("--s3-access-key", default=None)
+    p_config.add_argument("--s3-secret-key", default=None)
+    p_config.add_argument("--s3-region", default=None)
+    _add_auth_flags(p_config)
+    p_config.set_defaults(func=cmd_config)
+
+    p_gpu = sub.add_parser("gpu", help="Register or remove a GPU box.")
+    gpu_sub = p_gpu.add_subparsers(dest="gpu_cmd", required=True)
+    g_add = gpu_sub.add_parser("add", help="Register a GPU box by address.")
+    g_add.add_argument("--name", required=True)
+    g_add.add_argument("--url", required=True,
+                       help="host:port your nodes can reach the box at.")
+    g_add.add_argument("--box-id", default=None,
+                       help="Stable id; defaults to --name.")
+    g_add.add_argument("--warm-policy", default=None,
+                       help="Policy the box is pre-warmed for, if known.")
+    _add_auth_flags(g_add)
+    g_ls = gpu_sub.add_parser("ls", help="List GPU boxes.")
+    _add_auth_flags(g_ls)
+    g_rm = gpu_sub.add_parser("rm", help="Remove a GPU box.")
+    g_rm.add_argument("name")
+    _add_auth_flags(g_rm)
+    p_gpu.set_defaults(func=cmd_gpu)
 
     p_gpus = sub.add_parser("gpus", help="List GPU boxes available to your account.")
     gpus_sub = p_gpus.add_subparsers(dest="gpus_cmd", required=True)

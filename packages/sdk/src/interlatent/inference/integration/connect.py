@@ -35,10 +35,12 @@ from typing import Optional
 from ..client import DRTCClient, DRTCConfig
 
 # Production URL for Interlatent's hosted DRTC server. Replace with
-# the URL printed by `modal deploy` once the app is live.
-# Override at runtime via env var INTERLATENT_DRTC_URL or via the
-# ``server_address`` arg to connect_drtc().
-DEFAULT_DRTC_URL = "https://interlatent--interlatent-drtc-inference-web.modal.run"
+# There is no default GPU endpoint. A DRTC address is either handed to you
+# per-session by a coordinator, or you name one yourself with
+# ``server_address=`` / ``INTERLATENT_DRTC_URL``. The old default pointed at
+# one specific hosted deployment, which is exactly the coupling ADR 0038
+# removes.
+DEFAULT_DRTC_URL = None
 
 
 def connect_drtc(
@@ -89,14 +91,12 @@ def connect_drtc(
         staged locally.
     """
     key = api_key or os.environ.get("INTERLATENT_API_KEY", "")
-    url = server_address or os.environ.get("INTERLATENT_DRTC_URL") or DEFAULT_DRTC_URL
-    if not key and url == DEFAULT_DRTC_URL:
-        # The hosted endpoint requires an account.
+    url = server_address or os.environ.get("INTERLATENT_DRTC_URL") or ""
+    if not url:
         raise ValueError(
-            "An Interlatent API key is required for the hosted endpoint. "
-            "Pass api_key=... or set INTERLATENT_API_KEY in your "
-            "environment — or pass server_address= to dial an explicit "
-            "compute endpoint."
+            "No DRTC endpoint. A GPU address is provided per-session by your "
+            "coordinator (that is what `interlatent-node` does); to dial one "
+            "directly, pass server_address=... or set INTERLATENT_DRTC_URL."
         )
 
     # Natural-language task (e.g. SmolVLA instruction) flows via

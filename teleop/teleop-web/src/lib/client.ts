@@ -20,14 +20,42 @@
 // Settings (localStorage)
 // ---------------------------------------------------------------------------
 
-export const API_BASE_STORAGE_KEY = 'interlatent.apiBase';
+export const API_BASE_STORAGE_KEY = 'interlatent.coordinator';
+const LEGACY_API_BASE_KEY = 'interlatent.apiBase';
 export const API_KEY_STORAGE_KEY = 'interlatent.apiKey';
-export const DEFAULT_API_BASE = 'https://interlatent.com';
+/** Where the hosted dashboard serves the coordinator protocol.
+ *  Offered as a suggestion in the settings panel; never a default —
+ *  this app talks to whatever coordinator you point it at. */
+export const HOSTED_COORDINATOR = 'https://interlatent.com';
 
+/** The configured coordinator, or '' when none has been set.
+ *
+ *  There is no default. This app is a client of whatever coordinator you run —
+ *  a hosted dashboard or `interlatent up` on your own LAN — and silently
+ *  defaulting to one of them is how a self-hosted deployment ends up quietly
+ *  talking to somebody else's control plane. `hasCoordinator()` lets the UI
+ *  ask for one instead of failing at the first request. */
 export function getApiBase(): string {
-  const stored = localStorage.getItem(API_BASE_STORAGE_KEY);
-  const base = (stored ?? DEFAULT_API_BASE).trim() || DEFAULT_API_BASE;
+  const stored =
+    localStorage.getItem(API_BASE_STORAGE_KEY) ??
+    // Written by a build that predates the rename; read once so an existing
+    // operator does not have to re-enter their address.
+    localStorage.getItem(LEGACY_API_BASE_KEY);
+  const base = (stored ?? '').trim();
+  if (!base) return '';
   return resolveApiBase(base.replace(/\/+$/, ''));
+}
+
+/** False until the operator has told us where their coordinator is. */
+export function hasCoordinator(): boolean {
+  return getApiBase() !== '' || isDevProxy();
+}
+
+function isDevProxy(): boolean {
+  const stored =
+    localStorage.getItem(API_BASE_STORAGE_KEY) ??
+    localStorage.getItem(LEGACY_API_BASE_KEY);
+  return Boolean(import.meta.env.DEV && stored && stored.trim());
 }
 
 /**
@@ -43,7 +71,7 @@ export function getApiBase(): string {
  * would otherwise fail the preflight with `400 Disallowed CORS origin`.
  */
 function resolveApiBase(base: string): string {
-  return import.meta.env.DEV && base === DEFAULT_API_BASE ? '' : base;
+  return import.meta.env.DEV && base === HOSTED_COORDINATOR ? '' : base;
 }
 
 export function getApiKey(): string {
@@ -52,7 +80,7 @@ export function getApiKey(): string {
 
 export function saveSettings(apiBase: string, apiKey: string): void {
   const base = apiBase.trim().replace(/\/+$/, '');
-  localStorage.setItem(API_BASE_STORAGE_KEY, base || DEFAULT_API_BASE);
+  localStorage.setItem(API_BASE_STORAGE_KEY, base.trim());
   localStorage.setItem(API_KEY_STORAGE_KEY, apiKey.trim());
 }
 
@@ -158,6 +186,12 @@ export interface TeleopTokenOut {
   transport?: 'quic';
   // WebTransport/HTTP3 URL of the QUIC relay.
   webtransport_url?: string | null;
+  // SHA-256 digests of a self-signed relay certificate, sent by a self-hosted
+  // coordinator whose embedded relay lives at a LAN address that no public CA
+  // will issue for. Absent against the hosted relay, which has a real cert.
+  // Re-sent on every mint, so a rotation cannot strand a browser on a stale
+  // digest.
+  server_certificate_hashes?: Array<{ algorithm: string; value: string }> | null;
 }
 
 /** Loose subset of the dashboard's InferenceSessionOut — only what this

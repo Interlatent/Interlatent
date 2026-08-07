@@ -29,10 +29,11 @@ from typing import Any
 import requests
 
 from .._clamp_log import LOGGER_NAME as _CLAMP_LOGGER_NAME
+from .._coordinator import resolve
 
-DEFAULT_API_BASE = os.environ.get(
-    "INTERLATENT_API_BASE", "https://interlatent.com"
-).rstrip("/")
+def _default_api_base() -> str:
+    """Resolved per-invocation; see interlatent._coordinator."""
+    return resolve(purpose="node")
 DEFAULT_CONFIG_PATH = Path(
     os.environ.get("INTERLATENT_NODE_CONFIG", "~/.interlatent/node.toml")
 ).expanduser()
@@ -138,7 +139,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         or os.environ.get("INTERLATENT_BYPASS_KEY", "").strip()
     )
 
-    url = f"{args.api_base.rstrip('/')}/api/v1/nodes"
+    coordinator = resolve(args.api_base, purpose="node")
+    url = f"{coordinator}/api/v1/nodes"
     try:
         resp = requests.post(
             url,
@@ -166,7 +168,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
     cfg_data = {
         "node_id": payload["id"],
         "token": payload["token"],
-        "api_base": args.api_base.rstrip("/"),
+        # Stored under the new key; "api_base" stays as a
+        # compat alias so a node.toml written by an older SDK
+        # keeps working without a re-pair.
+        "coordinator": coordinator,
+        "api_base": coordinator,
         "name": payload["name"],
     }
     # Persist the user API key: the node token authenticates heartbeat/poll,
@@ -204,7 +210,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     cfg_path = Path(args.config).expanduser()
     cfg = _read_config(cfg_path)
-    missing = [k for k in ("node_id", "token", "api_base") if k not in cfg]
+    missing = [
+        k for k in ("node_id", "token") if k not in cfg
+    ]
+    if not (cfg.get("coordinator") or cfg.get("api_base")):
+        missing.append("coordinator")
     if missing:
         print(
             f"error: config {cfg_path} is missing keys: {missing}. "
@@ -286,7 +296,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             token=cfg["token"],
             drtc_api_key=drtc_api_key,
             drtc_url=drtc_url,
-            api_base=cfg["api_base"],
+            api_base=resolve(
+                config=cfg.get("coordinator") or cfg.get("api_base"),
+                purpose="node",
+            ),
             bypass_key=bypass_key or None,
             robot_kind=args.robot,
             robot_port=args.port,
@@ -341,9 +354,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interlatent user API key (or set INTERLATENT_API_KEY).",
     )
     p_pair.add_argument(
+        "--coordinator",
         "--api-base",
-        default=DEFAULT_API_BASE,
-        help=f"Backend base URL (default: {DEFAULT_API_BASE}).",
+        dest="api_base",
+        default=None,
+        help="Coordinator base URL, e.g. http://10.0.0.5:8900 or "
+             "https://interlatent.com. Env: INTERLATENT_COORDINATOR.",
     )
     p_pair.add_argument(
         "--drtc-url",

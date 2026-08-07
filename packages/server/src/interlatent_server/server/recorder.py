@@ -31,7 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
 
+from ..coordinator import api_v1
 from ..protocol import messages_pb2 as pb  # noqa: F401  (type-only ref in docstrings)
+from .sinks import BackendInboxSink, DatasetSink
 from ..storage.lerobot_rebuild import LeRobotRebuilder, StepRow
 from ..storage.lerobot_live import (
     FpsDivergenceError,
@@ -71,6 +73,18 @@ _HTTP_TIMEOUT = 60.0
 _IMAGE_KEY_PREFIX = "observation.images."
 
 
+def _failed_publish_root() -> Path:
+    """Where a built-but-unpublishable dataset is parked instead of deleted.
+
+    Override with ``INTERLATENT_FAILED_PUBLISH_DIR``; defaults under the
+    same ``~/.interlatent`` home the node spool and box-id already use.
+    """
+    override = os.environ.get("INTERLATENT_FAILED_PUBLISH_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".interlatent" / "failed-publish"
+
+
 def _live_encode_enabled() -> bool:
     """ADR 0016 kill-switch: live encode is on unless INTERLATENT_LIVE_ENCODE
     is set to an explicit off value."""
@@ -97,22 +111,11 @@ def _short_cam(key: str) -> str:
     return key
 
 
-def _api_v1_root(api_base: str) -> str:
-    """Normalize an Interlatent API base to its ``/api/v1`` root.
-
-    ``api_base`` reaches us via ``INTERLATENT_API_BASE`` (and OpenSession
-    metadata), but two conventions collide in the same image:
-    ``serve_gpu`` and the whole node SDK treat it as the **bare origin**
-    (``https://interlatent.com``) and append ``/api/v1/...`` per call,
-    while older recorder code assumed it already ended in ``/api/v1``.
-    A box configured for the warmup-target fetch carries the bare origin,
-    so the recorder posted to ``/episodes`` and got 405. Accept either
-    form and always return the ``/api/v1`` root so the routes resolve.
-    """
-    base = api_base.rstrip("/")
-    if base.endswith("/api/v1"):
-        return base
-    return f"{base}/api/v1"
+#: Historical name for the shared normalizer. The two colliding conventions
+#: this used to reconcile are gone (a coordinator address is a bare origin,
+#: canonicalised in ``interlatent_server.coordinator``); the alias stays because
+#: the recorder's call sites read better with it spelled out.
+_api_v1_root = api_v1
 
 
 # ----------------------------------------------------------------------
@@ -148,6 +151,11 @@ class RecorderConfig:
     # Durable Task link (backend ``tasks`` row id), echoed back to
     # POST /episodes so the catalog row attributes without a lookup.
     task_id: Optional[str] = None
+    # Where the finished dataset goes. None = the hosted inbox, which is what
+    # every pre-sink session did. A coordinator that stamps `output_dir` or
+    # `s3_uri` onto its sessions makes the whole inbox tier unnecessary
+    # (ADR 0002).
+    sink: Optional["DatasetSink"] = None
 
 
 class SessionRecorder:
@@ -651,11 +659,20 @@ class SessionRecorder:
             effective_fps = (
                 measured_fps if measured_fps is not None else self.config.fps
             )
+            # A merge-on-stop sink aggregates sessions into one dataset, and
+            # lerobot's aggregate_datasets rejects mismatched `features` — so
+            # the control_source column has to be present whether or not a
+            # human happened to intervene this session.
+            sink = self.config.sink
             rebuilder = LeRobotRebuilder(
                 root=dataset_root,
                 fps=int(round(effective_fps)) if effective_fps >= 1 else 1,
                 task=self.config.task,
                 env_slug=self.config.env_slug,
+                force_control_source=bool(
+                    sink is not None and sink.normalize_for_merge()
+                ),
+                measured_fps=measured_fps,
                 # This recorder always runs inside Modal's gVisor-sandboxed
                 # container, where lerobot's default libsvtav1 encoder stalls
                 # badly (it can't set worker-thread priority there) — see
@@ -688,10 +705,14 @@ class SessionRecorder:
         # our session_id, so both lanes upload under config.episode_id.
         episode_id = self.config.episode_id
 
+        sink = self.config.sink or BackendInboxSink()
         try:
-            await self._post_episodes_create(episode_id)
-            await self._upload_dataset_dir(episode_id, dataset_root)
-            await self._post_upload_complete(episode_id)
+            await sink.publish(
+                episode_id=episode_id,
+                dataset_root=dataset_root,
+                config=self.config,
+                recorder=self,
+            )
             if self._dropped:
                 log.warning(
                     "SessionRecorder %s: uploaded with %d dropped frames",
@@ -713,6 +734,11 @@ class SessionRecorder:
                 "SessionRecorder %s: backend upload failed",
                 self.config.episode_id,
             )
+            # The dataset is BUILT and complete — only shipping it failed.
+            # Park it outside working_dir before the cleanup below rmtree's
+            # it, so an outage (or a bad S3 credential) costs a retry rather
+            # than the episode.
+            self._quarantine_dataset(dataset_root)
         finally:
             self._cleanup_working_dir()
 
@@ -847,6 +873,38 @@ class SessionRecorder:
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
+
+    def _quarantine_dataset(self, dataset_root: Optional[Path]) -> None:
+        """Move a built dataset out of ``working_dir`` so cleanup can't eat it.
+
+        Best-effort by construction: this runs on the failure path, and a
+        quarantine that itself raises must not mask the upload exception
+        already being logged, nor skip the working-dir cleanup.
+        """
+        if dataset_root is None:
+            return
+        try:
+            if not dataset_root.is_dir():
+                return
+            root = _failed_publish_root()
+            root.mkdir(parents=True, exist_ok=True)
+            dest = root / self.config.episode_id
+            n = 1
+            while dest.exists():
+                dest = root / f"{self.config.episode_id}.{n}"
+                n += 1
+            shutil.move(str(dataset_root), str(dest))
+            log.error(
+                "SessionRecorder %s: publish failed; dataset KEPT at %s "
+                "(not deleted). Retry the upload or import it by hand.",
+                self.config.episode_id, dest,
+            )
+        except Exception:
+            log.exception(
+                "SessionRecorder %s: could not quarantine %s; "
+                "the dataset is about to be deleted with the working dir",
+                self.config.episode_id, dataset_root,
+            )
 
     def _cleanup_working_dir(self) -> None:
         try:

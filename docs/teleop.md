@@ -21,25 +21,43 @@ that *computes* a joint target — VR pose retargeting, IK — runs off-robot, a
 the node keeps only a receiver plus the last-hop safety clamp:
 
 ```
-browser producer (dashboard)                                   robot (node)
-────────────────────────────                                   ─────────────
-WebXR VR overlay ─ pose ─▶ hosted IK ─ targets ─(WS)─▶ ┐  TeleopChannel   ┐
-                                                       ├─▶                 ├─▶ SafetyGate
-WebXR VR overlay ─ in-browser IK ─ targets ─(QUIC)─▶ ─ ┘  QuicTeleopChannel┘   ─▶ send_action
+browser producer                          relay              robot (node)
+────────────────                          ─────              ─────────────
+WebXR VR overlay ─ in-browser IK ─ targets ─(QUIC)─▶ ─▶ QuicTeleopChannel
+                                                            ─▶ SafetyGate ─▶ send_action
 ```
 
-Two paths exist — pose frames solved to joint targets on hosted compute (WS,
-`TeleopChannel`), or a low-latency path that runs IK **in the browser** and
-sends joint-target frames directly over QUIC/WebTransport
-(`QuicTeleopChannel`), fed by a compact kinematic spec the node itself serves
-from its installed robot data. The node selects automatically
-(`teleop.factory`); you don't configure this. Both sit behind one shared
-interface, so whichever path is in play, the node never runs IK, and **all
-motion converges on one node-side action-driving interface**: absolute joint
-target → `SafetyGate` → `send_action` — the same interface every action, human
-or policy, ultimately passes through (see
-[the action interface](action-interface.md#safety)). The QUIC wiring is
-detailed in [QUIC transport & process model](#quic-transport--process-model).
+**Teleop is QUIC-only.** IK runs **in the browser**, which sends joint-target
+frames over QUIC/WebTransport, fed by a compact kinematic spec the node itself
+serves from its installed robot data — no platform round trip, and
+deliberately no fallback source. `teleop.factory` disables teleop outright
+unless the token mint answers `transport: "quic"` with a `webtransport_url`.
+
+> Earlier revisions of this document described a second path: pose frames
+> solved to joint targets on hosted compute over a WebSocket
+> (`TeleopChannel`). That path is gone from the code — `serve_gpu` no longer
+> carries a relay or a retarget stage — and the `mode="keys"`/`mode="pose"`
+> frame kinds survive on the wire only as a legacy decode default that results
+> in a hold, not motion.
+
+The node never runs IK, and **all motion converges on one node-side
+action-driving interface**: absolute joint target → `SafetyGate` →
+`send_action` — the same interface every action, human or policy, ultimately
+passes through (see [the action interface](action-interface.md#safety)). The
+QUIC wiring is detailed in
+[QUIC transport & process model](#quic-transport--process-model).
+
+The relay is a byte-faithful bridge that pairs the two sides by session id; it
+parses nothing. Against the hosted dashboard it is a hosted deployment;
+`interlatent up` runs an embedded one
+(`pip install 'interlatent[teleop-relay]'`) so a self-hosted deployment needs
+no hosted service for VR. Because no public CA issues certificates for a LAN
+address, the embedded relay mints a short-lived self-signed one and hands its
+SHA-256 to the browser as `serverCertificateHashes` (Chromium-only; the
+certificate is ECDSA P-256 and rotates well inside the 14-day cap Chromium
+imposes). A node trusts it via `INTERLATENT_TELEOP_CA_FILE` — pinning one
+relay, rather than `INTERLATENT_TELEOP_INSECURE`, which disables chain *and*
+hostname verification together.
 
 The producer is browser-native and lives in the dashboard — there is nothing
 to install on the operator's machine beyond a headset's browser.

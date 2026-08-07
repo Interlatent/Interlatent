@@ -119,12 +119,15 @@ schedule. The result is smooth 30 Hz control on top of a multi-second model. Det
 [docs/concepts.md](docs/concepts.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 **The node daemon** (`interlatent-node`) is how a robot stays online: pair it once, and it
-polls the dashboard and converges to whatever inference session is assigned to it. It
-resolves the control loop for your `--robot` kind, opens the DRTC client, and runs.
+long-polls a **coordinator** and converges to whatever session is assigned to it. It
+resolves the control loop for your `--robot` kind, opens the DRTC client, and runs. The
+coordinator is either the hosted dashboard or one you run yourself with `interlatent up` —
+one protocol, and the node cannot tell which it has.
 
 **Collection is streaming-first.** The control loop JPEG-encodes each camera frame per
-tick and streams `RecordTick`s to the hosted recorder, which builds and uploads the
-LeRobot v3.0 dataset server-side. A node-side disk spool with delete-after-ack keeps the
+tick and streams `RecordTick`s to the GPU box, which builds the LeRobot v3.0 dataset
+server-side and publishes it wherever the session says: a local directory, an S3 bucket
+you own, or the hosted inbox. A node-side disk spool with delete-after-ack keeps the
 uplink lossless — a link drop never silently thins an episode. (The old on-device
 `watch()`/`tick()`/`upload()` build was removed in 2.0.0; existing datasets enter via
 the dashboard's HF import.)
@@ -250,8 +253,9 @@ interlatent-node run  --robot so101 --port /dev/ttyACM0 --camera front=/dev/vide
 Then start a session against it, from the CLI or the dashboard:
 
 ```bash
-interlatent gpus ls          # GPU pods available to your account
-interlatent nodes ls         # robot nodes paired to your account
+interlatent up               # run a coordinator here (or point at a hosted one)
+interlatent gpus ls          # GPU boxes it knows about
+interlatent nodes ls         # robot nodes paired to it
 interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base
 interlatent session stop <session-id>
 ```
@@ -427,6 +431,7 @@ plane, BYO compute" rather than a fully standalone mode.
 - [Going to cloud](docs/going-to-cloud.md)
 - [Self-hosting the policy server](docs/self-hosting.md) - run `interlatent-server` on your own GPU
 - [The DRTC wire protocol](proto/README.md) - the source of truth, and how to change it
+- [The coordinator protocol](docs/coordinator-protocol.md) - the control-plane contract nodes, boxes and the CLI speak
 - [Architecture](ARCHITECTURE.md) - for contributors
 
 ## Contributing

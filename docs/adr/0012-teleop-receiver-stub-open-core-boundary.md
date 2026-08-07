@@ -16,6 +16,20 @@
 > the legacy decode default and (per the decision below) results in a hold, not
 > motion. The boundary this ADR draws is unchanged.
 
+**Amended 2026-08-06 (ADR 0038).** The boundary this ADR drew has moved, and
+the text below now describes only where it *was*. Two changes:
+
+1. **The IK solver is no longer closed.** `teleop/teleop-web/src/lib/teleop/`
+   ships a full in-browser DLS solver in this repo. The QUIC path put the
+   solve in the browser and the standalone producer brought that code
+   open-source with it; this ADR's "the SDK ships no IK solver" was already
+   false in practice before it was written down here.
+2. **The relay is no longer hosted-only.** `interlatent up` runs an embedded
+   WebTransport relay, so VR teleop needs no hosted service at all.
+
+What survives unchanged is the part that mattered most: `SafetyGate` is the
+last hop before the motors and runs on the robot, never across the network.
+
 ## Context
 
 Interlatent supports **teleop**: a human operator drives a robot remotely
