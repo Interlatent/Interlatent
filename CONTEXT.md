@@ -254,10 +254,20 @@ first, gate second. _Avoid_: conflating with deadman release, which is a soft
 hold, not a stop. Universal adapter-level e-stop is future work.
 
 **control_source**:
-Per-tick provenance recorded into the LeRobot dataset: `"policy"` for
-policy-driven steps, `"teleop"` for human-driven (VR demonstration) ticks,
-`"hold"` for disengaged hold ticks. Carried on the `RecordTick` wire message and
-rebuilt into `annotation.interlatent.control_source`.
+Per-tick provenance recorded into the LeRobot dataset. A **four-value
+contract** — `{"policy", "teleop", "hold", "intervention"}`: `"policy"` for
+autonomous inference chunks, `"teleop"` for human-driven ticks in a
+policy-less recording session, `"intervention"` for a human override *of a
+running policy*, and `"hold"` for disengaged hold ticks. Carried on the
+`RecordTick` wire message and rebuilt into
+`annotation.interlatent.control_source`.
+
+`"teleop"` and `"intervention"` are deliberately **not** the same label: an
+intervention is a correction against a policy's behaviour and carries the
+training signal DAgger-style methods consume, so collapsing the two is silent
+training-data corruption (`proto/messages.proto`). `MovementSource.ESTOP` is the
+one arbitration source with no `control_source` — e-stop ticks are never
+captured, which is what keeps the contract at four values.
 
 **Dimos adapter**:
 Vendor adapter `interlatent.adapters.dimos` (`--robot dimos`,
