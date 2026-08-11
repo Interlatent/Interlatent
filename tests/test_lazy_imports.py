@@ -71,7 +71,7 @@ EXEMPT = {
 # violation. (grpcio and torch have no wheels for every platform a developer
 # might run this on.)
 BASE_DEPS = ["requests", "torch", "numpy", "httpx", "grpc", "grpc_tools",
-             "google", "sonora", "websockets"]
+             "google", "sonora"]
 
 _CHECKER = textwrap.dedent(
     '''

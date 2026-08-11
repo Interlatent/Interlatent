@@ -76,10 +76,9 @@ dashboard** (`site/src/lib/teleop/*` and
 `site/src/components/teleop/VRTeleopOverlay.tsx` in the Interlatent-Main
 repo) rather than extracted into a shared package — the dashboard deploy
 and this app have different release cadences and the code is dependency-free
-by design. Copied files carry a header naming their source path and commit.
-**Fixes must land in both copies**; when touching one, port the change to the
-other. (`src/lib/teleop/kinematics.ts` and `src/lib/teleop/quicPoseSocket.ts`
-carry no such header — check upstream before editing them.)
+by design. Every copied file carries a header naming its source path and
+commit. **Fixes must land in both copies**; when touching one, port the change
+to the other.
 
 Local pieces: `src/lib/client.ts` (typed fetch client replacing the dashboard's
 react-query `api.ts`), `src/App.tsx` (session picker + settings shell),

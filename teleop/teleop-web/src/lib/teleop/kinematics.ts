@@ -1,3 +1,4 @@
+// Copied from Interlatent-Main site/src/lib/teleop/kinematics.ts @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 /**
  * Browser-side forward kinematics + geometric Jacobian for a serial arm,
  * from the compact "kinematic spec" the backend exports
