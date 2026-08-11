@@ -63,10 +63,11 @@ turbo = [
 ]
 
 # pip install 'interlatent[teleop-quic]'
-# Low-latency in-browser teleop path: the node dials the QUIC/WebTransport relay
-# and consumes joint-target datagrams (node/teleop/quic_channel.py). aioquic is
-# optional — only needed on nodes running the QUIC transport; the default WS
-# teleop path (node/teleop/channel.py) needs only `websockets` (a core dep).
+# In-browser teleop: the node dials the QUIC/WebTransport relay and consumes
+# joint-target datagrams (node/teleop/quic_channel.py). This is the ONLY teleop
+# transport — the old WebSocket path is gone — so a node that should accept
+# teleop needs this extra. Without aioquic, node/teleop/factory.py logs
+# "QUIC teleop unavailable" and disables teleop for the session.
 teleop-quic = [
   # >=1.3: the video tee's stream-completion check reads
   # QuicConnection._streams (validated on 1.3.x; see quic teleop ADR).

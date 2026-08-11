@@ -22,7 +22,7 @@ _REMOVED_COLLECTION_MSG = (
     "Interlatent.{name}() has been removed: client-side/local collection is "
     "deprecated (see the SDK docs and ADR 0022 'collection is streaming-"
     "first'). Record episodes through a hosted session instead — run the "
-    "node daemon (`interlatent node run`) against an inference session or "
+    "node daemon (`interlatent-node run`) against an inference session or "
     "teleop recording; the server builds and uploads the dataset."
 )
 

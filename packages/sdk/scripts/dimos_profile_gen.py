@@ -12,14 +12,15 @@ imported by any runtime path, so it does not weaken robot_profile.py's
 
 Prints, for each ``--joint`` (in the order given — must match the kind's
 profile joint order, arm joints only; the gripper is never in the URDF and
-must still be hand-declared), a ready-to-paste tuple line for the
-``_LIMITS`` literal in robot_profile.py, plus the raw URDF ``velocity_limit``
-and ``effort_limit`` as commented-out reference values.
+must still be hand-declared), one ``(lower, upper),`` line to transcribe into
+the kind's ``adapters/dimos/robots/<kind>.toml`` ``[profile]`` limits, plus the
+raw URDF ``velocity_limit`` and ``effort_limit`` as commented-out reference
+values.
 
 This tool intentionally does NOT emit a ``max_velocity`` or ``rest_pose``
-tuple: per this project's stated philosophy (see robot_profile.py's dimos_xarm7
-and dimos_a1z sections, and README.md's "Robots should consume URDFs directly"
-future direction), a URDF's velocity_limit is typically a motor max rather
+tuple: per this project's stated philosophy (see the xarm7/a1z TOML comments
+on why a URDF's raw caps are not trustworthy), a URDF's velocity_limit is
+typically a motor max rather
 than a safe per-tick streaming cap, and a rest pose is not declared in a URDF
 at all — both remain deliberate human judgment calls, reviewed and committed
 as static literals same as today, not auto-derived.

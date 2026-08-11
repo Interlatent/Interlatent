@@ -4,7 +4,7 @@ package interlatent.inference.v1;
 
 // DRTC wire format. Source of truth for both server (engine) and
 // client (SDK). Regenerate stubs into both packages with
-// scripts/gen_proto.sh.
+// proto/gen_proto.sh.
 
 // One control-rate action with its scheduled step index and the
 // monotonic control timestamp it was issued under. Timestamps drive
