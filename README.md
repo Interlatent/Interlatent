@@ -4,8 +4,8 @@
 
 ### One open interface to control every robot.
 
-Read joint positions and command motion the **same way on every supported arm** — from
-Python, the command line, a VR headset, or an AI policy.
+Read joint positions and command motion the **same way on every supported robot** via
+Python, the command line, a VR headset, or a learned policy.
 
 [![PyPI](https://img.shields.io/pypi/v/interlatent?color=7C5CFF&label=interlatent)](https://pypi.org/project/interlatent/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -20,7 +20,7 @@ Python, the command line, a VR headset, or an AI policy.
 
 ## Install
 
-Python 3.11+. The base package works without hardware; real robots need one extra.
+Python 3.11+. The base package works without hardware, and each robot gets its own extra.
 
 ```bash
 pip install interlatent
@@ -28,27 +28,23 @@ pip install interlatent
 
 | Extra | For | Notes |
 |---|---|---|
-| `[lerobot]` | SO-101 | May also need `pip install feetech-servo-sdk`. |
-| `[yam]` | I2RT YAM | Linux + SocketCAN. See the build note below. |
-| `[nori]` | Nori | Runs on the robot's own network or on the Pi. |
-| `[dimos]` | xArm7 / xArm6 / A1Z | Python 3.11–3.12. Large install; needs a running dimos stack. |
-| `[axol]` | Almond Axol | Python 3.13+. ZED SDK and `pyzed` installed separately. |
-| `[turbo]` | Faster camera encoding | Also needs `libturbojpeg` on the host. |
-| `[teleop-quic]` | Lower-latency VR teleop | Optional; the default path needs nothing extra. |
+| `interlatent[lerobot]` | SO-101 | May also need `pip install feetech-servo-sdk`. |
+| `interlatent[yam]` | I2RT YAM | Linux + SocketCAN. See the build note below. |
+| `interlatent[nori]` | Nori | Runs on the robot's own network or on the Pi. |
+| `interlatent[dimos]` | xArm7 / xArm6 / A1Z | Python 3.11–3.12. Large install; needs a running dimos stack. |
+| `nterlatent[axol]` | Almond Axol | Python 3.13+. ZED SDK and `pyzed` installed separately. |
+| `interlatent[turbo]` | Faster camera encoding | Also needs `libturbojpeg` on the host. |
+| `interlatent[teleop-quic]` | Lower-latency VR teleop | Optional; the default path needs nothing extra. |
 
-Install **one** robot extra per environment — `lerobot`, `yam`, `dimos`, and `axol` can't
-coexist.
-
-`[yam]` needs a build constraint under plain pip. Use `uv pip install`, or:
-
-```bash
-printf 'scikit-build-core<0.10\n' > /tmp/c.txt
-PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'
-```
+> `[yam]` needs a build constraint under plain pip. Use `uv pip install`, or:
+>```bash
+>printf 'scikit-build-core<0.10\n' > /tmp/c.txt
+>PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'
+>```
 
 ## Quickstart
 
-Plug in an arm and move it. No account, no cloud, no config file.
+Plug in an arm and move it. This doesn't rely on an account, cloud, or config file.
 
 ```python
 import interlatent as il
@@ -60,13 +56,13 @@ with il.Robot("so101", port="/dev/ttyACM0") as robot:
     robot.move(wrist_roll=30, duration=0.5) # move one joint
 ```
 
-`Robot` gives you `pose()`, `move()`, `act()`, `behaviors()`, and `close()`. Positions are
-always **joint angles** — no inverse kinematics, no Cartesian coordinates.
+`Robot` gives you `pose()`, `move()`, `act()`, `behaviors()`, and `close()`. Positions/actions are
+currently always **joint angles**.
 
-The same thing from the terminal:
+You can also do the same thing from the terminal:
 
 ```bash
-interlatent-act --robot so101 --port /dev/ttyACM0 --show          # print the pose
+interlatent-act --robot so101 --port /dev/ttyACM0 --show          # print the pose and joint names
 interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30 wrist_roll=-15
 ```
 
@@ -76,7 +72,7 @@ joint values are rejected before the robot moves.
 ### Named moves
 
 `act("hello")` runs a **behavior** — a named sequence of joint poses written in TOML. Every
-robot gets `home` for free, generated from its own rest pose.
+robot gets `home`.
 
 ```bash
 interlatent behavior ls --robot so101
@@ -85,7 +81,7 @@ interlatent behavior run hello --robot so101 --port /dev/ttyACM0
 ```
 
 Write your own in `~/.interlatent/behaviors.toml`, in a file you pass explicitly, or as a
-Python function decorated with `@il.behavior`. Format:
+Python function decorated with `@il.behavior`. See the format at:
 [docs/behaviors.md](docs/behaviors.md).
 
 ## Supported robots
@@ -98,10 +94,6 @@ Python function decorated with `@il.behavior`. Format:
 | **Nori** (beta) | `nori` | 12; normalized ±100 | ✅ | `[nori]` | [doc](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
 | **xArm7 / xArm6 / A1Z** | `dimos`, `--robot-arg kind=…` | 8 / 7 / 7 incl. gripper; radians | ✅ | `[dimos]` | [doc](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
 | **Almond Axol** (beta) | `axol` | 16; radians, gripper 0–1 | ❌ policy only | `[axol]` | [doc](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
-| Anything else | `--loop module:fn` | yours | — | — | your own control loop |
-
-Robots marked **policy only** don't yet have verified joint limits, so manual moves,
-behaviors, and VR teleop are blocked on them for safety. AI policies still run.
 
 Adding a robot takes one adapter file and one profile of its physical limits —
 [ROBOT.md](ROBOT.md#adding-a-new-robot). Everything else (behaviors, teleop, policies,
@@ -109,60 +101,36 @@ recording) then works on it automatically.
 
 ## Run an AI policy
 
-Policies run on a GPU machine and stream actions back to the robot at 30 Hz. Use the hosted
-GPUs, or run your own.
+Policies run on a GPU machine and stream actions back to the robot at 30 Hz.
 
-**With the hosted dashboard** ([interlatent.com](https://interlatent.com)):
+To set up a receiver node, which controls the robot:
 
 ```bash
 export INTERLATENT_API_KEY=ilat_...
 
-interlatent-node pair --name my-arm                    # once per machine
+interlatent-node pair --name my-arm                    # this will setup connection and naming details.
 interlatent-node run  --robot so101 --port /dev/ttyACM0 --camera front=/dev/video0
+```
+You can run servers off of your own GPUs or on cloud providers such as runpod or modal. Install the server there
+(`pip install 'interlatent-server[lerobot]'`, or use Docker — see
+[docs/self-hosting.md](docs/self-hosting.md)), and start it with `interlatent-serve`. You can then start a session:
 
+```bash
 interlatent gpus ls
-interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base
+interlatent session start --node my-arm --gpu <gpu-addr> --policy lerobot/smolvla_base
 interlatent session stop <session-id>
 ```
 
-Check the connection before touching hardware:
+Supported policies: SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5 (via LeRobot), MolmoAct2. Full info: [docs/robots-and-policies.md](docs/robots-and-policies.md).
 
-```bash
-interlatent-preflight --environment my-arm --policy lerobot/smolvla_base
-```
-
-**On your own GPU box**, with no account at all. Install the server there
-(`pip install 'interlatent-server[lerobot]'`, or use Docker — see
-[docs/self-hosting.md](docs/self-hosting.md)), start it with `interlatent-serve
---no-register`, and drive the loop yourself:
-
-```python
-from interlatent.inference.integration import connect_drtc
-
-client = connect_drtc(environment="my-arm", server_address="your-box:50051",
-                      policy_uri="lerobot/smolvla_base",
-                      task="pick up the red cube", fps=30)
-while running:
-    action = client.step(observation_npz_bytes, codec="npz")  # None until the first chunk
-    if action is not None:
-        robot.send_action(action)
-client.close()
-```
-
-An observation is an `np.savez` blob with LeRobot-style keys
-(`observation.images.<camera>`, `observation.state`, `task`). You own the loop, so there's
-no session management or recording. `--no-register` also turns off authentication — keep
-that box off routable networks.
-
-Supported policies: SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5 (via LeRobot), MolmoAct2, and
-DreamZero. Full matrix: [docs/robots-and-policies.md](docs/robots-and-policies.md).
+WAM inference is still WIP.
 
 ## VR teleoperation and data collection
 
 [`teleop/teleop-web/`](teleop/teleop-web) is a web app you open in a VR headset: grip to
-clutch, trigger for the gripper, right controller drives the end effector. You take over a
-running policy at any time, and the robot hands control back when you let go. Every frame is
-labelled with who was driving, so the recording is usable training data.
+clutch, trigger for the gripper. By default, the right controller drives the end effector. You can also take over a
+running policy at any time. Every frame is
+labelled with who was driving, so the recording is usable intervention data.
 
 Build and host it yourself over HTTPS:
 
@@ -178,7 +146,7 @@ the resulting LeRobot v3.0 datasets. Setup: [docs/teleop.md](docs/teleop.md).
 Two limits apply on every tick, both read from the robot's own profile and both enforced on
 the machine holding the motors:
 
-- A **step clamp** caps how far any joint can jump in one tick — for AI policies and humans
+- A **per step delta clamp** caps how far any joint can jump in one tick. This applies to both policies and humans
   alike. Tune it with `--robot-arg max_step=…`.
 - **Workspace, speed, staleness, and deadman limits** apply to human-driven motion, plus an
   emergency stop that only a person can clear.
@@ -196,6 +164,8 @@ Python and CLI paths above need nothing.
 | `INTERLATENT_IMAGE_RESIZE` | Shrink camera frames to this square size. `256` suits MolmoAct2. |
 | `INTERLATENT_JPEG_BACKEND` | Pick the image encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). |
 | `INTERLATENT_SPOOL_DIR` / `_MAX_MB` | Where recordings buffer, and the cap (default `~/.interlatent/spool`, 6 GiB). |
+
+> The JPEG encoding backend is automatically configured based on available hardware, but can be manually set.
 
 ## Docs
 
@@ -215,7 +185,7 @@ Runnable examples, ordered by how much hardware they need:
 | Running your own policy server | [docs/self-hosting.md](docs/self-hosting.md) |
 | Using the hosted dashboard | [docs/going-to-cloud.md](docs/going-to-cloud.md) |
 | Wire protocol | [proto/README.md](proto/README.md) |
-| Glossary · Architecture · Decisions | [CONTEXT.md](CONTEXT.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/adr/](docs/adr/) |
+| Docs for Agents | [CONTEXT.md](CONTEXT.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/adr/](docs/adr/) |
 
 Everything that touches the robot is open source and runs without an account. The
 [dashboard](https://interlatent.com) is the hosted layer on top: it pairs machines, assigns
@@ -223,21 +193,31 @@ GPUs, brokers VR teleop, and stores datasets.
 
 ## Contributing
 
-Most wanted: **new robots**, and anything that breaks the path from `pip install` to a first
-rollout.
+Adding robot profiles and additional features to this repository helps make it more useful for others. We appreciate any contributions from the community.
+
+To run tests:
 
 ```bash
 pip install -e ./packages/sdk pytest pytest-timeout ruff jsonschema
 pytest tests/ packages/sdk/tests/ -v --timeout=120   # both roots; neither is a subset
+pytest tests/ packages/server/tests/ -v --timeout=120  
 ruff check .
 ```
 
-Everything runs with no GPU and no robot. Server and web tests are separate
+Exisiting pytests run with no GPU and no robot, but you should **test your code on real hardware** before pushing.
+
+Server and web tests are separate
 (`pytest packages/server/tests/`; `npm test` in `teleop/teleop-web`) — see
-[TESTING.md](TESTING.md). If you change `proto/messages.proto`, regenerate with
+[TESTING.md](TESTING.md). 
+
+If you change `proto/messages.proto`, regenerate with
 `./proto/gen_proto.sh` and keep changes additive. **Sign off your commits**
-(`git commit -s`) — CI checks [DCO](https://developercertificate.org/). Details:
-[CONTRIBUTING.md](CONTRIBUTING.md). Security issues go to team@interlatent.com, never a
+(`git commit -s`) — CI checks [DCO](https://developercertificate.org/). 
+
+Details:
+[CONTRIBUTING.md](CONTRIBUTING.md). 
+
+Security issues should go to team@interlatent.com, never a
 public issue.
 
 ## License
