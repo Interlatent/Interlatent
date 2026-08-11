@@ -2,11 +2,9 @@
 
 Everything this SDK does to an arm goes through one contract: four methods plus three
 pieces of metadata (`action_features`, `joint_specs`, `robot_kind`) on a robot object
-([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)). The
-[README](README.md#robot-class) explains that idea, and
-[Supported robots](README.md#supported-robots) lists the arms that work today. This document
-is the reference for the files underneath: what each one is, what it decides, and what you
-would write to add an arm of your own.
+([`adapters/base.py`](packages/sdk/src/interlatent/adapters/base.py)).
+[Supported robots](README.md#supported-robots) lists the arms that work today; this
+document is the reference for the files underneath.
 
 Four files define a robot:
 
@@ -24,19 +22,17 @@ the fourth is generated for you.
 
 ## 1. The profile: what your robot physically is
 
-The file people don't expect, and the most important one here. A `RobotProfile` is the
-kinematic truth about an arm: joint names **and their order**, software limits, per-joint
-velocity caps, and the rest pose. The `SafetyGate` enforces it, `home` is generated from it,
-`action()` validates against it, and behaviors are checked against it at load.
+A `RobotProfile` is the kinematic truth about an arm: joint names **and their order**,
+software limits, per-joint velocity caps, and the rest pose. The `SafetyGate` enforces it,
+`home` is generated from it, `action()` validates against it, and behaviors are checked
+against it at load.
 
 It exists because no vendor gives you all of it. A driver (or LeRobot) hands you joint names
 and live positions; a URDF hands you mechanical limits. Neither declares a *safe per-tick
-velocity cap* or a *home pose*, and those are precisely what you need to move an arm without
-breaking it.
+velocity cap* or a *home pose*.
 
-YAM is the instructive case. SO-101 is a 6-joint arm in degrees and LeRobot already carries
-most of its tooling; YAM is a 14-DOF bimanual robot on raw CAN, where this file is doing all
-the work:
+YAM is the instructive case — a 14-DOF bimanual robot on raw CAN, where this file is doing
+all the work:
 
 ```python
 # packages/sdk/src/interlatent/node/teleop/robot_profile.py   (comments abridged)
@@ -72,8 +68,7 @@ YAM_LEFT_PROFILE  = _yam_profile("yam_left",  ("left",))           #  7 joints
 YAM_RIGHT_PROFILE = _yam_profile("yam_right", ("right",))          #  7 joints
 ```
 
-Three decisions in there are worth calling out, because each is judgement a "just import the
-URDF" approach would throw away:
+Three decisions in there are judgement a "just import the URDF" approach would throw away:
 
 - **The limits are the URDF's, unmodified** - and deliberately *not* inset below the
   mechanical range, the way SO-101's are. YAM's all-zeros home sits exactly on the lower
@@ -85,10 +80,7 @@ URDF" approach would throw away:
 - **The gripper isn't in the URDF at all** (i2rt combines it in separately from the
   LINEAR_4310 model), so its `[0, 1]` range is still a placeholder pending hardware.
 
-That tension - the URDF is authoritative for *limits* but wrong for *caps*, and silent about
-the gripper - is exactly why profiles are still hand-written, and what makes
-[deriving them from URDFs](README.md#future-directions) a real design problem rather than a
-chore.
+That is why profiles are still hand-written rather than derived from URDFs.
 
 One more load-bearing detail: `joint_names` order here **equals**
 `YAMNativeRobot.action_features`, and `base.py` raises if they ever diverge. A policy binds
@@ -120,12 +112,6 @@ An adapter is one directory under
 | `cameras.py` | Frame capture, normalized to `uint8 HxWx3` RGB. Vendor SDKs are imported lazily inside methods. |
 | `loop.py` | A thin session shim: constructs the robot + its collaborators and hands the tick to the shared runner (`node/looprunner.py`) and command bus (ADR 0022). No per-tick logic lives here. |
 
-A useful way to read the tree: `robot.py` is the *leaf*, `base.py` is the *contract*, and
-the rest is plumbing that exists because a robot needs configuring and looking at. The
-per-tick logic is gone from the adapter entirely (ADR 0022); folding the remaining
-construction plumbing into the robot class is a
-[future direction](README.md#fold-the-adapters-into-the-robot-class).
-
 ```python
 class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py
 
@@ -149,9 +135,9 @@ class YAMNativeRobot(ManualActionInterface):   # adapters/yam/robot.py
     def disconnect(self) -> None: ...
 ```
 
-That `robot_kind` line is worth a second look: it's how one adapter serves three profiles.
-Ask for one arm and the robot reports itself as `yam_left`, so the SafetyGate, `home`, and
-`action()` all bind to the 7-joint envelope automatically.
+That `robot_kind` line is how one adapter serves three profiles: ask for one arm and the
+robot reports itself as `yam_left`, so the SafetyGate, `home`, and `action()` all bind to
+the 7-joint envelope automatically.
 
 The observation and action are plain dicts keyed by `action_features`, plus camera frames:
 
@@ -190,19 +176,22 @@ Full references: [SO-101 config](packages/sdk/src/interlatent/adapters/lerobot/C
 
 ### USB bandwidth on multi-camera rigs
 
-`--camera` accepts comma-separated capture extras after the device:
+The YAM adapter's `--camera` accepts comma-separated capture extras after the device
+(`width`/`height`/`fps`/`pixel_format` — parsed in
+[`adapters/yam/cameras.py`](packages/sdk/src/interlatent/adapters/yam/cameras.py); other
+adapters take the device alone):
 
 ```bash
 --camera front=/dev/video0,width=1280,height=720,fps=15,pixel_format=yuyv
 ```
 
-UVC webcams default to **MJPG** wire format. Uncompressed YUYV at 640×480@30
-reserves ~147 Mbit/s of USB isochronous bandwidth *per camera*; MJPG is
-~20–40 Mbit/s. That matters because every USB2-class device shares **one
-480 Mbit/s domain per host controller** (on a Jetson Orin Nano, that is all
-the type-A ports together) — the failure mode is not slowness but a camera
-or CAN adapter **refusing to open/enumerate only when the others are
-active**, because xHCI cannot reserve the bandwidth upfront. Rules of thumb:
+UVC webcams default to **MJPG**. Uncompressed YUYV at 640×480@30 reserves
+~147 Mbit/s of USB isochronous bandwidth *per camera*; MJPG is ~20–40 Mbit/s.
+Every USB2-class device shares **one 480 Mbit/s domain per host controller**
+(on a Jetson Orin Nano, all the type-A ports together), so the failure mode is
+not slowness but a camera or CAN adapter **refusing to open/enumerate only
+when the others are active** — xHCI cannot reserve the bandwidth upfront.
+Rules of thumb:
 
 - Keep the MJPG default unless the rig is CPU-bound (MJPG costs a per-frame
   JPEG decode in OpenCV; `pixel_format=yuyv` or `=default` trades bandwidth
@@ -235,13 +224,13 @@ name     = "my-arm"
 ## Special case: the dimos adapter (the robot is a running stack)
 
 `--robot dimos` ([`adapters/dimos/`](packages/sdk/src/interlatent/adapters/dimos/),
-`interlatent[dimos]`, python 3.12 — 3.11 resolves only off linux/x86_64; see
-*Pin the interpreter* below) inverts the usual shape: there is no motor
-driver, because the "vendor SDK" is a **running dimos process**. The adapter joins
-dimos's LCM/Zenoh bus as a peer — `coordinator_joint_state` + camera `Image`
-topics in, `joint_command` out (consumed by a dimos **servo task** that claims
-every joint *including the gripper* — dimos stomps unclaimed grippers back to
-their startup value while streaming).
+`interlatent[dimos]`, python 3.12 — see *Pin the interpreter* below) inverts
+the usual shape: there is no motor driver, because the "vendor SDK" is a
+**running dimos process**. The adapter joins dimos's LCM/Zenoh bus as a peer —
+`/coordinator_joint_state` + camera `Image` topics in, `/joint_command` out
+(consumed by a dimos **servo task** that claims every joint *including the
+gripper* — dimos stomps unclaimed grippers back to their startup value while
+streaming).
 
 Three embodiments ship today: `xarm7` (UFACTORY xArm7), `xarm6` (UFACTORY
 xArm6) and `a1z` (Galaxea A1Z).
@@ -250,13 +239,11 @@ Python literals in `kinds.py`/`robot_profile.py` — they load at import time
 from [`adapters/dimos/robots/<kind>.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/),
 one file per kind, holding both the `DimosKind` (dimos wire joint names,
 gripper joint/hardware id) and the teleop `RobotProfile` (limits, velocity
-caps, rest pose) side by side. `kinds.py` scans that directory at import —
-adding a kind's declaration is "add a TOML file," not "edit three Python
-modules and their registries." If a kind's TOML has no `[profile]` section,
-`robot_profile.py` synthesizes a conservative, loudly-logged fallback
-(`±2π` position bound, a small fixed velocity fraction, zero rest pose)
-instead of blocking — a hand-tuned profile stays optional to get *something*
-moving; tuning it is how you get it moving *well*.
+caps, rest pose) side by side. `kinds.py` scans that directory at import, so
+adding a kind's declaration is "add a TOML file." If a kind's TOML has no
+`[profile]` section, `robot_profile.py` synthesizes a conservative,
+loudly-logged fallback (`±2π` position bound, a 10% velocity fraction, zero
+rest pose) instead of blocking.
 
 The four files still exist, but two get reinterpreted:
 
@@ -268,27 +255,21 @@ The four files still exist, but two get reinterpreted:
   coordinator present, joints, a servo task claiming exactly the kind's joints
   with a non-zero timeout and no competing claimant, joint-state order — failing
   closed with every mismatch listed. The trap this exists for: a stock dimos
-  coordinator blueprint has no servo task and *silently ignores* streamed
-  commands. **Every dimos-shipped, per-vendor blueprint has this trap** — they
-  configure a `trajectory` task, never dimos's own `servo` task — so this SDK
-  has always had to author its own session blueprint per kind, and expects to
-  keep doing so for any future one.
+  coordinator blueprint configures a `trajectory` task, not dimos's own `servo`
+  task, and so *silently ignores* streamed commands. That is why this SDK
+  authors its own session blueprint per kind.
 - `--camera <name>=<topic>` maps observation keys to bus topics instead of
   devices.
 - The dimos side needs a **session blueprint** satisfying that contract; this
-  SDK ships one per kind via dimos's entry-point registry, built from one
-  shared, generic composition helper (`_streaming_blueprint` /
-  `_mock_hardware` / `_resolve_hardware` in `adapters/dimos/blueprints.py`)
-  plus a few kind-specific lines binding that vendor's own hardware/model
-  factory via `functools.partial`. Every kind gets the same hardware-free dev
-  path for free this way — no vendor address configured (and `--simulation`
-  not passed) resolves to a generic in-memory mock, regardless of whether the
-  vendor's own factory happens to support that (xarm7's does out of the box;
-  A1Z's originally didn't — this is a real behavior improvement over calling
-  the vendor's factory directly, not just a refactor). The reference
-  blueprints also include DIMOS's manipulation module with Viser as the
-  default viewer, so commands can be inspected in a browser without physical
-  hardware or MuJoCo:
+  SDK ships one per kind via dimos's entry-point registry
+  (`adapters/dimos/blueprints.py`: a shared `_streaming_blueprint` /
+  `_mock_hardware` / `_resolve_hardware` composition plus a few kind-specific
+  lines binding that vendor's hardware/model factory with `functools.partial`).
+  Every kind gets the same hardware-free dev path this way: no vendor address
+  configured and `--simulation` not passed resolves to a generic in-memory
+  mock. The reference blueprints also include DIMOS's manipulation module with
+  Viser as the default viewer, so commands can be inspected in a browser
+  without physical hardware or MuJoCo:
 
 ```bash
 dimos run interlatent.xarm7          # terminal 1: the dimos session stack
@@ -301,37 +282,27 @@ interlatent-node run --robot dimos \
 dimos's `hardware/manipulators/galaxea_a1z/adapter.py`, and dimos ships its pin
 only in `bin/hardware/a1z/setup` — a script that refuses to run outside a dimos
 *source* checkout, so a wheel install could never reach it. The `[dimos]` extra
-now carries that same pinned rev, so `uv sync --extra dimos` is enough. Two
-things it deliberately does **not** install, straight from that setup script:
+carries that same pinned rev, so `uv sync --extra dimos` is enough. Two things
+it deliberately does **not** install, straight from that setup script:
 `can-utils` on Linux (for `cansend`), and on macOS `brew install libusb` plus
-`uv pip install gs-usb==0.3.1 pyusb==1.3.1` for a USB-CAN adapter. Note also
-that published dimos releases expose A1Z as a *planning model* only — the
-Galaxea driver is not in the installed package's hardware registry — so the
-vendor SDK is necessary but not sufficient for motion; the blueprint
-feature-detects which build you have and falls back to the mock.
+`uv pip install gs-usb==0.3.1 pyusb==1.3.1` for a USB-CAN adapter. The vendor
+SDK is necessary but not sufficient for motion — see CONFIG.md's A1Z notes for
+the Galaxea-enabled vs. planning-model-only builds.
 
 **Pin the interpreter when installing this extra — 3.12.** dimos pins `<3.13`,
 so the `[dimos]` requirements carry a `python_version < '3.13'` marker: on a
-3.13+ environment they resolve to *nothing*, the install "succeeds", and the
-first sign of trouble is `dimos: command not found`. The other end is just as
-sharp on **linux/x86_64**, the usual robot host: `dimos[manipulation]` requires
-`a750-control` there, and that package publishes a single cp312 manylinux
-x86_64 wheel with no sdist — so on 3.11 the install fails outright with "No
-matching distribution found for a750-control". 3.12 is the only interpreter
-that works on that host. With uv, name it — `uv sync --extra dimos -p 3.12`, or
-`uv pip install -p 3.12 'interlatent[dimos]'` — rather than taking whatever
-`python3` happens to be.
+3.13+ environment they resolve to *nothing*, the install "succeeds", and
+`dimos: command not found` is the first sign of trouble. On **linux/x86_64**,
+the usual robot host, 3.11 fails the other way: `dimos[manipulation]` requires
+`a750-control` there, published only as a cp312 manylinux x86_64 wheel with no
+sdist ("No matching distribution found for a750-control"). With uv, name the
+interpreter — `uv sync --extra dimos -p 3.12`.
 
 Global dimos-process flags (`--simulation`, `--can-port`, `--xarm7-ip`, ...)
 are options on `dimos` itself, not on `dimos run` — they go *before* `run`
-(`dimos --can-port can0 run interlatent.a1z`), not after; `dimos run ...
---can-port can0` fails with "No such option." Note that `--can-port` only
-reaches real A1Z motors on a **Galaxea-enabled dimos build**; published
-releases ship A1Z as a planning model with no Galaxea driver in their hardware
-registry, and the blueprint feature-detects which you have. Real hardware never
-*requires* our blueprint anyway — the adapter is a bus peer, so `--robot dimos
---robot-arg kind=a1z` binds to a stack started any other way. See
-`adapters/dimos/CONFIG.md`.
+(`dimos --can-port can0 run interlatent.a1z`). Real hardware never *requires*
+our blueprint anyway: the adapter is a bus peer, so `--robot dimos --robot-arg
+kind=a1z` binds to a stack started any other way.
 
 **VR/QUIC teleoperation** needs a separate data bundle per kind
 (`interlatent_robots/<kind>/`, see
@@ -349,34 +320,32 @@ for the full knob table and blueprint contract, and
 
 ### Grabbing kinematic data from dimos instead of hand-transcribing it
 
-Interlatent already depends on `dimos[manipulation]` for the `[dimos]` extra,
-which bundles each vendor's own URDF as local package data — there is no live
-RPC to fetch it from a *running* stack (checked: `ControlCoordinator` exposes
-no limits/URDF over its RPC surface), but the file is on disk once dimos is
-installed. Two dev-time scripts read it directly instead of a human opening
-the URDF and copying numbers by hand:
+`dimos[manipulation]` bundles each vendor's own URDF as local package data —
+there is no live RPC to fetch it from a *running* stack (`ControlCoordinator`
+exposes no limits/URDF over its RPC surface), but the file is on disk once
+dimos is installed. Two dev-time scripts read it directly:
 
 - [`packages/sdk/scripts/dimos_profile_gen.py`](packages/sdk/scripts/dimos_profile_gen.py)
-  prints a kind's joint position limits (for a `robots/<kind>.toml`
-  `[profile]` section) via dimos's own `dimos.robot.model_parser.parse_model()`.
+  prints a kind's joint position limits — one `(lower, upper)` line per joint,
+  to transcribe into `robots/<kind>.toml`'s `[profile]` — via dimos's own
+  `dimos.robot.model_parser.parse_model()`.
 - [`packages/sdk/scripts/dimos_kinematic_spec_gen.py`](packages/sdk/scripts/dimos_kinematic_spec_gen.py)
   prints a kind's full joint *chain* (origin/axis/limits, not just limits) by
   parsing the URDF's `<origin>`/`<axis>` tags directly — dimos's own parser
   drops that geometric data — for `interlatent_robots/<kind>/kinematic_spec.json`.
 
 Neither script is imported by any runtime path — `robot_profile.py`/`kinds.py`
-stay importable without dimos installed either way (enforced by
-`tests/test_dimos_config.py`); these are one-shot generators whose output you
-review and commit, same as any other robot's transcribed literals. Neither
-invents the parts that still need real judgment: `dimos_profile_gen.py`
-prints a joint's raw `velocity_limit` only as a comment (a URDF's velocity tag
-is typically a motor max, not a safe streaming cap — the margin is still your
-call), and `dimos_kinematic_spec_gen.py` does not touch IK-solver tuning
-(damping, reach limits, VR-frame alignment) — those aren't URDF properties at
-all, and (per `interlatent_robots/README.md`) `kinematic_spec.json` is
-normally machine-generated pod-side from `ik_config.json` by a tool this SDK
-does not carry; treat anything built by this script as an unofficial,
-`packaging/verify_urdf.py`-checked substitute, not the canonical pipeline.
+stay importable without dimos installed (enforced by
+`tests/test_dimos_config.py`). Their output is reviewed and committed, not
+generated fresh each run, and neither invents the parts that need judgment:
+`dimos_profile_gen.py` prints a joint's raw `velocity_limit` only as a comment
+(a URDF's velocity tag is typically a motor max, not a safe streaming cap), and
+`dimos_kinematic_spec_gen.py` does not touch IK-solver tuning (damping, reach
+limits, VR-frame alignment). `kinematic_spec.json` is normally machine-generated
+pod-side by a tool this SDK does not carry
+([`interlatent_robots/README.md`](packages/sdk/src/interlatent_robots/README.md)),
+so treat anything built by this script as an unofficial,
+`packaging/verify_urdf.py`-checked substitute.
 
 ## Adding a new robot
 
@@ -401,15 +370,14 @@ Putting the four files together, the whole job for a new *non-dimos* arm is:
 4. **Register the kind** if your robot cannot use the bundled LeRobot wrapper: add it to
    `_NATIVE_KINDS` in [`adapters/__init__.py`](packages/sdk/src/interlatent/adapters/__init__.py)
    (the one registry — CLI, daemon, and behaviors facade all resolve through it) and add a
-   thin `loop.py` shim (copy YAM's: ~80 lines of construction, no per-tick logic — the
-   shared runner and command bus own the tick, ADR 0022). Robots with per-tick pre-flight
-   the generic path can't know (a supervising daemon, staleness) implement
-   `pre_tick(obs) -> TickVerdict` on the robot class; nothing else to wire. `--loop
-   module:fn` remains the no-registry escape hatch.
+   thin `loop.py` shim (copy YAM's: construction only, no per-tick logic — the shared runner
+   and command bus own the tick, ADR 0022). Robots with per-tick pre-flight the generic path
+   can't know (a supervising daemon, staleness) implement `pre_tick(obs) -> TickVerdict` on
+   the robot class; nothing else to wire. `--loop module:fn` remains the no-registry escape
+   hatch.
 5. **Optionally ship behaviors** as `behaviors/data/<robot>.toml`. You get `home` for free
    from the profile either way.
 
-Adding robots is the contribution we most want. See
-[CONTRIBUTING.md](CONTRIBUTING.md). Steps 3-4 are small and mechanical; the remaining goal
-is folding the shim's construction into the registry so a new arm costs steps 1 and 2 and
-nothing else.
+Adding robots is the contribution we most want — see
+[CONTRIBUTING.md](CONTRIBUTING.md). Steps 3-4 are mechanical, and the goal is to fold the
+shim's construction into the registry so a new arm costs only steps 1 and 2.

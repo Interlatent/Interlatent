@@ -1,9 +1,9 @@
 # Self-hosting the policy server
 
 Run the Interlatent DRTC policy server on **your own GPU machine**. The
-Interlatent dashboard stays the control plane — your box registers itself
-with your API key, appears on the Compute page as a **self-hosted** box, and
-your robot nodes connect to it exactly like a managed pod. Same server code,
+dashboard stays the control plane — your box registers itself with your
+API key, appears on the Compute page as a **self-hosted** box, and your
+robot nodes connect to it exactly like a managed pod. Same server code,
 same wire protocol, same episode recording into your environments.
 
 ```
@@ -17,7 +17,7 @@ robot node ──native gRPC (50051)──▶ your GPU box (interlatent-server)
 ## What you need
 
 - A Linux machine with an NVIDIA GPU (a rented RunPod/Lambda/Vast box works
-  too — the point is it's *yours*), Python ≥ 3.11 or Docker.
+  too), and either Docker or Python ≥ 3.12 (lerobot's floor).
 - An Interlatent account and an API key (`ilat_…`) from the dashboard.
 - An address your robot nodes can reach the machine at — public IP, LAN IP,
   or VPN address. The dashboard hands it to nodes verbatim.
@@ -49,14 +49,13 @@ sudo ./docker/install-bare-metal.sh --systemd \
   --api-key ilat_xxx --advertise-address 203.0.113.7
 ```
 
-It provisions what the image otherwise gives you for free: a Python ≥ 3.12, a
-torch matched to the driver's CUDA (auto-detected from `nvidia-smi`), ffmpeg
-for the dataset writers, lerobot at the same commit `docker/Dockerfile` pins
-(read out of that file, so the two can't drift), and protobuf stubs
-regenerated against the installed runtime. `--systemd` writes a unit that
-restarts on failure and stops with `SIGINT` so the box reports `stopped`
-rather than leaving a ghost `ready` row. `--no-system` skips apt if you don't
-have root. Re-running is safe.
+It provisions what the image otherwise gives you: a Python ≥ 3.12, a torch
+matched to the driver's CUDA (auto-detected from `nvidia-smi`), ffmpeg for
+the dataset writers, lerobot at the commit `docker/Dockerfile` pins (read out
+of that file, so the two can't drift), and protobuf stubs regenerated against
+the installed runtime. `--systemd` writes a unit that restarts on failure and
+stops with `SIGINT`, so the box reports `stopped` rather than leaving a ghost
+`ready` row. `--no-system` skips apt if you don't have root. Re-running is safe.
 
 ## pip
 
@@ -86,8 +85,7 @@ regenerates them.
    `ready`. Until you do, the fetch 404s and the box falls back to your own
    `--warmup-policy` / `--warmup-image-keys` if you passed them — MolmoAct2
    needs both, since it can't load without camera keys. Once an env is
-   attached its target wins, because it feeds the node's cameras and the
-   warm from one source and so can't disagree with itself.
+   attached, its target wins.
 3. Launch sessions from the dashboard as usual. Recordings stream to the box
    and upload through backend-issued presigned URLs — **no cloud credentials
    ever live on your machine**, only your own revocable API key.
@@ -98,12 +96,12 @@ regenerates them.
 
 The gRPC port is guarded **by default**: every RPC's `x-api-key` must belong
 to the account that registered the box (checked against the backend, cached
-60 s). Your nodes already send it. `--insecure` (or
-`INTERLATENT_INSECURE=1`) disables the check for air-gapped networks — never
-expose an insecure box to the public internet; it is an open GPU.
+60 s). Your nodes already send it. `--insecure` (or `INTERLATENT_INSECURE=1`)
+disables the check for air-gapped networks — never expose an insecure box to
+the public internet; it is an open GPU.
 
-Also expose **only** the gRPC port. The box needs no inbound access from
-anything but your nodes.
+Expose **only** the gRPC port. The box needs no inbound access from anything
+but your nodes.
 
 ## Limits
 

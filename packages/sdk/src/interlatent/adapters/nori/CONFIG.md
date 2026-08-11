@@ -1,21 +1,19 @@
 # Nori robot configuration
 
-Robot-specific arguments for `--robot nori` (the Nori robot, driven through its
-on-Pi daemon — `NoriCoreAgent` — over the Nori-Protocol v1 wire contract:
-newline-delimited JSON on TCP, `localhost:7777` by default). Parsed by
-[`config.py`](config.py) `build_adapter_config`. The node runs on the robot's
-Pi (LAN/on-Pi only in v1); v1 is arms-only.
+Robot-specific arguments for `--robot nori` — the Nori robot, driven through its
+on-Pi daemon (`NoriCoreAgent`) over Nori-Protocol v1 (newline-delimited JSON on
+TCP, `127.0.0.1:7777` by default). Parsed by [`config.py`](config.py)
+`build_adapter_config`. The node runs on the robot's Pi (LAN/on-Pi only in v1);
+v1 is arms-only.
 
-Arguments are passed two ways, identical across `interlatent-node` and
-`interlatent-act`:
+Arguments are the same across `interlatent-node` and `interlatent-act`:
 
-- `--robot-arg key=value` — repeatable; one knob each (table below).
+- `--robot-arg key=value` — repeatable (table below).
 - `--camera name=value` — repeatable; maps a daemon camera onto a policy
   observation key.
 
 Unrecognized `--robot-arg` keys are warned about and ignored. `--port` (the
-serial-port flag) is **not** used by Nori — it speaks TCP to the daemon; use
-`--robot-arg host=`/`port=`.
+serial-port flag) is **not** used by Nori — use `--robot-arg host=`/`port=`.
 
 ## `--robot-arg` keys
 
@@ -26,7 +24,7 @@ serial-port flag) is **not** used by Nori — it speaks TCP to the daemon; use
 | `token` | *(unset)* | Daemon agent token. Explicit value beats `token_path`. |
 | `token_path` | `/etc/nori/agent.token` | Daemon token file to read when `token` is unset (same trust domain: the node runs on the Pi next to the daemon). |
 | `bus_choice` | `3` | Bus selection passed through in the daemon session-init frame. Leave at the default unless your daemon setup requires otherwise. |
-| `max_step` | `3.0` | Execution-safety per-send delta clamp on arm joints, in daemon-normalized units (grippers exempt). `inf` disables. |
+| `max_step` | `3.0` | Per-send delta clamp on arm joints, in daemon-normalized units (grippers exempt). `inf` disables. Also feeds the loop-level clamp, which is off unless this key is set. |
 | `pump_hz` | `50.0` | Keep-alive pump rate (see below). |
 | `cam_host` | same as `host` | Host for the daemon's ZeroMQ MJPEG camera channel. |
 | `cam_base_port` | `5555` | Base port for the camera channel. |
@@ -34,6 +32,7 @@ serial-port flag) is **not** used by Nori — it speaks TCP to the daemon; use
 | `camera_warmup_s` | `10.0` | `connect()` blocks until every configured camera has delivered one frame, up to this long (the Pi's capture bridge publishes lazily). `0` disables the wait. |
 | `reconnect_window_s` | `10.0` | TCP down longer than this ⇒ the session is dead (the loop ends the episode). |
 | `staleness_ms` | `250.0` | Telemetry older than this ⇒ the observation is not fresh (the loop holds rather than acting on old joints). |
+| `action_filter_hz` | `3.0` | Butterworth low-pass cutoff on the policy action stream (read by the loop, so `interlatent-node run` also logs it as "unrecognized"). `0` / `none` / `off` disables it. |
 
 ## `--camera` declarations
 
@@ -45,21 +44,19 @@ here: frames arrive on the daemon's companion ZeroMQ MJPEG channel. With no
 
 ## Safety model
 
-Nori keeps all safety **enforcement** robot-side (range clamping, e-stop hard
-latch, watchdog safe-stop); the adapter discloses that state and never
-re-enforces it. On `connect()` the adapter fail-closes if the daemon's live ack
-descriptor disagrees with the static `nori`
-[`RobotProfile`](../../node/teleop/robot_profile.py) — every mismatch is
-accumulated into one raise.
+All **enforcement** stays robot-side (range clamping, e-stop hard latch,
+watchdog safe-stop); the adapter discloses that state and never re-enforces it.
+On `connect()` it fail-closes if the daemon's live ack descriptor disagrees with
+the static `nori` [`RobotProfile`](../../node/teleop/robot_profile.py) — every
+mismatch is accumulated into one raise.
 
 ### Keep-alive pump
 
-The daemon has no heartbeat message — the control-frame stream *is* the
-watchdog heartbeat, and silence safe-stops the robot. The adapter therefore
-runs an internal ~`pump_hz` pump of motion-free control frames, **but only
-while the control loop proves liveness**: if the loop stalls, the pump stops
-and the daemon safe-stops as designed. Don't raise `pump_hz` to "fix" watchdog
-trips — a stall is exactly what the watchdog is for. See
+The daemon has no heartbeat message — the control-frame stream *is* the watchdog
+heartbeat, and silence safe-stops the robot. The adapter runs an internal
+~`pump_hz` pump of motion-free control frames, **but only while the control loop
+proves liveness**: if the loop stalls, the pump stops and the daemon safe-stops
+as designed. Don't raise `pump_hz` to "fix" watchdog trips. See
 [ADR 0015](../../../../../../docs/adr/0015-nori-liveness-tied-keepalive.md).
 
 ### E-stop and `--reset-latch`
@@ -76,18 +73,17 @@ Recovery is a human act, never automatic:
 interlatent-act --robot nori --reset-latch
 ```
 
-This sends the daemon's token-gated `reset_latch` and then clears the gate
-latch — daemon first, gate second. The token resolves from `--token`, else
+This sends the daemon's token-gated `reset_latch`, then clears the gate latch —
+daemon first, gate second. The token resolves from `--token`, else
 `--robot-arg token=…`, else the daemon's token file. It never moves the robot
 and takes no joint targets. See
 [ADR 0016](../../../../../../docs/adr/0016-teleop-estop-ingress-human-only-reset.md).
 
 ### Teleop
 
-While the node holds the daemon's single control-client slot, Nori's **own**
+While the node holds the daemon's single control-client slot, Nori's own
 browser/VR teleop cannot connect — during an interlatent session, teleop rides
-the interlatent relay (VR) like any other robot. The two teleop stacks
-are separate systems; Nori's is displaced, not reused.
+the interlatent relay (VR) like any other robot.
 
 ## Joint names & units
 
@@ -95,8 +91,8 @@ are separate systems; Nori's is displaced, not reused.
 `left_arm_shoulder_lift`, `left_arm_elbow_flex`, `left_arm_wrist_flex`,
 `left_arm_wrist_roll`, `left_arm_gripper`, then the `right_arm_*` block (wire
 keys carry a `.pos` suffix; `action()` / `interlatent-act` use the bare names).
-All values are in the daemon-normalized `range_m100_100` scale. Limits come
-from the `nori` `RobotProfile`.
+Values are daemon-normalized `range_m100_100`: arm joints `[-100, 100]`,
+grippers `[0, 100]`. Limits come from the `nori` `RobotProfile`.
 
 ## Examples
 
@@ -115,6 +111,6 @@ interlatent-node run --robot nori --robot-arg port=7878 \
   --camera observation.images.head=head
 ```
 
-**Host requirements:** `pip install 'interlatent[nori]'` (brings `zmq`/`cv2`
+**Host requirements:** `pip install 'interlatent[nori]'` (brings `pyzmq`/`cv2`
 for the camera channel; the base adapter import needs neither), running on the
 robot's Pi alongside the daemon.

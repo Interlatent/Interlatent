@@ -1,11 +1,12 @@
 # Interlatent DRTC client — Context
 
-The robot-side stack for running robot policies on cloud GPUs: the
-[Interlatent dashboard](https://interlatent.com) assigns sessions and provisions a
-managed **GPU pod** per session, a **Node** drives the robot and connects to the
-pod, and the pod loads policies and serves action chunks over the DRTC gRPC
-protocol. The thin `interlatent` CLI lists pods/nodes and starts/stops sessions
-against the dashboard.
+The project's vocabulary. Structure is in [ARCHITECTURE.md](ARCHITECTURE.md); the
+mental model is in [docs/concepts.md](docs/concepts.md).
+
+The shape in one paragraph: the [Interlatent dashboard](https://interlatent.com)
+assigns sessions and provisions a **GPU pod** per session, a **Node** drives the
+robot and dials the pod, and the pod loads policies and serves action chunks over
+the DRTC gRPC protocol.
 
 ## Language
 
@@ -42,14 +43,14 @@ A non-destructive connectivity check (`interlatent-preflight`) that opens a real
 **Session** against a managed **GPU pod**, streams *synthetic* observations, and
 reports a PASS/WARN/FAIL verdict with the measured network-vs-compute latency. It
 exercises the cloud inference path only — never the robot's cameras, joints, or
-motor bus. _Avoid_: calling it a "GPU test" — there is no user-operated GPU to test;
-it validates the path to a managed pod.
+motor bus. _Avoid_: calling it a "GPU test" — it validates the *path* to a pod, not
+the GPU.
 
 **Robot kind**:
 The robot family a **Node** drives, set with `--robot <name>` (carried as
-`robot_kind`). It does three jobs off one string: it selects the control loop (a
-registered vendor robot uses its native loop, otherwise the bundled LeRobot
-wrapper runs); it is the **S3 bundle key** the platform resolves the pod's URDF +
+`robot_kind`). It does three jobs off one string: it selects the **adapter**
+(registered vendor kinds resolve to their own, everything else to the bundled
+LeRobot one); it is the **S3 bundle key** the platform resolves the pod's URDF +
 meshes + `ik_config.json` under (`urdf/{robot_kind}/{version}/`); and it is the
 **Robot data** key an operator installs with `pip install interlatent[<kind>]`.
 Because all three must agree, the kind MUST equal the string the live node
@@ -60,18 +61,16 @@ hatch, not a kind.
 
 **Robot data**:
 A robot kind's teleop embodiment files — a kinematics-only URDF, `ik_config.json`,
-and `kinematic_spec.json` — living in the SDK repo under the top-level namespace
-`interlatent_robots` (one subpackage per kind, read via `interlatent.robots`).
-The wheel ships the URDF + `kinematic_spec.json`; `ik_config.json` is a repo-only
-curation source, excluded from wheels (ADR 0017, amended 2026-07-18). Under `interlatent_robots`, not `interlatent`, on purpose:
-the SDK and the internal engine are both the `interlatent` import package and would
-collide on install. Every kind ships with every install (~18 KB each); the per-kind
-extras carry that robot's **driver** deps, not its data. Meshes are **not** part of
-it — IK needs no geometry — though a `meshes.lock` may optionally be added for a
-kind that later needs STLs (viewer/sim).
-_Avoid_: calling the whole thing a "bundle" — that word is the platform's S3
-artifact, a path being retired; robot data in the SDK is the operator-installable
-source of the same files.
+and `kinematic_spec.json` — under the top-level namespace `interlatent_robots`
+(one subpackage per kind, read via `interlatent.robots`). The wheel ships the URDF
++ `kinematic_spec.json`; `ik_config.json` is a repo-only curation source, excluded
+from wheels (ADR 0017, amended 2026-07-18). A namespace of its own, not
+`interlatent`, because the SDK and the internal engine are both the `interlatent`
+import package and would collide on install. Every kind ships with every install
+(~18 KB each); the per-kind extras carry that robot's **driver** deps, not its
+data. Meshes are **not** part of it — IK needs no geometry — though a `meshes.lock`
+may be added for a kind that later needs STLs (viewer/sim). _Avoid_: calling it a
+"bundle" — that word is the platform's S3 artifact, a path being retired.
 
 **IK config** (`ik_config.json`):
 The hand-authored half of **Robot data**, kept in the repo but not in the wheel:
@@ -86,29 +85,28 @@ _Avoid_: hand-editing the spec to tune — this is the file you tune.
 The **generated** half: a compact serial-chain descriptor the in-browser IK solver
 walks, exported from URDF + **IK config** by the engine's MuJoCo step. A kind whose
 data is missing it makes the arms do nothing (the browser can't build a solver).
-On the **QUIC** teleop path the **Node** serves this spec to the browser directly
-over the relay (from its installed **Robot data**), and the browser reads *both*
-the solver parameters and the mapper hints from it — so it is the single and *only*
-source of browser kinematics there: no platform backend is involved and there is no
-fallback, by design. A node that cannot serve its spec fails QUIC teleop loudly
-rather than letting the browser solve against a hosted copy of kinematics it isn't
-driving. On the hosted-IK relay path the pod owns IK and the browser needs only
-the mapper hints, which ride in the teleop token. _Avoid_: hand-editing — it is derived, and
+The **Node** serves this spec to the browser over the relay (from its installed
+**Robot data**), and the browser reads *both* the solver parameters and the mapper
+hints from it — the single and *only* source of browser kinematics: no platform
+backend is involved and there is no fallback, by design. A node that cannot serve
+its spec fails teleop loudly rather than letting the browser solve against a hosted
+copy of kinematics it isn't driving. _Avoid_: hand-editing — it is derived, and
 any edit is overwritten on regen.
 
 **Adapter**:
-A **robot adapter** — a subpackage under `interlatent.adapters.<vendor>` that maps
-a specific robot family to the loop the **Node** daemon drives, reusing the
-LeRobot-free DRTC wire helpers so its recorded payload matches the built-in loop.
-Vendor-specific and dependency-heavy, so it is optional (`interlatent[axol]`,
-`interlatent[yam]`) and imported lazily — the base install never loads it. _Avoid_:
-overloading "adapter" for a server-side policy backend, a collection `--loop`
-adapter, or a LoRA adapter. Vendor adapters today: **axol** (Almond Axol, native
-async SDK), **yam** (I2RT YAM bimanual arms, driven through the `i2rt` CAN driver
-directly — not raiden — joint-space only, configurable left/right/both followers),
-and **nori** (bimanual arms behind a supervising daemon reached over an NDJSON
-wire protocol, with a liveness-tied keep-alive pump and a robot-side safety latch).
-See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md).
+A **robot adapter** — a subpackage under `interlatent.adapters.<vendor>` implementing
+the `RobotAdapter` Protocol (`adapters/base.py`) for one robot family, driven by the
+shared **tick runner**. Vendor-specific and dependency-heavy, so it is optional
+(`interlatent[axol]`, `interlatent[yam]`, …) and imported lazily — the base install
+never loads it; `--robot <kind>` resolves it through the one registry in
+`adapters/__init__.py`. _Avoid_: overloading "adapter" for a server-side policy
+backend, a collection `--loop` adapter, or a LoRA adapter. Vendor adapters today:
+**axol** (Almond Axol, native async SDK), **yam** (I2RT YAM bimanual arms, driven
+through the `i2rt` CAN driver directly — not raiden — joint-space only, configurable
+left/right/both followers), **nori** and **dimos** (own entries below); everything
+else runs through the bundled **lerobot** adapter.
+See [docs/adr/0011](docs/adr/0011-vendor-robot-subpackage-via-robot-kind.md),
+amended by [0022](docs/adr/0022-command-bus-owns-the-motion-path.md).
 
 **Action interface**:
 The shared apply-an-action seam every **adapter** exposes, sitting **below** the DRTC
@@ -128,34 +126,38 @@ an adapter declares per-joint metadata (range, control mode, settle tolerance).
 
 **Chunk scheduling — overlapping (default) vs sequential (`--synchronous`)**:
 How the client paces inference against execution. The **default is overlapping
-(replace-mode) chunking**: the client streams observations continuously and *never
-blocks on inference* (see ARCHITECTURE.md), so a fresh **action chunk** arrives
-while the previous one is still executing and overwrites its unexecuted tail in the
-`ActionSchedule` (last-writer-wins). This is DRTC's whole point — it hides inference
-latency and keeps motion smooth *when consecutive plans agree*. **Sequential
-(request-response) chunking**, opt-in via `--synchronous`, drops the overlap: the
-client sends one observation only when the schedule is fully drained, holds the
-robot while it waits for the whole chunk, executes every step, then re-observes. It
-deliberately reverts the "never blocks on inference" property, trading a brief
+(replace-mode) chunking**: the client never blocks on inference, so a fresh
+**action chunk** arrives while the previous one is still executing and overwrites
+its unexecuted tail in the `ActionSchedule` (last-writer-wins). This is DRTC's
+whole point — it hides inference latency *when consecutive plans agree*.
+**Sequential (request-response) chunking** drops the overlap: the client sends one
+observation only when the schedule is fully drained, holds the robot while it waits
+for the whole chunk, executes every step, then re-observes. It trades a brief
 per-chunk hold (~one inference round-trip) for the elimination of mid-chunk
 overwrite — the fix when a high-latency policy's successive plans *disagree* and
-fight (observed as robot thrashing; MolmoAct2 on the yam). _Avoid_: conflating this
-"synchronous" **mode** (an inference cadence) with the "synchronous facade"
-(`DRTCClient`), which is just the blocking `step()` **API surface**; they are
-independent.
+fight (robot thrashing; MolmoAct2 on the yam), and mandatory for world-action
+models whose inference outlasts a chunk. Selected two ways, ORed in `daemon.py`:
+the node-wide `--synchronous` flag (or `INTERLATENT_SYNCHRONOUS`), and a
+per-session `synchronous` field the backend sets for policies that require it
+(ADR 0037, platform repo). _Avoid_: conflating this "synchronous" **mode** (an
+inference cadence) with the "synchronous facade" (`DRTCClient`), which is just the
+blocking `step()` **API surface**; they are independent.
 
 **Teleop receiver stub**:
-The node-side half of hosted VR teleop (`interlatent.node.teleop`) — remote
-human demonstration, and mid-policy takeover (live **intervention**: engaging
-teleop while a policy session runs preempts the policy and records
+The node-side half of VR teleop (`interlatent.node.teleop`) — remote human
+demonstration, and mid-policy takeover (live **intervention**: engaging teleop
+while a policy session runs preempts the policy and records
 `control_source="intervention"`; the node shadow-steps the client so handback
-is ≈1 control tick — ADR 0034 in the platform repo). A
-`TeleopChannel` opens a channel to the hosted relay and decodes `TeleopFrame`s;
-the control loop applies engaged `mode="targets"` frames (absolute joint vectors
-the **platform** already computed) through the **SafetyGate** before driving the
-robot. _Avoid_: implying the node computes targets — the teleop *engine*
-(pose IK, retargeting) runs on the platform; the client is
-a receiver + safety only. See [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md).
+is ≈1 control tick — ADR 0034 in the platform repo). `make_teleop_channel`
+builds a `QuicTeleopChannel` against the hosted WebTransport/QUIC relay and
+decodes `TeleopFrame`s; the **command bus** applies engaged `mode="targets"`
+frames (absolute joint vectors the *browser* already IK-solved) through the
+**SafetyGate** before driving the robot. _Avoid_: implying the node computes
+targets — the teleop *engine* (pose mapping, IK) runs in the browser producer;
+the node is a receiver + safety only, plus the **Kinematic spec** it serves the
+browser. See [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md)
+and [docs/adr/0021](docs/adr/0021-quic-teleop-child-process.md). QUIC is the only
+transport; the WebSocket/hosted-IK path was removed.
 
 **SafetyGate**:
 The node's single safety authority for human-driven motion: a workspace +
@@ -166,7 +168,7 @@ Needs a static **robot profile** (limits / velocity cap / rest pose).
 **Delta clamp**:
 A source-agnostic execution-safety guard that caps the per-tick joint jump for
 *every* action — policy and teleop alike — to a per-robot limit (`--robot-arg max_step=…`,
-or `max_step_rad` for axol/dimos). Configured as part of the **adapter**. Together with
+or `max_step_rad` for axol/yam/dimos). Configured as part of the **adapter**. Together with
 the SafetyGate this is the **layered client-side safety model**: the delta clamp
 bounds single-tick slams from any source; the SafetyGate adds workspace/velocity/
 deadman limits on the teleop path. Both run next to the motors. Two distinct
@@ -178,14 +180,15 @@ _Avoid_: "simplifying" them into one — different anchors, different scopes.
 **Command bus**:
 `interlatent.node.movement.CommandBus` — the one point of access where every
 physical movement is decided *and produced* (ADR 0022). Its **Arbiter** picks
-who drives each tick on a fixed ladder — `ESTOP > TELEOP > HOLD > POLICY`, the
-e-stop rung read from **SafetyGate** *state* (level), never from the arriving
-event (edge) — and `drive()` then runs the whole motion path in a fixed order:
-produce → SafetyGate → delta clamp → the single `send_action` sink →
-flush/smoother bookkeeping, returning a **TickOutcome** (what was commanded,
+who drives each tick on a fixed ladder — `ESTOP > INTERVENTION|TELEOP > HOLD >
+POLICY` (a human driving *while a policy is loaded* is INTERVENTION, otherwise
+TELEOP), the e-stop rung read from **SafetyGate** *state* (level), never from
+the arriving event (edge) — and `drive()` then runs the whole motion path in a
+fixed order: produce → SafetyGate → delta clamp → the single `send_action` sink
+→ flush/smoother bookkeeping, returning a **TickOutcome** (what was commanded,
 what to record, what to instrument). **MovementSource** is the vocabulary:
-str-valued so a member's value doubles as the dataset `control_source` label
-(`{"policy","teleop","hold"}`); `ESTOP` is deliberately never a recorded label.
+str-valued so a member's value doubles as the dataset `control_source` label;
+`ESTOP` is the one member that is deliberately never a recorded label.
 _Avoid_: adding a movement decision anywhere else — an `if` above the bus is
 how the pre-2026-07 loop drift started.
 
@@ -200,8 +203,8 @@ record than to gap — or `END_EPISODE`), discovered via `getattr`, never
 declared on the `RobotAdapter` Protocol body. Guards are pure verdicts: the
 bus's `guard_interrupt` does the interrupt's hygiene so an adapter cannot
 forget it. The former per-adapter `loop.py` files are thin shims over this
-runner; equivalence with each frozen ancestor is pinned by
-`tests/test_loop_equivalence.py`.
+runner; the shared behaviour they must all exhibit is pinned by
+`tests/test_loop_contract.py`.
 
 **Nori adapter**:
 Vendor adapter `interlatent.adapters.nori` (`--robot nori`, `interlatent[nori]`)
@@ -218,12 +221,12 @@ safe-stop); the adapter discloses that state, never re-enforces it, and
 fail-closes at connect if the live ack descriptor disagrees with the static
 `nori` **robot profile** — accumulating every mismatch into one raise. A
 daemon-reported latch/safe-stop is a hard episode boundary: the adapter's
-**pre-tick guard** ends the episode, freeing the daemon's single
-control-client slot for `interlatent-act --robot nori --reset-latch`. While the Node holds that slot,
+**pre-tick guard** ends the episode, freeing the daemon's single control-client
+slot for the reset act (see **E-stop ingress**). While the Node holds that slot,
 Nori's own browser/VR teleop cannot connect — interlatent teleop rides the
-interlatent relay instead. _Avoid_: "Nori teleop" for interlatent
-teleop — Nori's own teleop stack is a separate system that is
-displaced, not reused, during a session. See ADR 0015/0016.
+interlatent relay instead. _Avoid_: "Nori teleop" for interlatent teleop — Nori's
+own teleop stack is a separate system, displaced rather than reused during a
+session. See ADR 0015/0016.
 
 **Keep-alive pump (Nori)**:
 Nori's daemon has no heartbeat message — the control-frame stream *is* the
@@ -245,13 +248,13 @@ frame flag) every tick: the flag is transient and the channel's sticky latch is
 one-shot, so branching on the event would resume driving on the next tick.
 This lives in exactly one place now (ADR 0022); Axol has no `RobotProfile`
 yet, so it has no gate to latch (ADR 0011). For robots exposing a hardware
-latch (`robot.estop()` — Nori's daemon `command{name:"estop"}`), the bus
-forwards it once per latch, retrying on failure without ending the episode. Clearing is never automatic and never the control
-loop's job: for Nori it is an explicit `--reset-latch` act on `--robot nori`,
-which sends the daemon's token-gated `reset_latch` (token from
-`/etc/nori/agent.token` on the Pi) and then clears the gate latch — daemon
-first, gate second. _Avoid_: conflating with deadman release, which is a soft
-hold, not a stop. Universal adapter-level e-stop is future work.
+latch (`robot.estop()` — Nori's daemon `command{name:"estop"}`), the bus forwards
+it once per latch, retrying on failure without ending the episode. Clearing is
+never automatic and never the control loop's job: for Nori it is an explicit
+`interlatent-act --robot nori --reset-latch`, which sends the daemon's token-gated
+`reset_latch` (token from `/etc/nori/agent.token` on the Pi) and then clears the
+gate latch — daemon first, gate second. _Avoid_: conflating with deadman release,
+which is a soft hold, not a stop. Universal adapter-level e-stop is future work.
 
 **control_source**:
 Per-tick provenance recorded into the LeRobot dataset. A **four-value
@@ -310,11 +313,8 @@ link. See [docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md).
   neither is a concern — the client simply waits for the first action chunk; pod
   warm-pooling is handled by the dashboard.
 
-- **Sequential (`--synchronous`) chunking is currently a Node-level flag, but the
-  concept is per-Session.** Whether sequential vs overlapping chunking is right is
-  a *per-policy* fact (MolmoAct2 needs it, SmolVLA doesn't), and a **Session** pins
-  one policy — so the natural home is the dashboard session payload (like
-  `chunk_size` / `num_inference_steps`, read in `daemon.py`). For now it's only the
-  `--synchronous` CLI flag on the Node (applies to every session that node runs),
-  because it shipped as a diagnostic. Promoting it to a per-session payload field is
-  the intended evolution.
+- **Sequential chunking has two homes.** It is a *per-policy* fact (MolmoAct2 needs
+  it, SmolVLA doesn't), and a **Session** pins one policy — so the session payload's
+  `synchronous` field is the right home. The node-wide `--synchronous` flag survives
+  as an operator override and is ORed with it, so a node launched with the flag runs
+  every session sequentially regardless of the policy.

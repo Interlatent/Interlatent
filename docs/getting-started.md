@@ -1,8 +1,8 @@
 # Getting started
 
-Goal: from `pip install` to a policy driving a robot. Inference runs on managed cloud GPU
-pods through the [Interlatent dashboard](https://interlatent.com), so you bring the robot and
-an API key — not a GPU.
+From `pip install` to a policy driving a robot. Inference runs on managed cloud GPU pods
+through the [Interlatent dashboard](https://interlatent.com), so you bring the robot and an
+API key — not a GPU.
 
 ## 1. Install
 
@@ -12,14 +12,13 @@ pip install interlatent
 ```
 
 Python 3.11+ required. The base package is robot-agnostic; driving real hardware needs the
-extra for your robot — `pip install 'interlatent[lerobot]'` for SO-101 (SO-101 also
-needs `feetech-servo-sdk` if the serial bus won't open), `[yam]`, or `[axol]`. See
-[robots-and-policies.md](robots-and-policies.md).
+extra for your robot — `[lerobot]` (or `[so101]`) for SO-101, `[yam]`, `[axol]`, `[nori]`,
+`[dimos]`. SO-101 also needs `pip install feetech-servo-sdk` if the serial bus won't open.
+See [robots-and-policies.md](robots-and-policies.md).
 
 ## 2. Get an API key
 
-Sign in at [interlatent.com](https://interlatent.com) and create an API key (`ilat_…`).
-Export it so the SDK and CLI can find it:
+Sign in at [interlatent.com](https://interlatent.com) and create an API key (`ilat_…`):
 
 ```bash
 export INTERLATENT_API_KEY=ilat_...
@@ -65,17 +64,17 @@ def pack_observation(frame: np.ndarray, joints: np.ndarray, task: str) -> bytes:
     return buf.getvalue()
 ```
 
-[`examples/03_run_on_so101.py`](../examples/03_run_on_so101.py) is a complete version of
-this loop that introspects the policy's expected observation keys/shapes automatically and
-synthesizes observations until you wire real hardware.
-
-Observation payload convention (npz keys mirror LeRobot features):
+npz keys mirror LeRobot features:
 
 | Key | Type |
 |---|---|
 | `observation.images.<camera>` | uint8 `(H, W, 3)` |
 | `observation.state` | float32 `(state_dim,)` |
 | `task` | str (the instruction) |
+
+[`examples/03_run_on_so101.py`](../examples/03_run_on_so101.py) is a complete version of
+this loop that introspects the policy's expected observation keys/shapes automatically and
+synthesizes observations until you wire real hardware.
 
 ## 4. Or run a robot node + CLI
 
@@ -104,12 +103,9 @@ as running with `interlatent session ls`. To isolate the cloud path from your ro
 `interlatent-preflight --environment <slug> --policy <uri>` — it drives synthetic
 observations and reports a PASS/WARN/FAIL verdict with the network-vs-compute latency split.
 
-**Connect fails / hangs.** Confirm `INTERLATENT_API_KEY` is set (or `api_key=` is passed)
-and reachable: `interlatent gpus ls` should list pods. The node dials the box's public
-`host:port`; if direct routing is blocked, a VPN or SSH tunnel between the node and the
-box can bridge it.
-
-**Which robots/policies work:** [robots-and-policies.md](robots-and-policies.md).
+**Connect fails / hangs.** Confirm `INTERLATENT_API_KEY` is set (or `api_key=` is passed):
+`interlatent gpus ls` should list pods. Against a self-hosted box the node dials its public
+`host:port` directly, so if routing is blocked, a VPN or SSH tunnel can bridge it.
 
 ## 6. Where next
 
