@@ -36,7 +36,7 @@ jobs:
         run: |
           # Both test roots. packages/sdk/tests/ is NOT a duplicate of tests/ —
           # it holds the loop-runner, movement/arbitration, and Nori-guard suites
-          # (36 tests, including the ADR 0034 intervention coverage) and went
+          # (36 tests, including the ADR 0034 (platform repo) intervention coverage) and went
           # unrun for as long as this step named only tests/. A test that never
           # runs is worse than no test: it reads as coverage.
           pytest tests/ packages/sdk/tests/ -v --timeout=120

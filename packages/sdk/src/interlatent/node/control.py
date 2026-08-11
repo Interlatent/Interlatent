@@ -256,7 +256,7 @@ def lerobot_control_loop(
         teleop_configured=teleop_gate is not None,
     )
 
-    # World-action model context window (ADR 0037). None for every policy
+    # World-action model context window (ADR 0037, platform repo). None for every policy
     # family that doesn't carry one, which makes both hooks below no-ops.
     context_ring = _build_context_ring(session)
 

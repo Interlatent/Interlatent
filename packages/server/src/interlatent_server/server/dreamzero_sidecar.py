@@ -1,4 +1,4 @@
-"""Supervisor + client for the DreamZero sidecar process group (ADR 0037).
+"""Supervisor + client for the DreamZero sidecar process group (ADR 0037, platform repo).
 
 A world-action model cannot run inside ``serve_gpu``. It needs a
 ``torchrun --nproc_per_node=N`` process group on torch 2.8 / CUDA 12.9, while

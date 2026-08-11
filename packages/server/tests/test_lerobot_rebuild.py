@@ -13,7 +13,7 @@ post-edits that give the dataset its Interlatent-specific columns.
 The label mapping gets the most attention. ``CONTROL_SOURCE_TO_ID`` is a
 four-value contract with CONTEXT.md, and two of its values are load-bearing:
 ``hold`` must not collapse into ``policy`` (it marks disengaged, no-motion
-ticks) and ``intervention`` is the ADR 0034 DAgger correction label the
+ticks) and ``intervention`` is the ADR 0034 (platform repo) DAgger correction label the
 training stack upweights. Mislabeling either is silent data corruption that
 no downstream job can detect.
 """

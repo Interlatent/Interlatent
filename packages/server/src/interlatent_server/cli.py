@@ -90,7 +90,7 @@ def _detect_gpu_capacity() -> tuple[int, int | None]:
 
     ``gpu_model`` cannot carry this: it is ``nvidia-smi``'s first line only, so
     a 2xH100 box and a 1xH100 box have always looked identical to the backend.
-    World-action models need at least 2 GPUs (ADR 0037), and without a real
+    World-action models need at least 2 GPUs (ADR 0037, platform repo), and without a real
     count the launch gate can only fail late — the session opens, the sidecar
     dies at ``torchrun`` spawn, and the operator sees a dead process instead of
     a reason. Reporting it turns that into a 409 they can act on.

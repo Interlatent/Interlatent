@@ -9,7 +9,7 @@ boolean cascade, extended by the latch:
     engaged = frame and frame.engaged and frame.deadman
     teleop_ok = engaged and gate is not None and action_keys \\
                 and len(action_keys) == len(profile.joint_names)
-    -> INTERVENTION if teleop_ok and policy_enabled (ADR 0034)
+    -> INTERVENTION if teleop_ok and policy_enabled (ADR 0034, platform repo)
     -> TELEOP       if teleop_ok (policy-less recording)
     -> HOLD         if (not teleop_ok) and (not policy_enabled)
     -> POLICY       otherwise

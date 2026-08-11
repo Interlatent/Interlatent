@@ -23,7 +23,7 @@ looks cheaper:
   bandwidth-paced, drained as an ordered *oldest-first* prefix (ADR 0023). It
   optimises completeness at the cost of timeliness. Under congestion a
   RecordTick-fed context would serve the model the *most stale* frames
-  available. See ADR 0037.
+  available. See ADR 0037 (platform repo).
 
 Frames are JPEG-encoded here, on the control thread, for the same reason
 ``_capture_tick`` does it: the buffer then holds compressed bytes rather than

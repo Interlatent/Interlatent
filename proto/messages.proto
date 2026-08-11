@@ -98,7 +98,7 @@ message RecordTickRequest {
   // Who drove this tick. Four values (CONTEXT.md is authoritative):
   //   "policy"       — the policy drove it (default when unset)
   //   "teleop"       — human demonstration, no policy running
-  //   "intervention" — human override of a *running* policy (ADR 0034);
+  //   "intervention" — human override of a *running* policy (ADR 0034, platform repo);
   //                    the DAgger correction label training upweights
   //   "hold"         — disengaged, no-motion tick; must NOT collapse
   //                    into "policy"

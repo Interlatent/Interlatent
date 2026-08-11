@@ -1,4 +1,4 @@
-"""World-model context ring + malformed-chunk rejection (ADR 0037).
+"""World-model context ring + malformed-chunk rejection (ADR 0037, platform repo).
 
 Two node-side behaviours land together because they protect the same policy
 family from opposite directions: the ring decides what a world-action model

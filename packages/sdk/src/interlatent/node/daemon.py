@@ -264,7 +264,7 @@ class NodeDaemon:
         return state
 
     def _safety_state(self) -> dict:
-        """Node-side motion-guard posture for the heartbeat (ADR 0037).
+        """Node-side motion-guard posture for the heartbeat (ADR 0037, platform repo).
 
         The backend gates world-model launches on this. A world-action model
         commits ~1.6 s of motion per chunk into a path that has no SafetyGate

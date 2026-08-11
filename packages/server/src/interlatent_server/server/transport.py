@@ -259,7 +259,7 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         # transformers-native. Unlike the arm above this keys on the checkpoint
         # config, not the URI: user fine-tunes are the point here, and a
         # substring test would miss "myorg/my-dreamzero-ft" and fire on
-        # anything with "dream" in the name. See ADR 0037.
+        # anything with "dream" in the name. See ADR 0037 (platform repo).
         from .dreamzero_backend import resolve_backend as _resolve_wm
         backend = _resolve_wm(backend, request.policy_uri, _peek_policy_config(request))
         requested_action_dim = request.action_dim or 0

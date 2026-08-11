@@ -103,7 +103,7 @@ as a protocol change.
 
 - `RecordTickRequest.control_source` now documents all four values
   (`policy` / `teleop` / `intervention` / `hold`). Both copies described two, and the
-  server's called an intervention a teleop — the distinction ADR 0034 introduced, and
+  server's called an intervention a teleop — the distinction ADR 0034 (platform repo) introduced, and
   the one training upweights. Comment-only; the wire is unchanged.
 
 ### CI

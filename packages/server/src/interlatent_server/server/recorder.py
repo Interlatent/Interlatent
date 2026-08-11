@@ -192,7 +192,7 @@ class SessionRecorder:
         self._dropped = 0
         self._first_warn_emitted = False
         self._cap_warn_emitted = False
-        # ADR 0024: steps already staged, so a spool retry whose ack was
+        # ADR 0024 (platform repo): steps already staged, so a spool retry whose ack was
         # lost in a reconnect (the recorder is inherited across gRPC
         # sessions of one episode) is re-acked without re-staging.
         self._steps_seen: set[int] = set()
