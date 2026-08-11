@@ -27,7 +27,11 @@ dependencies = [
   # DRTC client: gRPC + gRPC-Web (for the hosted Modal endpoint).
   "grpcio>=1.60",
   "grpcio-tools>=1.60",
-  "protobuf>=4.25",
+  # The checked-in stubs (protocol/messages_pb2.py) are gencode 6.31.1 and
+  # validate the runtime at import: 6.31.0 raises VersionError, and anything
+  # below 5.27 has no google.protobuf.runtime_version at all. A lower floor
+  # resolves to an install where every inference module fails to import.
+  "protobuf>=6.31.1,<7",
   "sonora>=0.2.2",
   "cmake",
 ]

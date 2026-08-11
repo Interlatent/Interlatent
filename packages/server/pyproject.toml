@@ -26,7 +26,9 @@ classifiers = [
 # GPU machine with the default PyPI index so the cu* wheels resolve.
 dependencies = [
   "grpcio>=1.60",
-  "protobuf>=4.25",
+  # Must match the SDK: the checked-in stubs are gencode 6.31.1 and validate
+  # the runtime version at import. See the note in packages/sdk/pyproject.toml.
+  "protobuf>=6.31.1,<7",
   "numpy>=1.24",
   "torch>=2.4",
   "pillow>=10",

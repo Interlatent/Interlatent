@@ -129,6 +129,20 @@ _CHECKER = textwrap.dedent(
                 env_limited.append((name, missing))
             else:
                 violations.append([name, missing or str(exc), str(exc)[:200]])
+        except ImportError as exc:
+            # A base dep that IS installed but too old — e.g. protobuf
+            # older than the checked-in gencode, which raises ImportError
+            # (not ModuleNotFoundError) from `google.protobuf`. That is an
+            # environment/pin problem, not a module importing an extra at
+            # module scope, and reporting it as the latter sends you off
+            # hunting for a lazy-import bug that does not exist.
+            missing = (getattr(exc, "name", "") or "").split(".")[0]
+            if missing in base:
+                env_limited.append((name, missing))
+            else:
+                violations.append(
+                    [name, missing or type(exc).__name__, str(exc)[:200]]
+                )
         except Exception as exc:  # noqa: BLE001 - report, don't mask
             violations.append([name, type(exc).__name__, str(exc)[:200]])
 
