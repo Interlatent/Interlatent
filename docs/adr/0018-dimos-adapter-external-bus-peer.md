@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-We want to run cloud policies (DRTC sessions) and collect data on robots
+We want to run remote-inference policies (DRTC sessions) and collect data on robots
 already managed by the dimos stack (Unitree Go2/G1, xArm manipulators). Dimos
 is a reactive module system: everything is a `Module` with typed streams over a
 pluggable LCM/Zenoh transport, wired into "blueprints", with a request/reply

@@ -134,11 +134,21 @@ def test_an_unconfigured_caller_raises_with_a_remedy(mod):
 
 
 @BOTH
-def test_the_hosted_address_is_a_named_constant_not_a_fallback(mod):
-    """Still spelled out for humans — errors suggest it and most operators
-    will pass it — but nothing resolves to it implicitly."""
-    assert mod.HOSTED_COORDINATOR == "https://interlatent.com"
-    assert mod.resolve(mod.HOSTED_COORDINATOR) == "https://interlatent.com"
+def test_no_address_is_named_as_somewhere_to_point_at(mod):
+    """There is one coordinator implementation and you run it, so no
+    remediation sentence may name a host to point at — a suggested address
+    is a default with extra steps (ADR 0039)."""
+    for purpose_error in _every_remedy(mod):
+        assert "interlatent.com" not in purpose_error
+        assert "dashboard" not in purpose_error.lower()
+
+
+def _every_remedy(mod) -> list[str]:
+    """The remediation sentence(s) a module can produce. The SDK keys them
+    by ``purpose``; the server twin has exactly one."""
+    if not hasattr(mod, "_REMEDIES"):
+        return [mod._REMEDY]
+    return [mod._remedy(p) for p in mod._REMEDIES]
 
 
 def test_sdk_error_names_the_flag_the_caller_is_actually_looking_at():
@@ -168,7 +178,10 @@ def test_sdk_error_names_the_flag_the_caller_is_actually_looking_at():
 def test_both_implementations_agree_on_the_public_constants():
     assert sdk.ENV_VAR == srv.ENV_VAR
     assert sdk.LEGACY_ENV_VAR == srv.LEGACY_ENV_VAR
-    assert sdk.HOSTED_COORDINATOR == srv.HOSTED_COORDINATOR
+    # Neither twin carries an address of its own: the pair went from
+    # "no implicit default, but here is the hosted one" to "no address".
+    assert not hasattr(sdk, "HOSTED_COORDINATOR")
+    assert not hasattr(srv, "HOSTED_COORDINATOR")
 
 
 @pytest.mark.parametrize(

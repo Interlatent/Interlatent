@@ -13,24 +13,22 @@ just a long-lived RPC the client waits on over a persistent stream.
 
 Networking:
   The node reaches the box at ``<host>:<port>`` — the box's public
-  IP:port (managed provisioning maps this automatically) or any address
-  routable from the node (LAN, VPN, firewalled WAN). The node is always
+  IP:port, or any address routable from the node (LAN, VPN, firewalled
+  WAN); it is what ``--advertise-address`` announces. The node is always
   the connection initiator, so the box needs no inbound route back to
   it. A ``host:port`` address (no http/https scheme) makes the client
   select native gRPC automatically — see ``DRTCConfig.use_grpc_web``
   inference in ``connect_drtc``.
 
 Auth:
-  A self-hosted box (owner ``ilat_`` key identity) guards its gRPC port
-  by default: every RPC's ``x-api-key`` metadata is validated against
-  the backend's per-box authorization probe, so only the box owner's
-  key can open sessions or record (``--insecure`` opts out for
-  air-gapped LANs — then treat the network as the trust boundary). A
-  dashboard-provisioned box keeps the historical unauthenticated port
-  (its network posture is managed by the provisioner).
+  A box that carries an identity guards its gRPC port by default: every
+  RPC's ``x-api-key`` metadata is validated against the coordinator's
+  per-box authorization probe, so only a key that may drive this box can
+  open sessions or record (``--insecure`` opts out for air-gapped LANs —
+  then treat the network as the trust boundary).
 
 Run on the GPU box (prefer ``interlatent-serve``, which registers the
-box with the dashboard first — see :mod:`interlatent_server.cli`):
+box with your coordinator first — see :mod:`interlatent_server.cli`):
 
     # Python >= 3.12 + torch 2.7 (cu128). MolmoAct2 is only on lerobot
     # main (post-0.5.1), so install from the pinned git ref until a
@@ -54,8 +52,16 @@ if TYPE_CHECKING:
     from .server.sinks import DatasetSink
 import logging
 import os
+from pathlib import Path
 
 log = logging.getLogger("serve_gpu")
+
+#: Where recordings land when nothing else says otherwise. There is no
+#: remote fallback any more, so a box with an unset ``--output-dir`` would
+#: silently record nothing; this makes "record" mean "record" on a bare
+#: box. Same home directory as ``box-id``, the s3 cache and failed-publish
+#: spool, and it is announced in ``--help`` and in the boot log.
+_DEFAULT_OUTPUT_DIR = str(Path.home() / ".interlatent" / "episodes")
 
 
 def _resolve_core_split() -> tuple[int, int, int]:
@@ -104,43 +110,31 @@ def _pin_affinity(cores: list[int]) -> None:
 
 
 def _has_box_identity() -> bool:
-    """True when this box carries an identity to talk to the backend —
-    dashboard-provisioned (admin key) or self-hosted (owner ilat_ key,
-    registered via ``interlatent-serve``). Gates whether the warmup-target
-    fetch is worth attempting at all.
+    """True when this box carries an identity to talk to its coordinator
+    (registered via ``interlatent-serve``, which puts the box id, the
+    coordinator address and the key into the environment). Gates whether
+    the warmup-target fetch is worth attempting at all.
     """
     from interlatent_server import credentials
 
     return credentials.resolve() is not None
 
 
-def _is_provisioned_box() -> bool:
-    """True only for a DASHBOARD-PROVISIONED box (system/admin key).
+def _fetch_warmup_target_from_coordinator() -> dict | None:
+    """Ask this box's coordinator what to warm up with, based on the
+    environment attached to the box there. Returns the parsed JSON body,
+    or None if the box has no identity / the call fails / no environment
+    is attached.
 
-    Distinct from :func:`_has_box_identity` on purpose: a provisioned box's
-    warmup config comes solely from the backend, while a self-hosted box's
-    operator may pass ``--warmup-policy`` directly. See :func:`_warmup`.
-    """
-    from interlatent_server import credentials
-
-    creds = credentials.resolve()
-    return creds is not None and creds.is_system
-
-
-def _fetch_warmup_target_from_backend() -> dict | None:
-    """Ask the backend what to warm up with based on the env attached to
-    this box in the dashboard. Returns the parsed JSON body or None if
-    the box has no system identity / the call fails / no env is
-    attached.
-
-    The contract: the backend's
+    The contract: the coordinator's
     ``GET /api/v1/compute/boxes/{box_id}/warmup-target`` returns
     ``{"policy_uri", "image_keys", "num_inference_steps",
-       "inference_action_mode"}`` — all derived from
-    ``Environment.{base_model, camera_names, ...}`` populated via the
-    dashboard. Single source of truth for what the box should warm
-    with, so the operator never has to hand-set per-tenant env vars on
-    the GPU.
+       "inference_action_mode"}`` — all derived from the environment's
+    ``{base_model, camera_names, ...}``. It is the single source of truth
+    for what the box should warm with, so the operator never has to
+    hand-set per-environment vars on the GPU, and a session started with
+    ``--policy X`` (which writes ``warm_policy`` onto the box) comes back
+    from here as the thing to pre-compile.
     """
     import json
     import urllib.request
@@ -153,17 +147,16 @@ def _fetch_warmup_target_from_backend() -> dict | None:
     log.info(
         "Warmup identity: %s",
         "<missing>" if creds is None else (
-            f"box_id={creds.box_id} api_base={creds.api_base} "
-            f"key=<set:{'system' if creds.is_system else 'owner'}>"
+            f"box_id={creds.box_id} api_base={creds.api_base} key=<set>"
         ),
     )
     if creds is None:
         log.warning(
             "Warmup-target fetch skipped — missing box identity. The box "
-            "can't ask the backend which env/cameras to warm with, so it "
-            "will fall back to DRTC_WARMUP_POLICY (no image_keys). Provision "
-            "through the dashboard, or run `interlatent-serve` with your "
-            "INTERLATENT_API_KEY.",
+            "can't ask its coordinator which environment/cameras to warm "
+            "with, so it will fall back to DRTC_WARMUP_POLICY (no "
+            "image_keys). Run `interlatent-serve` with your "
+            "INTERLATENT_API_KEY so it registers first.",
         )
         return None
     box_id = creds.box_id
@@ -182,7 +175,7 @@ def _fetch_warmup_target_from_backend() -> dict | None:
         )
         return body
     except urllib.error.HTTPError as e:
-        # Surface the backend's error body — it carries the actionable
+        # Surface the coordinator's error body — it carries the actionable
         # detail (e.g. a 409 camera-mismatch message, or a 500 trace
         # summary) that a bare status code hides. Best-effort read; never
         # let the diagnostics themselves raise.
@@ -191,16 +184,18 @@ def _fetch_warmup_target_from_backend() -> dict | None:
             body = e.read().decode("utf-8", "replace").strip()
         except Exception:
             pass
-        # 404 means the box has no env attached yet — warmup is a no-op.
+        # 404 means the box has no environment attached yet — warmup is a
+        # no-op.
         if e.code == 404:
             log.info(
-                "Backend reports no env attached to box %s; skipping warmup",
+                "Coordinator reports no environment attached to box %s; "
+                "skipping warmup",
                 box_id,
             )
         else:
             log.warning(
                 "Warmup-target fetch returned HTTP %d; skipping warmup. "
-                "Backend said: %s", e.code, body or "<empty body>",
+                "The coordinator said: %s", e.code, body or "<empty body>",
             )
         return None
     except Exception:
@@ -250,34 +245,27 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
 
     Config precedence, in order:
 
-    1. **The backend warmup target**, whenever the fetch returns one. It
-       carries policy_uri AND image_keys AND the inference knobs together,
-       all derived from the env attached in the dashboard, so warm and
-       first-session configs agree by construction. A target can be
-       *partial* though — the backend answers with the policy the box
-       registered even when no env is attached, and then image_keys is
-       empty. ``image_keys_override`` fills exactly that hole (it never
-       overrides keys the backend did supply), because otherwise a
-       MolmoAct2 pre-warm is unreachable: the guard below skips for want
-       of cameras and there is no env to go configure.
-    2. **A dashboard-provisioned box** (system identity: ``INTERLATENT_BOX_ID``
-       + ``INTERLATENT_API_BASE`` + ``INTERLATENT_ADMIN_KEY``) with no target
-       skips pre-warm. The backend is that box's only configuration source —
-       falling back to a static policy would hide the real failure behind a
-       half-configured warm.
-    3. **Everyone else** — a self-hosted (owner-key) box, or no identity at
-       all — falls back to ``policy_uri_override`` /
-       ``image_keys_override`` (``--warmup-policy`` /
-       ``--warmup-image-keys``, or ``DRTC_WARMUP_POLICY`` /
-       ``DRTC_WARMUP_IMAGE_KEYS``). An operator who typed the flag is
-       standing right there; refusing it because a box happens to be
-       registered is not the "silent fallback" case rule 2 guards against.
+    1. **The coordinator's warmup target**, whenever the fetch returns one.
+       It carries policy_uri AND image_keys AND the inference knobs
+       together, all derived from the environment attached to this box, so
+       warm and first-session configs agree by construction. A target can
+       be *partial* though — the coordinator answers with the policy the
+       box registered even when no environment is attached, and then
+       image_keys is empty. ``image_keys_override`` fills exactly that hole
+       (it never overrides keys the coordinator did supply), because
+       otherwise a MolmoAct2 pre-warm is unreachable: the guard below skips
+       for want of cameras and there is no environment to go configure.
+    2. **Otherwise** — no target, whether or not the box has an identity —
+       fall back to ``policy_uri_override`` / ``image_keys_override``
+       (``--warmup-policy`` / ``--warmup-image-keys``, or
+       ``DRTC_WARMUP_POLICY`` / ``DRTC_WARMUP_IMAGE_KEYS``). An operator
+       who typed the flag is standing right there; refusing it because a
+       box happens to be registered is not a service to anyone. (This rule
+       once keyed on ``_has_box_identity()``, which is true the moment the
+       box registers — i.e. always — so ``interlatent-serve
+       --warmup-policy ...`` silently ignored the flag.)
 
-    Rule 3 previously keyed on ``_has_box_identity()``, which is true for an
-    owner key too — so ``interlatent-serve --warmup-policy ...`` silently
-    ignored the flag the moment the box registered, which is always.
-
-    Caveat on rule 3: ``PolicyRuntime`` caches on ``(backend, policy_uri)``
+    Caveat on rule 2: ``PolicyRuntime`` caches on ``(backend, policy_uri)``
     and ignores per-session metadata on reuse, so image_keys that DON'T
     match the node's cameras don't just waste the warm — the first real
     session inherits the wrong-camera runtime. Rule 1 can't hit this (same
@@ -286,12 +274,12 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
     """
     from interlatent_server.server.policy_runtime import PolicyRuntime
 
-    target = _fetch_warmup_target_from_backend()
+    target = _fetch_warmup_target_from_coordinator()
     if target is not None:
         policy_uri = (target.get("policy_uri") or "").strip()
         if not policy_uri:
             log.info(
-                "Backend warmup target has no policy_uri; skipping warmup"
+                "Coordinator warmup target has no policy_uri; skipping warmup"
             )
             return
         meta: dict[str, str] = {}
@@ -302,32 +290,34 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
             log.info("Resolved %d camera image_keys: %s", len(image_keys), image_keys)
             if override_keys and override_keys != [str(k) for k in image_keys]:
                 # Never silently inert: the operator passed a flag and the
-                # backend outranks it. Say which one is in effect and why.
+                # coordinator outranks it. Say which one is in effect and why.
                 log.warning(
-                    "Ignoring --warmup-image-keys %s — the backend's warmup "
-                    "target supplied %s, and it wins because it feeds the "
-                    "node's cameras and this warm from the same env, so the "
-                    "two cannot disagree. Change the env's camera_names to "
-                    "override.", override_keys, image_keys,
+                    "Ignoring --warmup-image-keys %s — the coordinator's "
+                    "warmup target supplied %s, and it wins because it feeds "
+                    "the node's cameras and this warm from the same "
+                    "environment, so the two cannot disagree. Change the "
+                    "environment's camera_names to override.",
+                    override_keys, image_keys,
                 )
         elif override_keys:
             # A target with a policy but no cameras. Filling that hole from
-            # the operator's flag is not overriding the backend — the backend
+            # the operator's flag is not overriding the coordinator — it
             # supplied nothing here, and without it a MolmoAct2 pre-warm is
-            # unreachable (its guard below skips, and there is no env to fix).
+            # unreachable (its guard below skips, and there is no
+            # environment to fix).
             meta["image_keys"] = ",".join(override_keys)
             log.info(
-                "Backend warmup target carries no image_keys (no env attached, "
-                "or the env has no camera_names); using --warmup-image-keys %s. "
-                "These must match the node's --camera names — the runtime cache "
-                "is keyed on (backend, policy_uri), so the first real session "
-                "inherits this warm.", override_keys,
+                "The coordinator's warmup target carries no image_keys (no "
+                "environment attached, or it has no camera_names); using "
+                "--warmup-image-keys %s. These must match the node's --camera "
+                "names — the runtime cache is keyed on (backend, policy_uri), "
+                "so the first real session inherits this warm.", override_keys,
             )
         else:
             log.warning(
                 "Warmup target for policy %s returned an EMPTY image_keys list "
-                "— the attached env has no camera_names configured. Set camera "
-                "names in the env's Configuration tab, or pass "
+                "— the attached environment has no camera_names configured. "
+                "Set camera names on the environment, or pass "
                 "--warmup-image-keys.", policy_uri,
             )
         nis = target.get("num_inference_steps")
@@ -336,22 +326,9 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
         iam = (target.get("inference_action_mode") or "").strip()
         if iam:
             meta["inference_action_mode"] = iam
-    elif _is_provisioned_box():
-        # Dashboard-provisioned box that couldn't fetch its target (see the
-        # warning above for which step failed). The backend is the single
-        # source of truth here — do NOT fall back to a static policy, which
-        # would hide the failure behind a half-configured warm. Skip; first
-        # session compiles.
-        log.warning(
-            "Box has system (dashboard-provisioned) identity but the "
-            "warmup-target fetch did not return a target — skipping pre-warm "
-            "(the first real session will compile instead). Not falling back "
-            "to a static policy: the backend is this box's only config source.",
-        )
-        return None
     else:
-        # Self-hosted box, or none at all: the operator's own
-        # --warmup-policy / --warmup-image-keys is the config source.
+        # No target: the operator's own --warmup-policy /
+        # --warmup-image-keys is the config source.
         policy_uri = (policy_uri_override or "").strip()
         if not policy_uri:
             return None
@@ -360,24 +337,25 @@ def _warmup(policy_uri_override: str, image_keys_override: str = "") -> str | No
         if keys:
             meta["image_keys"] = ",".join(keys)
         log.info(
-            "No warmup target from the backend — using the operator-supplied "
-            "--warmup-policy %s (image_keys=%s). Attach this box to an "
-            "environment in the dashboard to have the target supplied "
-            "automatically.",
+            "No warmup target from the coordinator — using the "
+            "operator-supplied --warmup-policy %s (image_keys=%s). Attach "
+            "this box to an environment on your coordinator to have the "
+            "target supplied automatically.",
             policy_uri, meta.get("image_keys") or "none",
         )
 
     # MolmoAct2's released checkpoint can't load without image_keys.
-    # If we somehow got here without them (no env attached + a manual
-    # DRTC_WARMUP_POLICY pointing at MolmoAct2), skip rather than fail
-    # silently inside the cache lookup.
+    # If we somehow got here without them (no environment attached + a
+    # manual DRTC_WARMUP_POLICY pointing at MolmoAct2), skip rather than
+    # fail silently inside the cache lookup.
     if "molmoact" in policy_uri.lower() and "image_keys" not in meta:
         log.warning(
             "Pre-warm skipped for MolmoAct2 policy %s — no image_keys "
             "available, and its checkpoint cannot build its feature dict "
-            "without them. Either attach this box to an env (with cameras "
-            "configured) in the dashboard, or pass --warmup-image-keys "
-            "<name>[,<name>...] naming the SAME cameras the node runs with.",
+            "without them. Either attach this box to an environment (with "
+            "cameras configured) on your coordinator, or pass "
+            "--warmup-image-keys <name>[,<name>...] naming the SAME cameras "
+            "the node runs with.",
             policy_uri,
         )
         return None
@@ -493,9 +471,9 @@ async def _serve(
         dataset_sink=dataset_sink,
     )
     if guard_rpcs:
-        # Self-hosted default: gate every RPC on "does this x-api-key belong
-        # to this box's owner?" via the backend's per-box authz probe. A
-        # public-IP box without this is an open GPU.
+        # The default: gate every RPC on "may this x-api-key drive this
+        # box?" via the coordinator's per-box authz probe. A public-IP box
+        # without this is an open GPU.
         from interlatent_server import credentials
         from interlatent_server.server.auth import (
             build_box_key_validator,
@@ -525,9 +503,9 @@ async def _serve(
 
     # The gRPC port is now bound AND _warmup() (run synchronously before
     # _serve) has finished compiling, so the box is genuinely ready to
-    # serve. Self-report "ready" to the backend — this is what surfaces
-    # the box as launchable in the dashboard (replacing the old
-    # Vercel-side TCP probe, which couldn't reliably reach the box).
+    # serve. Self-report "ready" to the coordinator — this is what makes
+    # the box show up as launchable there; the coordinator has no route
+    # back into the box to find out for itself.
     from interlatent_server.box_status import report_status as _report_box_status
 
     # The idle-GC reconcile becomes the sole status writer once a session
@@ -535,9 +513,10 @@ async def _serve(
     # "ready" here to surface the box as launchable. Carry warmup_warning as
     # status_detail so a degraded (but still usable) pre-warm is visible;
     # the first successful session clears it.
-    # The address nodes should dial, when the box knows it (self-hosted
-    # `--advertise-address`, or a provisioner that exports it). host or
-    # host:port; bare hosts get this server's port appended.
+    # The address nodes should dial, when the box knows it
+    # (`--advertise-address`, or anything that exports it into the
+    # environment). host or host:port; bare hosts get this server's port
+    # appended.
     _box_endpoint = os.environ.get("INTERLATENT_ADVERTISE_ADDRESS", "").strip()
     if _box_endpoint and ":" not in _box_endpoint:
         _box_endpoint = f"{_box_endpoint}:{port}"
@@ -559,14 +538,20 @@ async def _serve(
 def main() -> None:
     p = argparse.ArgumentParser(prog="interlatent-drtc-server")
     p.add_argument(
-        "--output-dir", default=os.environ.get("DRTC_OUTPUT_DIR", ""),
+        "--output-dir",
+        default=os.environ.get("DRTC_OUTPUT_DIR", "").strip() or _DEFAULT_OUTPUT_DIR,
         help="Publish finished datasets into this directory, merge-on-stop "
-             "into one flat LeRobot dataset. No account needed.",
+             "into one flat LeRobot dataset. No account needed. Defaults to "
+             f"$DRTC_OUTPUT_DIR, else {_DEFAULT_OUTPUT_DIR} — recording "
+             "always has somewhere to land, because a box with no "
+             "destination records nothing.",
     )
     p.add_argument(
         "--s3-uri", default=os.environ.get("DRTC_S3_URI", ""),
         help="Publish to s3://bucket/prefix (merge-on-stop against a local "
-             "mirror, then upload). Needs the [s3] extra.",
+             "mirror, then upload). Needs the [s3] extra. Takes precedence "
+             "over the default --output-dir; naming a directory explicitly "
+             "takes it back.",
     )
     p.add_argument("--s3-endpoint-url", default=os.environ.get("DRTC_S3_ENDPOINT_URL", ""),
                    help="For S3-compatible stores (MinIO, Cloudflare R2, ...).")
@@ -579,8 +564,8 @@ def main() -> None:
         "--warmup-policy",
         default=os.environ.get("DRTC_WARMUP_POLICY", ""),
         help="Optional HF repo / local path to load + compile at startup "
-        "so the first robot session is fast. Used when the backend returns "
-        "no warmup target; a dashboard-provisioned box ignores it.",
+        "so the first robot session is fast. Used when the coordinator "
+        "returns no warmup target for this box.",
     )
     p.add_argument(
         "--warmup-image-keys",
@@ -673,24 +658,20 @@ def main() -> None:
     # tiny_torch, lerobot, molmoact2).
     import interlatent_server.server  # noqa: F401
 
-    # Warm up when this is a dashboard box (system identity -> backend fetch
-    # is the source of truth) OR when an operator explicitly passed
-    # --warmup-policy for a manual/local run. A dashboard box no longer needs
-    # DRTC_WARMUP_POLICY to trigger warmup.
+    # Warm up when the box is registered (its coordinator can then say what
+    # to warm with) OR when an operator explicitly passed --warmup-policy
+    # for a manual/local run.
     warmup_warning: str | None = None
     if _has_box_identity() or args.warmup_policy:
         warmup_warning = _warmup(args.warmup_policy, args.warmup_image_keys)
 
-    # Owner-checked RPC auth is the default on a self-hosted box (owner-key
-    # identity). Provisioned boxes (system identity) keep the historical
-    # unauthenticated port; --insecure opts a self-hosted box out.
+    # Owner-checked RPC auth is the default for any box that has an
+    # identity to check against; --insecure is the only way off it.
     from interlatent_server import credentials as _credentials
 
     _creds = _credentials.resolve()
-    guard_rpcs = (
-        not args.insecure and _creds is not None and not _creds.is_system
-    )
-    if not guard_rpcs and _creds is not None and not _creds.is_system:
+    guard_rpcs = not args.insecure and _creds is not None
+    if args.insecure and _creds is not None:
         log.warning(
             "Serving with --insecure: the gRPC port accepts ANY caller. "
             "Keep it off the public internet."
@@ -698,12 +679,10 @@ def main() -> None:
 
     # A destination configured here is this box's own fallback; a coordinator
     # that stamps one onto its sessions overrides it per session (ADR 0002).
-    dataset_sink = None
-    if args.output_dir:
-        from .server.sinks import LocalDirSink
-        dataset_sink = LocalDirSink(args.output_dir)
-        log.info("Recording destination: local dir %s", args.output_dir)
-    elif args.s3_uri:
+    # --output-dir always has a value now (see _DEFAULT_OUTPUT_DIR), so an
+    # explicitly configured --s3-uri is what distinguishes the two: it wins
+    # unless a directory was also asked for by name.
+    if args.s3_uri and args.output_dir == _DEFAULT_OUTPUT_DIR:
         from .server.sinks import S3Sink
         dataset_sink = S3Sink.from_uri(
             args.s3_uri,
@@ -713,6 +692,10 @@ def main() -> None:
             region=args.s3_region or None,
         )
         log.info("Recording destination: %s", args.s3_uri)
+    else:
+        from .server.sinks import LocalDirSink
+        dataset_sink = LocalDirSink(args.output_dir)
+        log.info("Recording destination: local dir %s", args.output_dir)
 
     asyncio.run(_serve(
         args.host,

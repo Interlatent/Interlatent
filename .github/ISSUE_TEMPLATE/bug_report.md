@@ -13,7 +13,7 @@ labels: bug
 - Robot / hardware (if any):
 - Network path (same machine / LAN / VPN / WAN):
 - Policy URI (e.g. `lerobot/smolvla_base`):
-- Session id (if a cloud inference session was involved):
+- Session id (if an inference session was involved):
 
 **Logs**
 Node/client traceback around the session:

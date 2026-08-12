@@ -1,21 +1,21 @@
-"""Box identity resolution — one code path for hosted and self-hosted boxes.
+"""The box's identity when it calls its coordinator.
 
-Every backend call a box makes (warmup-target fetch, status reports, the
-gRPC auth probe) authenticates as one of two identities:
+Every coordinator call a box makes — the warmup-target fetch, status
+reports, the gRPC auth probe — presents one key: the one the operator
+supplied as ``INTERLATENT_API_KEY``, alongside the ``INTERLATENT_BOX_ID``
+and ``INTERLATENT_COORDINATOR`` that say who is calling and where. There
+is one shape of box now (you run the coordinator, you run the box), so
+there is one identity.
 
-- **Hosted / provisioned box**: the dashboard injects ``INTERLATENT_BOX_ID``,
-  ``INTERLATENT_COORDINATOR`` and the shared system secret
-  ``INTERLATENT_ADMIN_KEY`` at provision time.
-- **Self-hosted (BYO) box**: the operator supplies their own key
-  (``INTERLATENT_API_KEY``) — an ``ilat_`` user key against the hosted
-  dashboard, or the ``ilop_`` operator key a self-hosted coordinator
-  minted. ``interlatent-serve`` persists the box id and registers via
-  ``POST /api/v1/compute/boxes/register``.
+``interlatent-serve`` is what normally populates the three: it persists a
+box id, registers via ``POST /api/v1/compute/boxes/register``, and puts
+the key the coordinator handed back into the environment (a box-scoped
+``ilbox_`` key when the coordinator minted one, otherwise the ``ilop_``
+operator key it registered with). Either way the box just presents what
+it holds — it never inspects the key, and neither does this module.
 
-The admin key wins when both are present (a dashboard-provisioned box that
-also happens to have a user key in the environment must keep its system
-identity). Everything downstream asks :func:`resolve` instead of reading
-env vars, so the two deployment shapes never fork the code path.
+Everything downstream asks :func:`resolve` instead of reading env vars,
+so no caller has to know which of the two it ended up with.
 """
 from __future__ import annotations
 
@@ -25,27 +25,11 @@ from dataclasses import dataclass
 from .coordinator import normalize
 
 
-#: Which kind of principal ``BoxCredentials.api_key`` is. Determines what a
-#: coordinator will let the box do, and (via ``is_system``) whether the box may
-#: report a graceful ``stopped`` — a hosted box's lifecycle is the dashboard's
-#: to narrate, an operator's box narrates its own.
-KIND_SYSTEM = "system"     # the dashboard's shared admin secret
-KIND_OPERATOR = "operator"  # ilop_ — minted by a self-hosted coordinator
-KIND_USER = "user"          # ilat_ — a dashboard user key
-
-
 @dataclass(frozen=True)
 class BoxCredentials:
     box_id: str
     api_base: str
     api_key: str
-    kind: str = KIND_USER
-
-    @property
-    def is_system(self) -> bool:
-        """Kept as a property rather than a field: call sites like
-        ``box_status.report_status`` branch on it and predate ``kind``."""
-        return self.kind == KIND_SYSTEM
 
     @property
     def api_root(self) -> str:
@@ -54,8 +38,8 @@ class BoxCredentials:
 
 
 def resolve() -> BoxCredentials | None:
-    """The box's backend identity, or None (local dev / smoke tests —
-    every backend interaction becomes a no-op, exactly as before)."""
+    """The box's coordinator identity, or None (local dev / smoke tests —
+    every coordinator interaction becomes a no-op, exactly as before)."""
     box_id = os.environ.get("INTERLATENT_BOX_ID", "").strip()
     api_base = (
         os.environ.get("INTERLATENT_COORDINATOR", "").strip()
@@ -63,11 +47,7 @@ def resolve() -> BoxCredentials | None:
     )
     if not (box_id and api_base):
         return None
-    admin_key = os.environ.get("INTERLATENT_ADMIN_KEY", "").strip()
-    if admin_key:
-        return BoxCredentials(box_id, api_base, admin_key, kind=KIND_SYSTEM)
-    user_key = os.environ.get("INTERLATENT_API_KEY", "").strip()
-    if user_key:
-        kind = KIND_OPERATOR if user_key.startswith("ilop_") else KIND_USER
-        return BoxCredentials(box_id, api_base, user_key, kind=kind)
-    return None
+    api_key = os.environ.get("INTERLATENT_API_KEY", "").strip()
+    if not api_key:
+        return None
+    return BoxCredentials(box_id, api_base, api_key)

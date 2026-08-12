@@ -215,10 +215,10 @@ credential, so it's created `0600`:
 
 ```toml
 # ~/.interlatent/node.toml
-node_id  = "..."                        # assigned by the dashboard at pair time
-token    = "ilnode_..."                 # long-lived node credential
-api_base = "https://interlatent.com"
-name     = "my-arm"
+node_id     = "..."                     # assigned by the coordinator at pair time
+token       = "ilnode_..."              # long-lived node credential
+coordinator = "http://10.0.0.2:8900"    # the coordinator this node long-polls
+name        = "my-arm"
 ```
 
 ## Special case: the dimos adapter (the robot is a running stack)

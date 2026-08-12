@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { StartRecordingPanel } from './components/StartRecordingPanel';
 import { VRTeleopOverlay } from './components/VRTeleopOverlay';
 import {
-  HOSTED_COORDINATOR,
   InferenceSessionOut,
   TeleopRecordingOut,
   getApiBase,
@@ -60,7 +59,7 @@ function SettingsPanel({
           type="url"
           value={apiBase}
           onChange={(e) => setApiBase(e.target.value)}
-          placeholder={HOSTED_COORDINATOR}
+          placeholder="http://localhost:8900"
           className="w-full rounded border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary font-mono focus:outline-none focus:border-border-emphasis"
         />
       </label>
@@ -72,7 +71,7 @@ function SettingsPanel({
           type="password"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder="ilat_…"
+          placeholder="ilop_…"
           autoComplete="off"
           className="w-full rounded border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary font-mono focus:outline-none focus:border-border-emphasis"
         />
@@ -99,8 +98,9 @@ function SettingsPanel({
       </div>
       <p className="mt-4 text-[11px] text-text-tertiary leading-relaxed">
         The key is stored only in this browser&rsquo;s localStorage and sent as
-        the <span className="font-mono">x-api-key</span> header. Create one in
-        the Interlatent dashboard.
+        the <span className="font-mono">x-api-key</span> header. Use the
+        operator key your coordinator printed at{' '}
+        <span className="font-mono">interlatent up</span>.
       </p>
     </div>
   );
@@ -403,7 +403,7 @@ export function App() {
           !error && (
             <p className="text-[12px] font-mono text-text-tertiary px-1 py-6">
               {tab === 'sessions'
-                ? 'No inference sessions. Launch one from the dashboard, then Refresh.'
+                ? 'No inference sessions. Start one with `interlatent session start`, then Refresh.'
                 : 'No teleop recordings. Start one above.'}
             </p>
           )

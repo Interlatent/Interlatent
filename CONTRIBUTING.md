@@ -41,8 +41,9 @@ For the policy server: `pip install -e ./packages/server pytest pytest-timeout`,
 `pytest packages/server/tests/`. Full matrix in [TESTING.md](TESTING.md).
 
 For real hardware and policies install `pip install -e './packages/sdk[lerobot]'`.
-Inference runs on managed cloud GPU pods through the
-[dashboard](https://interlatent.com) — you need an API key (`ilat_…`), not a local GPU.
+Inference runs on a GPU box running `interlatent-server` — a machine of your own or one
+you rent — brokered by the coordinator `interlatent up` starts. See
+[docs/self-hosting.md](docs/self-hosting.md).
 
 ## Changing the wire protocol
 
@@ -54,8 +55,9 @@ pip install 'grpcio-tools==1.74.0'   # pinned: the stubs embed version stamps
 ./proto/gen_proto.sh
 ```
 
-Protocol changes must stay backwards-compatible (the hosted cloud and older robots speak
-the same contract). Add fields; don't renumber or repurpose existing ones.
+Protocol changes must stay backwards-compatible (a client from PyPI has to talk to a
+server from PyPI, at whatever versions the fleet is on). Add fields; don't renumber or
+repurpose existing ones.
 `tests/test_proto_sync.py` fails the build if the mirrors drift. See
 [proto/README.md](proto/README.md).
 

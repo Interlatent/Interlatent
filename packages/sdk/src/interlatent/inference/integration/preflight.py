@@ -1,21 +1,21 @@
 """Backend for the ``interlatent-preflight`` console script.
 
-A non-destructive connectivity check for the hosted cloud inference
-path. It rides the *real* flow — exactly what a robot does — without
-any hardware:
+A non-destructive connectivity check for the remote inference path. It
+rides the *real* flow — exactly what a robot does — without any
+hardware:
 
-    1. Fetch the environment's observation schema from the dashboard
+    1. Fetch the environment's observation schema from your coordinator
        (camera names, action_dim) so synthetic obs match the policy.
-    2. Open a real DRTC session against a managed GPU pod running the
-       requested policy (``connect_drtc``).
+    2. Open a real DRTC session against a GPU box running the requested
+       policy (``connect_drtc``).
     3. Push synthetic observations (a random state vector + gray camera
        frames) for a few seconds, confirming action chunks come back.
     4. Report the measured network-vs-compute latency split and a
        PASS / WARN / FAIL verdict.
 
-It answers "is the cloud inference path healthy and fast enough from
-where my robot sits?" — it does NOT exercise cameras, joints, or the
-motor bus, so a green preflight is not "my robot is ready".
+It answers "is the inference path to my GPU box healthy and fast enough
+from where my robot sits?" — it does NOT exercise cameras, joints, or
+the motor bus, so a green preflight is not "my robot is ready".
 
 All the interesting machinery lives in ``inference/client/`` and
 ``inference/integration/connect.py``; this file is just the harness.
@@ -35,7 +35,7 @@ from .connect import connect_drtc
 
 log = logging.getLogger("interlatent.preflight")
 
-# Fallback obs schema when the dashboard config is unavailable or sparse.
+# Fallback obs schema when the coordinator config is unavailable or sparse.
 # Sized for an SO-101-class arm: 6 joints, a single camera.
 _DEFAULT_ACTION_DIM = 6
 _DEFAULT_CAMERAS = ["front"]
@@ -49,15 +49,15 @@ _STARVATION_WARN_PCT = 25.0
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="interlatent-preflight",
-        description="Connectivity check for the Interlatent cloud inference "
-        "path: opens a real DRTC session against a managed GPU pod with "
-        "synthetic observations and reports a latency verdict. Does NOT test "
-        "robot hardware.",
+        description="Connectivity check for the DRTC inference path: opens a "
+        "real session against one of your GPU boxes with synthetic "
+        "observations and reports a latency verdict. Does NOT test robot "
+        "hardware.",
     )
     p.add_argument("--environment", required=True,
-                   help="Interlatent environment slug registered in the dashboard.")
+                   help="Environment slug registered with your coordinator.")
     p.add_argument("--policy", required=True,
-                   help="Policy URI to load on the pod (e.g. lerobot/smolvla_base).")
+                   help="Policy URI to load on the box (e.g. lerobot/smolvla_base).")
     p.add_argument("--task", default="preflight connectivity check",
                    help="Natural-language task string passed to the policy.")
     p.add_argument("--fps", type=float, default=30.0,
@@ -73,12 +73,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--image-size", type=int, default=_DEFAULT_IMAGE_SIZE,
                    help="Square edge (px) of the synthetic camera frames.")
     p.add_argument("--api-key", default=None,
-                   help="Interlatent API key (ilat_…). Falls back to INTERLATENT_API_KEY.")
-    p.add_argument("--api-base", default=None,
-                   help="Dashboard base URL (default https://interlatent.com / "
-                        "INTERLATENT_API_BASE) — used to fetch the env schema.")
+                   help="Operator API key (ilop_…). Falls back to INTERLATENT_API_KEY.")
+    p.add_argument("--coordinator", "--api-base", dest="api_base", default=None,
+                   help="Coordinator base URL, e.g. http://10.0.0.5:8900 — used "
+                        "to fetch the env schema. No default. "
+                        "Env: INTERLATENT_COORDINATOR.")
     p.add_argument("--server", default=None,
-                   help="DRTC endpoint override (default INTERLATENT_DRTC_URL / hosted).")
+                   help="DRTC endpoint of the GPU box to dial, e.g. "
+                        "203.0.113.7:50051. Falls back to INTERLATENT_DRTC_URL; "
+                        "there is no default.")
     p.add_argument("--grpc-web", action="store_true",
                    help="Force gRPC-Web transport (auto-inferred from an https URL).")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -86,7 +89,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _fetch_schema(environment: str, api_key: str, api_base: str | None) -> dict:
-    """Pull the env's obs schema from the dashboard; empty dict on failure."""
+    """Pull the env's obs schema from the coordinator; empty dict on failure."""
     try:
         from ..._http import HTTPClient
         from ..._resources import EnvironmentsResource
@@ -127,7 +130,7 @@ def _verdict(stats: dict, got_action: bool, chunk_size: int, control_period_s: f
              est_latency_s: float) -> tuple[str, list[str]]:
     """Return (PASS|WARN|FAIL, notes)."""
     if not got_action:
-        return "FAIL", ["No action chunk was received — the cloud path is not serving."]
+        return "FAIL", ["No action chunk was received — the GPU box is not serving."]
     notes: list[str] = []
     # DRTC tolerates high latency by chunking; the risk is the round-trip
     # outrunning the chunk horizon, which starves the schedule.
@@ -150,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
 
     api_key = args.api_key or os.environ.get("INTERLATENT_API_KEY", "")
     if not api_key and not args.server:
-        log.error("error: an Interlatent API key is required "
+        log.error("error: an operator API key is required "
                   "(pass --api-key or set INTERLATENT_API_KEY).")
         return 2
 
@@ -226,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                  int(stats.get("chunks_recv", 0)))
     for n in notes:
         log.info("  ⚠ %s", n)
-    log.info("  (tests the cloud inference path only — NOT cameras, joints, or motors.)")
+    log.info("  (tests the DRTC inference path only — NOT cameras, joints, or motors.)")
 
     return 0 if verdict in ("PASS", "WARN") else 1
 

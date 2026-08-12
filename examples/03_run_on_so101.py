@@ -1,22 +1,25 @@
-"""Drive an SO-101-shaped robot against a cloud GPU pod.
+"""Drive an SO-101-shaped robot against a GPU box you run yourself.
 
-Inference runs on a managed pod provisioned by the Interlatent dashboard;
-you authenticate with an API key (`ilat_...`). Without hardware this still
-runs: it introspects the policy's expected observation schema locally
-(camera keys + state shape, config json only — no weights downloaded) and
-synthesizes matching observations, so you can validate your account +
-network path before touching a robot. When you wire real hardware, replace
-`synth_observation()`'s per-key logic with camera capture + joint reads —
-keys and shapes stay identical.
+Inference runs on your own GPU machine — `interlatent-serve`, registered with
+the coordinator you started with `interlatent up` — and you authenticate with
+the operator key that coordinator issued (`ilop_...`), which is also what
+gates the box's gRPC port. Without hardware this still runs: it introspects
+the policy's expected observation schema locally (camera keys + state shape,
+config json only — no weights downloaded) and synthesizes matching
+observations, so you can validate your key + network path before touching a
+robot. When you wire real hardware, replace `synth_observation()`'s per-key
+logic with camera capture + joint reads — keys and shapes stay identical.
 
 Run:
 
     pip install interlatent lerobot
-    export INTERLATENT_API_KEY=ilat_...
+    export INTERLATENT_API_KEY=ilop_...             # printed by `interlatent up`
+    export INTERLATENT_DRTC_URL=203.0.113.7:50051   # your box's --advertise-address
     python examples/03_run_on_so101.py --task "pick up the red cube"
 
-For a hands-off daemon on the robot (auto camera capture, dashboard-assigned
-sessions) see `interlatent-node`.
+For a hands-off daemon on the robot (auto camera capture, coordinator-assigned
+sessions) see `interlatent-node`, which is handed the box address per session
+instead of naming one by hand.
 """
 
 from __future__ import annotations
@@ -34,7 +37,8 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--api-key", default=os.environ.get("INTERLATENT_API_KEY"),
-                   help="Interlatent API key (ilat_...); or set INTERLATENT_API_KEY")
+                   help="Operator key from `interlatent up` (ilop_...); "
+                        "or set INTERLATENT_API_KEY")
     p.add_argument("--policy-uri", default="lerobot/smolvla_base")
     p.add_argument("--task", default="pick up the red cube")
     p.add_argument("--fps", type=float, default=10.0,
@@ -117,15 +121,15 @@ def main() -> None:
     from interlatent.inference.integration import connect_drtc
 
     if not args.api_key:
-        sys.exit("set INTERLATENT_API_KEY or pass --api-key ilat_...")
+        sys.exit("set INTERLATENT_API_KEY or pass --api-key ilop_...")
 
-    print("connecting to Interlatent ...")
-    print("  (the dashboard provisions a GPU pod for the session — the first "
-          "action chunk can take a second or two to arrive)")
+    print("connecting to your GPU box ...")
+    print("  (the box compiles the policy on first use — the first action "
+          "chunk can take a second or two to arrive)")
     client = connect_drtc(
-        environment="so101-cloud-demo",
+        environment="so101-demo",
         policy_uri=args.policy_uri,
-        api_key=args.api_key,          # resolves your account + attached GPU pod
+        api_key=args.api_key,          # the key the box's gRPC port checks
         chunk_size=chunk_size,
         action_dim=action_dim,
         task=args.task,

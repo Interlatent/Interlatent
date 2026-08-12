@@ -1,18 +1,23 @@
-# `interlatent` CLI — backend API reference
+# `interlatent` CLI — coordinator API reference
 
-The `interlatent` CLI (`cli/main.py`) is a thin dashboard client; this is the contract it
-expects from the backend. The CLI's word for a GPU box is **gpu** (`interlatent gpus ls`,
-`--gpu`); the backend calls it a *compute box* and names the session field **pod**.
-`interlatent behavior` is offline and hits no endpoint
-([docs/behaviors.md](../../../../../docs/behaviors.md)).
+The `interlatent` CLI (`cli/main.py`) is a thin coordinator client; this is the contract it
+expects from the coordinator it is pointed at. The CLI's word for a GPU box is **gpu**
+(`interlatent gpus ls`, `--gpu`); on the wire it is a *compute box*, and the session field is
+named **pod**. `interlatent behavior` is offline and hits no endpoint
+([docs/behaviors.md](../../../../../docs/behaviors.md)). The normative contract for every
+route below is
+[docs/coordinator-protocol.md](../../../../../docs/coordinator-protocol.md).
 
 ## Transport & auth (all endpoints)
 
 Requests go through `interlatent._http.HTTPClient`.
 
-- **Base URL:** `https://interlatent.com` (override `--api-base` / `INTERLATENT_API_BASE`).
-- **Auth:** `x-api-key: ilat_…` on every request. The backend resolves the key to a user +
-  access rights and **scopes every response to that user**.
+- **Base URL:** the coordinator's bare origin, e.g. `http://10.0.0.5:8900`, from
+  `--coordinator` (alias `--api-base`) or `INTERLATENT_COORDINATOR`. There is **no default**:
+  an unset address is a configuration error, never a silent fallback.
+- **Auth:** `x-api-key: ilop_…` on every request — the operator key the coordinator minted.
+  The coordinator resolves the key to a principal + access rights and **scopes every response
+  to it**.
 - **Headers sent:** `Accept: application/json`, and `x-api-key` when a key is set.
 - **Error semantics the client depends on:**
   - `401` / `403` → CLI prints "authentication failed — check your INTERLATENT_API_KEY".
@@ -30,7 +35,7 @@ Requests go through `interlatent._http.HTTPClient`.
 
 ## 1. List GPU boxes — `GET /api/v1/gpus`
 
-GPU boxes the user can run sessions on.
+GPU boxes the caller can run sessions on.
 
 ```json
 [
@@ -44,7 +49,7 @@ GPU boxes the user can run sessions on.
 
 ## 2. List nodes — `GET /api/v1/nodes`
 
-The user's paired robot nodes (read-only; same resource the node daemon pairs against).
+The paired robot nodes (read-only; same resource the node daemon pairs against).
 
 ```json
 [
@@ -56,7 +61,7 @@ The user's paired robot nodes (read-only; same resource the node daemon pairs ag
 
 ## 3. List sessions — `GET /api/v1/inference/sessions/`
 
-Active inference sessions for the user.
+Active inference sessions.
 
 ```json
 [
@@ -69,7 +74,7 @@ Active inference sessions for the user.
 
 ## 4. Start a session — `POST /api/v1/inference/sessions/`
 
-The one write action. Request body the CLI sends:
+The one write action on the session resource. Request body the CLI sends:
 
 ```json
 {
@@ -85,16 +90,15 @@ The one write action. Request body the CLI sends:
 }
 ```
 
-Backend responsibilities:
+Coordinator responsibilities:
 
-- Authorize that the user owns `node` and `pod`.
+- Authorize that the caller owns `node` and `pod`.
 - Enforce one-session-per-node and one-session-per-pod.
-- Bind the pod's DRTC endpoint to the session (the pod is attached to the resolved
+- Bind the box's DRTC endpoint to the session (the box is attached to the resolved
   environment; the session's endpoint resolves from it).
 - **Persist the session so the node's existing poll picks it up** (the node converges to it).
 - `env_slug` (defaulting to the node name when omitted) **must reference an existing
-  environment** — a missing one is a `400`. Create it first with `interlatent env create`
-  or in the dashboard.
+  environment** — a missing one is a `400`. Create it first with `interlatent env create`.
 
 Response — either form is accepted; the CLI only reads `.id`:
 
@@ -123,13 +127,40 @@ Sessions collect into an **environment** (a data collection), which must exist b
 Returns the created environment; the CLI reads `slug` and `environment_id` (falling back
 to `id`) for display.
 
+## 7. Register / remove a GPU box — `POST /api/v1/compute/boxes/register`, `DELETE /api/v1/gpus/{name}`
+
+`interlatent gpu add` posts the same registration body `interlatent-serve` sends, so a box
+can be entered by address instead of self-registering:
+
+```json
+{
+  "box_id": "box0",                       // --box-id, defaults to --name
+  "name": "box0",                         // --name
+  "endpoint": "10.0.0.7:50051",           // --url — host:port your nodes dial
+  "provider": "manual",
+  "warmup_policy": "lerobot/smolvla_base" // optional (--warm-policy)
+}
+```
+
+The CLI prints `name` back. `interlatent gpu rm <name>` deletes the row; any 2xx is success.
+
+## 8. Recording destination — `GET`/`PUT /api/v1/coordinator/recording`
+
+Where every session's finished dataset is published. `interlatent config` with no flags GETs
+it; with `--output-dir` or `--s3-uri` (plus the optional `--s3-endpoint-url`,
+`--s3-access-key`, `--s3-secret-key`, `--s3-region`) it PUTs
+`{"recording": {...}}`. Both return `{"recording": {...}}`, empty when nothing is set — the
+CLI then prints that sessions will run but not be saved. A coordinator that does not manage
+recording destinations returns `404` and the CLI reports that by name rather than surfacing a
+bare not-found.
+
 ---
 
 ## Notes
 
-- These endpoints are the **only** demands the CLI places on the backend. The robot
-  node daemon (`interlatent-node`) talks to the dashboard independently and is already
+- These endpoints are the **only** demands the CLI places on a coordinator. The robot
+  node daemon (`interlatent-node`) talks to the coordinator independently and is already
   covered by the existing nodes API (pair / heartbeat / poll / hardware / robot-features).
-- Two auth identities exist: the user key (`ilat_…`, used by this CLI and for DRTC inference)
-  and the node token (`ilnode_…`, minted at pair time for the node daemon). This CLI only
-  ever uses the user key.
+- Two auth identities exist: the operator key (`ilop_…`, used by this CLI and for DRTC
+  inference) and the node token (`ilnode_…`, minted at pair time for the node daemon). This
+  CLI only ever uses the operator key.

@@ -41,7 +41,7 @@ implement teleoperation, recording, or policy support per robot.
 <b>Control any arm</b><br/>
 <code>pose()</code>, <code>move()</code>, <code>act()</code> and <code>behaviors()</code> over
 one handle, on every robot that supports manual moves, or the same thing from a terminal
-with <code>interlatent-act</code>. No account, no network, no config file.<br/>
+with <code>interlatent-act</code>. No daemon, no network, no config file.<br/>
 <a href="#supported-robots">Supported robots &rarr;</a>
 
 </td>
@@ -74,18 +74,19 @@ what you record is usable intervention data. Out comes a LeRobot v3.0 dataset.<b
 <!-- <img src="assets/policy.gif" width="400" alt="An arm completing a task autonomously under a policy"/> -->
 
 <b>Run a policy</b><br/>
-Stream observations to a GPU, your own or a hosted one, and get action chunks back that
-execute at 30 Hz, so a policy taking 100–2000 ms per inference still drives a robot
-smoothly. SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5, MolmoAct2.<br/>
+Stream observations to a GPU — one under your desk or a box you rent by the hour — and get
+action chunks back that execute at 30 Hz, so a policy taking 100–2000 ms per inference still
+drives a robot smoothly. SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5, MolmoAct2.<br/>
 <a href="docs/robots-and-policies.md">Robots and policies &rarr;</a>
 
 </td>
 </tr>
 </table>
 
-Everything that touches the robot is Apache-2.0 and runs with no account. The hosted
-[dashboard](https://interlatent.com) is the optional layer on top: it pairs machines,
-assigns GPUs, brokers VR teleop, and stores datasets.
+All of it is Apache-2.0 and runs on machines you own. Once more than one machine is
+involved, `interlatent up` starts a **coordinator** on your own network: it pairs robot
+nodes, assigns GPU boxes, brokers VR teleop, and points recordings at a directory or an
+S3 bucket you control.
 
 ## Install
 
@@ -113,7 +114,7 @@ pip install interlatent
 
 ## Quickstart
 
-Plug in an arm and move it. This doesn't rely on an account, cloud, or config file.
+Plug in an arm and move it. This doesn't rely on a network, a coordinator, or a config file.
 
 ```python
 import interlatent as il
@@ -170,27 +171,57 @@ recording) then works on it automatically.
 
 ## Run an AI policy
 
-Policies run on a GPU machine and stream actions back to the robot at 30 Hz.
+Policies run on a GPU machine and stream actions back to the robot at 30 Hz. Three pieces:
+a **coordinator** that keeps track of everything, a **GPU box**, and the **node** that holds
+the motors.
 
-To set up a receiver node, which controls the robot:
+Start the coordinator on any always-on machine — a laptop, a Pi, a server:
 
 ```bash
-export INTERLATENT_API_KEY=ilat_...
+interlatent up               # also: down, status, logs
+```
 
-interlatent-node pair --name my-arm                    # this will setup connection and naming details.
+The first run mints an `ilop_` operator key and prints it; every later run prints the path
+it was stored at instead (`~/.interlatent/`, mode 0600). That key is the only credential
+the other two pieces need. Tell the coordinator once where finished datasets should land —
+without a destination, sessions run but nothing is saved:
+
+```bash
+interlatent config --output-dir /data/lerobot   # or --s3-uri s3://my-bucket/prefix
+```
+
+The GPU box can be a machine of your own or one you rent by the hour (RunPod, Lambda, Vast).
+Install the server there (`pip install 'interlatent-server[lerobot]'`, or use Docker — see
+[docs/self-hosting.md](docs/self-hosting.md)) and point it at the coordinator with the same
+key, plus the address your robots can reach it at:
+
+```bash
+interlatent-serve --name a100-0 \
+  --coordinator http://10.0.0.2:8900 \
+  --api-key ilop_... \
+  --advertise-address <IP-your-robots-can-reach> --port 50051
+```
+
+Then the receiver node, which controls the robot:
+
+```bash
+export INTERLATENT_COORDINATOR=http://10.0.0.2:8900   # where you ran `interlatent up`
+export INTERLATENT_API_KEY=ilop_...                   # the key it printed
+
+interlatent-node pair --name my-arm                   # this will setup connection and naming details.
 interlatent-node run  --robot so101 --port /dev/ttyACM0 --camera front=/dev/video0
 ```
-You can run servers off of your own GPUs or on cloud providers such as runpod or modal. Install the server there
-(`pip install 'interlatent-server[lerobot]'`, or use Docker — see
-[docs/self-hosting.md](docs/self-hosting.md)), and start it with `interlatent-serve`. You can then start a session:
+
+Now start a session from anywhere that can reach the coordinator:
 
 ```bash
-interlatent up               # run a coordinator here (or point at a hosted one)
-interlatent gpus ls          # GPU boxes it knows about
+interlatent gpus ls          # GPU boxes registered with it
 interlatent nodes ls         # robot nodes paired to it
 interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base
 interlatent session stop <session-id>
 ```
+
+There is no default coordinator address: if you don't set one, nothing is contacted.
 
 Supported policies: SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5 (via LeRobot), MolmoAct2. Full info: [docs/robots-and-policies.md](docs/robots-and-policies.md).
 
@@ -209,8 +240,9 @@ Build and host it yourself over HTTPS:
 cd teleop/teleop-web && npm install && npm run build   # serve dist/
 ```
 
-Teleop and recording both go through the dashboard, which mints the session token and stores
-the resulting LeRobot v3.0 datasets. Setup: [docs/teleop.md](docs/teleop.md).
+Teleop and recording both go through your coordinator, which mints the session token. The
+resulting LeRobot v3.0 datasets land in the destination you set with `interlatent config` —
+a local directory or an S3 bucket you own. Setup: [docs/teleop.md](docs/teleop.md).
 
 ## Safety
 
@@ -224,13 +256,14 @@ the machine holding the motors:
 
 ## Configuration
 
-`INTERLATENT_API_KEY` is the only required setting, and only for hosted features — the
-Python and CLI paths above need nothing.
+Nothing is required for the direct Python and `interlatent-act` paths.
+`INTERLATENT_COORDINATOR` and `INTERLATENT_API_KEY` matter once a coordinator is in the
+picture.
 
 | Env var | What it does |
 |---|---|
-| `INTERLATENT_API_KEY` | Your account key (`ilat_…`), from interlatent.com. |
-| `INTERLATENT_API_BASE` | Dashboard URL (default `https://interlatent.com`). |
+| `INTERLATENT_COORDINATOR` | Your coordinator's base URL, e.g. `http://10.0.0.2:8900`. No default: unset means nothing is contacted. |
+| `INTERLATENT_API_KEY` | The operator key (`ilop_…`) that `interlatent up` prints. |
 | `INTERLATENT_NODE_CONFIG` | Node config file (default `~/.interlatent/node.toml`). |
 | `INTERLATENT_IMAGE_RESIZE` | Shrink camera frames to this square size. `256` suits MolmoAct2. |
 | `INTERLATENT_JPEG_BACKEND` | Pick the image encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). |
@@ -254,7 +287,7 @@ Runnable examples, ordered by how much hardware they need:
 | VR teleop and recording | [docs/teleop.md](docs/teleop.md) |
 | Camera encoding and bandwidth | [docs/node-encoding.md](docs/node-encoding.md) |
 | Running your own policy server | [docs/self-hosting.md](docs/self-hosting.md) |
-| Using the hosted dashboard | [docs/going-to-cloud.md](docs/going-to-cloud.md) |
+| Coordinator protocol | [docs/coordinator-protocol.md](docs/coordinator-protocol.md) |
 | Wire protocol | [proto/README.md](proto/README.md) |
 | Docs for Agents | [CONTEXT.md](CONTEXT.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/adr/](docs/adr/) |
 
@@ -289,5 +322,4 @@ public issue.
 
 ## License
 
-[Apache-2.0](LICENSE) © Interlatent Contributors. "Interlatent Cloud" and the hosted service
-at interlatent.com are operated separately from this open-source project.
+[Apache-2.0](LICENSE) © Interlatent Contributors.

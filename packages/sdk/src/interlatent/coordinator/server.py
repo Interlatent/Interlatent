@@ -5,11 +5,12 @@ deliberately small dependency surface.
 
 **One surface: ``/api/v1/*``.** The 2026-06 coordinator additionally served a
 bespoke ``/admin/*`` consumed by its own client class, which meant every
-operator flow had a dashboard spelling and a coordinator spelling. ADR 0023
+operator flow had two spellings, one per client. ADR 0023
 identifies that fork as what collapsed the stack. Serving only the documented
-protocol is what makes "one protocol, two implementations" true rather than
+protocol is what keeps "one protocol, one code path" true rather than
 aspirational: the same ``interlatent`` CLI, the same node, the same
-``interlatent-serve`` and the same teleop web app talk to either.
+``interlatent-serve`` and the same teleop web app talk to this and to anything
+else that implements the contract, with no branch on which it is.
 
 Every route is authenticated — see :mod:`interlatent.coordinator.auth` for the
 principals, and ``docs/coordinator-protocol.md`` for the contract.
@@ -318,18 +319,18 @@ def _h_delete_session(h: _Handler, p):
     return h._send(200 if ok else 404, {"ok": ok})
 
 
-#: The optional-tier routes this coordinator actually implements. Spelled out
-#: rather than derived by pattern: a substring filter claimed
+#: The protocol has one tier and this coordinator routes all of it, so the
+#: capability list is down to a single remaining question: is teleop usable?
+#: Teleop needs an embedded relay, and without one the mint route answers a
+#: definitive 404 (`node/teleop/factory.py` treats that as "teleop off for this
+#: session") — so a caller can and should ask in advance.
+#:
+#: Spelled out rather than derived by pattern. A substring filter once claimed
 #: `cancel-processing` was served because it does not contain "/process", and
 #: `/environments/{id}/episodes` because it does not start with "/episodes".
 #: A capability list that lies is worse than none — callers use it to decide
-#: what not to attempt.
-_OPTIONAL_SERVED = {
-    "/capabilities",
-}
-
-#: Served only when an embedded relay is running.
-_OPTIONAL_SERVED_WITH_RELAY = {
+#: what not to attempt, so it names exactly what this process is serving.
+_SERVED_WITH_RELAY = {
     "/inference/sessions/{session_id}/teleop-token",
     "/teleop-recordings/{recording_id}/teleop-token",
     "/teleop-recordings",
@@ -340,9 +341,10 @@ _OPTIONAL_SERVED_WITH_RELAY = {
 def _h_capabilities(h: _Handler, _p):
     from .protocol import API_PREFIX, PROTOCOL_VERSION
 
-    served = set(_OPTIONAL_SERVED)
-    if h.server_relay is not None:
-        served |= _OPTIONAL_SERVED_WITH_RELAY
+    served = set(_SERVED_WITH_RELAY) if h.server_relay is not None else set()
+    # The key keeps its name from protocol/1: it is what the shipped callers
+    # read, and renaming a field they parse would cost more than the stale
+    # word "optional" does. It now means "conditionally served, and live".
     return h._send(200, {
         "protocol": PROTOCOL_VERSION,
         "optional_supported": sorted(API_PREFIX + p for p in served),
@@ -449,7 +451,7 @@ ROUTES: list[Route] = [
     Route("POST", "/api/v1/teleop-recordings", _h_create_teleop_recording),
     Route("POST", "/api/v1/teleop-recordings/{recording_id}/stop",
           _h_stop_teleop_recording),
-    # Discovery + coordinator-only
+    # Discovery + the coordinator's own administration surface
     Route("GET", "/api/v1/capabilities", _h_capabilities, ANY_ISSUED),
     Route("GET", "/api/v1/coordinator/recording", _h_get_destination),
     Route("PUT", "/api/v1/coordinator/recording", _h_set_destination),

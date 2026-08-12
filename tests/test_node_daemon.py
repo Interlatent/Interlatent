@@ -100,16 +100,9 @@ class _FakeHttp:
 # ----------------------------------------------------------------------
 
 
-def test_client_carries_the_node_token_and_optional_bypass_secret() -> None:
+def test_client_carries_the_node_token() -> None:
     plain = _daemon()
     assert plain._http.headers["x-api-key"] == "node-token"
-    assert "x-vercel-protection-bypass" not in plain._http.headers
-
-    # A protected Vercel preview challenges un-bypassed requests, so a node
-    # paired against one has to carry the secret on every call.
-    bypassed = _daemon(bypass_key="  secret  ")
-    assert bypassed._http.headers["x-vercel-protection-bypass"] == "secret"
-    assert "x-vercel-protection-bypass" not in _daemon(bypass_key="   ")._http.headers
 
 
 def test_reachable_addresses_runs_on_any_host() -> None:

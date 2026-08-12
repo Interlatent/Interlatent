@@ -19,7 +19,15 @@
 #   ./docker/install-bare-metal.sh --no-system           # skip apt (no sudo)
 #   ./docker/install-bare-metal.sh --venv ~/ilat --cuda cu126
 #   ./docker/install-bare-metal.sh --systemd \
-#       --api-key ilat_xxx --advertise-address 203.0.113.7
+#       --api-key ilop_xxx --advertise-address 203.0.113.7 \
+#       --coordinator http://<host-running-interlatent-up>:8900
+#
+# A box registers with whichever coordinator you name — `--coordinator`
+# here, which bakes INTERLATENT_COORDINATOR into the --systemd unit, or
+# INTERLATENT_COORDINATOR / `interlatent-serve --coordinator <url>` at
+# start time if you run the binary yourself. There is no default, so
+# --systemd requires it: a unit without one raises
+# CoordinatorNotConfigured at boot and never registers.
 #
 # Idempotent: re-running upgrades in place and rewrites the unit file.
 set -euo pipefail
@@ -33,6 +41,7 @@ PYTHON_BIN=""          # auto-detected when empty
 DO_SYSTEM=1
 DO_SYSTEMD=0
 API_KEY="${INTERLATENT_API_KEY:-}"
+COORDINATOR="${INTERLATENT_COORDINATOR:-}"
 ADVERTISE="${INTERLATENT_ADVERTISE_ADDRESS:-}"
 PORT="${INTERLATENT_PORT:-50051}"
 WARMUP_POLICY="${DRTC_WARMUP_POLICY:-}"
@@ -66,6 +75,7 @@ while [ $# -gt 0 ]; do
         --python)             PYTHON_BIN="$2"; shift 2 ;;
         --lerobot-extras)     LEROBOT_EXTRAS="$2"; shift 2 ;;
         --api-key)            API_KEY="$2"; shift 2 ;;
+        --coordinator)        COORDINATOR="$2"; shift 2 ;;
         --advertise-address)  ADVERTISE="$2"; shift 2 ;;
         --port)               PORT="$2"; shift 2 ;;
         --warmup-policy)      WARMUP_POLICY="$2"; shift 2 ;;
@@ -229,6 +239,10 @@ log "interlatent-serve entry point OK"
 if [ "$DO_SYSTEMD" = 1 ]; then
     [ "$(id -u)" = 0 ] || die "--systemd needs root to write /etc/systemd/system"
     [ -n "$API_KEY" ]   || die "--systemd needs --api-key (or INTERLATENT_API_KEY)"
+    # Without this the unit starts and immediately dies on
+    # CoordinatorNotConfigured — resolve() has no default. Fail here, where
+    # the message can name the flag, rather than in a restart loop.
+    [ -n "$COORDINATOR" ] || die "--systemd needs --coordinator (or INTERLATENT_COORDINATOR), e.g. http://10.0.0.2:8900"
     [ -n "$ADVERTISE" ] || die "--systemd needs --advertise-address (or INTERLATENT_ADVERTISE_ADDRESS)"
 
     UNIT=/etc/systemd/system/interlatent-server.service
@@ -247,16 +261,18 @@ Wants=network-online.target
 [Service]
 Type=simple
 # HOME must be set: the box id persists at ~/.interlatent/box-id, and
-# without it every restart mints a new UUID and orphans a dashboard row.
+# without it every restart mints a new UUID and orphans a box row on
+# your coordinator.
 Environment=HOME=/root
 Environment=INTERLATENT_API_KEY=$API_KEY
+Environment=INTERLATENT_COORDINATOR=$COORDINATOR
 Environment=INTERLATENT_ADVERTISE_ADDRESS=$ADVERTISE
 ${EXTRA_ENV}ExecStart=$VENV/bin/interlatent-serve --port $PORT
 Restart=always
 RestartSec=5
 # SIGINT, not the default SIGTERM: cli.main catches KeyboardInterrupt and
 # reports status=stopped on the way out (wait=True). A SIGTERM skips that
-# and the dashboard keeps showing a ghost "ready" box until re-register.
+# and your coordinator keeps showing a ghost "ready" box until re-register.
 KillSignal=SIGINT
 TimeoutStopSec=30
 
@@ -274,11 +290,14 @@ else
 
 $(log "done — start the server with:")
 
-    export INTERLATENT_API_KEY=ilat_xxx
+    export INTERLATENT_API_KEY=ilop_xxx
+    export INTERLATENT_COORDINATOR=http://<host-running-interlatent-up>:8900
     $VENV/bin/interlatent-serve \\
         --advertise-address <IP-your-robots-can-reach> --port $PORT
 
-Re-run with --systemd (plus --api-key/--advertise-address) to install a
-unit file instead. Open ONLY port $PORT to your nodes.
+Re-run with --systemd (plus --api-key/--coordinator/--advertise-address)
+to install a unit file instead — it bakes those three in, so the service
+registers on boot with no shell environment to inherit. Open ONLY port
+$PORT to your nodes.
 EOF
 fi

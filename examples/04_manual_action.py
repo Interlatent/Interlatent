@@ -1,4 +1,4 @@
-"""Drive a robot by hand with the manual action interface — no policy, no cloud.
+"""Drive a robot by hand with the manual action interface — no policy, no GPU.
 
 The same robot robot the DRTC engine path uses also exposes a manual,
 programmatic ``action()`` call: name the joints, give absolute targets, and the call

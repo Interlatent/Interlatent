@@ -3,12 +3,13 @@
     connect_drtc()  ->  grpc.aio  ->  InferenceServicer (echo backend)
                                        -> SessionRecorder (real staging)
                                        -> LeRobotRebuilder (real lerobot)
-                                       -> inbox upload (local HTTP stub)
+                                       -> LocalDirSink (real directory)
 
-Nothing here is stubbed except the Interlatent backend itself: real
-protobuf over a real localhost socket, the real client scheduler and tick
-spool, the real recorder, the real dataset build. No GPU, no robot, no
-dashboard.
+Nothing here is stubbed at all: real protobuf over a real localhost
+socket, the real client scheduler and tick spool, the real recorder, the
+real dataset build, and a real destination on disk. No GPU, no robot, no
+control plane — and, since ADR 0039, no credential either: the rollout
+below passes no API key, because recording no longer takes one.
 
 This exists because the unit suites' seams hid a data-loss bug. The
 recorder passed a codec argument that current lerobot rejects; the stub
@@ -16,7 +17,7 @@ accepted it, so the suites were green while a real close-session
 discarded the episode — rebuild raises, ``upload()`` catches broadly,
 staging is deleted, and the robot side sees a clean ``close()``. The
 assertion that catches that class of bug is the one below: after a
-rollout, the backend must have been told the episode is complete.
+rollout, a complete dataset must exist at the destination.
 
 Skipped unless BOTH dists and lerobot are importable; CI runs it in the
 ``server-lerobot`` job.
@@ -24,12 +25,10 @@ Skipped unless BOTH dists and lerobot are importable; CI runs it in the
 from __future__ import annotations
 
 import io
-import json
 import sys
 import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -55,68 +54,6 @@ FPS = 30.0
 CAM = "wrist"          # bare camera name: what a robot adapter reports
 STATE_DIM = 7
 ACTION_DIM = 6
-
-
-# ----------------------------------------------------------------- backend stub
-class _Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):  # keep pytest output clean
-        pass
-
-    def _body(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
-
-    def do_POST(self):
-        raw = self._body()
-        try:
-            parsed = json.loads(raw) if raw else {}
-        except ValueError:
-            parsed = {}
-        with self.server.lock:
-            self.server.posts.append((self.path, parsed))
-        if self.path.endswith("/upload-urls"):
-            host = f"http://127.0.0.1:{self.server.server_address[1]}/s3"
-            payload = json.dumps({"presigned_urls": {
-                f["key"]: f"{host}/{f['key']}" for f in parsed.get("files", [])
-            }}).encode()
-        else:
-            payload = b"{}"
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_PUT(self):
-        data = self._body()
-        with self.server.lock:
-            self.server.puts.append((self.path, len(data)))
-        self.send_response(200)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-
-class _StubServer(ThreadingHTTPServer):
-    """Threaded, with a deep listen backlog.
-
-    The recorder PUTs every dataset file concurrently (``asyncio.gather``),
-    so a serial server refuses the parallel connections outright — and the
-    stdlib default backlog of 5 silently drops the 6th, which leaves one
-    PUT hanging forever and the gather never completing. Both failure
-    modes look like "the upload just stopped", which is exactly the
-    symptom this file is meant to detect in the product.
-    """
-
-    daemon_threads = True
-    request_queue_size = 128
-    allow_reuse_address = True
-
-
-def _start_backend():
-    srv = _StubServer(("127.0.0.1", 0), _Handler)
-    srv.posts, srv.puts, srv.lock = [], [], threading.Lock()
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
 
 
 # ------------------------------------------------------------------ grpc server
@@ -171,16 +108,17 @@ def _npz(i: int, jpg: bytes) -> bytes:
 # ------------------------------------------------------------------------ test
 @pytest.fixture(scope="module")
 def rollout(tmp_path_factory):
-    """Run one recorded rollout and return (backend_stub, episode_id)."""
+    """Run one recorded rollout and return (dataset_dir, episode_id, stats)."""
     from interlatent.inference.integration.connect import connect_drtc
 
     tmp = tmp_path_factory.mktemp("drtc-e2e")
-    backend, api_base = _start_backend()
+    dataset = tmp / "dataset"
     grpc_box = _start_grpc(tmp / "recordings")
     episode_id = f"e2e-{uuid.uuid4().hex[:8]}"
 
     client = connect_drtc(
-        api_key="ilat_e2e_test",
+        # No api_key: recording is account-free (ADR 0039), and a rollout
+        # that quietly depended on one would hide that regressing.
         environment="pick-cube",
         policy_uri="",
         policy_backend="echo",
@@ -192,7 +130,9 @@ def rollout(tmp_path_factory):
         payload_codec="npz",
         record=True,
         episode_id=episode_id,
-        metadata={"api_base": api_base},
+        # The destination, exactly as a coordinator stamps it onto the
+        # session's `recording` block (ADR 0002).
+        metadata={"output_dir": str(dataset)},
     )
 
     stats = {"actions": 0, "ticks": 0, "refused": 0, "first_action_step": None,
@@ -222,23 +162,21 @@ def rollout(tmp_path_factory):
 
     client.close()
 
-    # Upload is a fire-and-forget task on the server's loop. Generous, but
-    # bounded: a stalled upload should fail the run, not hang it.
+    # Publish is a fire-and-forget task on the server's loop. Generous, but
+    # bounded: a stalled publish should fail the run, not hang it.
     deadline = time.time() + 120
     while time.time() < deadline:
-        with backend.lock:
-            done = any(p.endswith("/upload-complete") for p, _b in backend.posts)
-        if done:
+        if (dataset / "meta" / "info.json").exists():
             break
         time.sleep(0.25)
 
-    return backend, episode_id, stats
+    return dataset, episode_id, stats
 
 
 def test_the_client_streams_actions_at_the_control_rate(rollout) -> None:
     """`step()` returns None while the first chunk is in flight, then
     streams — the Tier 1 contract, never previously exercised."""
-    _backend, _eid, stats = rollout
+    _dataset, _eid, stats = rollout
     assert stats["session_id"]
     assert stats["action_dim"] == ACTION_DIM
     assert stats["first_action_step"] is not None
@@ -250,54 +188,67 @@ def test_the_client_streams_actions_at_the_control_rate(rollout) -> None:
 def test_every_captured_tick_is_journalled(rollout) -> None:
     """A refused tick means the spool hard-stopped (ADR 0023). On a healthy
     loopback link there is no reason for one."""
-    _backend, _eid, stats = rollout
+    _dataset, _eid, stats = rollout
     assert stats["refused"] == 0
     assert stats["ticks"] == stats["actions"]
 
 
-def test_the_episode_reaches_the_backend(rollout) -> None:
+def _files(dataset: Path) -> list[str]:
+    return sorted(
+        p.relative_to(dataset).as_posix()
+        for p in dataset.rglob("*") if p.is_file()
+    )
+
+
+def test_the_episode_reaches_the_destination(rollout) -> None:
     """The regression that motivated this file: a rebuild failure is caught
     and turned into a discarded episode, so the ONLY way to know the
-    recording survived is that upload-complete was sent."""
-    backend, episode_id, _stats = rollout
-    paths = [p for p, _b in backend.posts]
-    assert paths == [
-        "/api/v1/episodes",
-        f"/api/v1/episodes/{episode_id}/upload-urls",
-        f"/api/v1/episodes/{episode_id}/upload-complete",
-    ]
-    create = backend.posts[0][1]
-    assert create["episode_id"] == episode_id
-    assert create["environment"] == "pick-cube"
-    assert create["model_framework"] == "drtc"
+    recording survived is that a dataset exists at the destination
+    afterwards.
+
+    (The name is pinned by the CI check in ``.github/workflows/ci.yml`` that
+    greps for it — rename both together.)
+    """
+    dataset, _episode_id, _stats = rollout
+    assert (dataset / "meta" / "info.json").is_file(), _files(dataset)
 
 
 def test_the_uploaded_dataset_is_a_complete_lerobot_tree(rollout) -> None:
-    backend, _eid, _stats = rollout
-    names = [p.split("/_inbox/", 1)[-1] for p, _n in backend.puts]
+    dataset, _eid, _stats = rollout
+    names = _files(dataset)
     assert any(n.endswith("meta/info.json") for n in names), names
-    assert any("data/" in n and n.endswith(".parquet") for n in names), names
+    assert any(n.startswith("data/") and n.endswith(".parquet") for n in names), names
     assert any(n.endswith(".mp4") for n in names), names
-    # Every file went under one inbox session prefix.
-    assert len({n.split("/", 1)[0] for n in names}) == 1
-    assert all(size > 0 for _p, size in backend.puts)
+    assert all((dataset / n).stat().st_size > 0 for n in names), names
 
 
 def test_the_camera_key_is_namespaced_exactly_once(rollout) -> None:
     """The node sends a bare camera name and the server adds the
-    ``observation.images.`` prefix. Double-prefixing still uploads happily
+    ``observation.images.`` prefix. Double-prefixing still records happily
     but yields a video column no policy's schema matches."""
-    backend, _eid, _stats = rollout
-    videos = [p for p, _n in backend.puts if p.endswith(".mp4")]
+    dataset, _eid, _stats = rollout
+    videos = [n for n in _files(dataset) if n.endswith(".mp4")]
     assert videos
     for path in videos:
         assert f"videos/observation.images.{CAM}/" in path, path
         assert "observation.images.observation.images." not in path, path
 
 
-def test_human_driven_steps_are_reported_as_the_episode_badge(rollout) -> None:
-    """ADR 0034 (platform repo) over the real wire: intervention ticks must surface as
-    has_teleop on upload-complete."""
-    backend, _eid, _stats = rollout
-    complete = [b for p, b in backend.posts if p.endswith("/upload-complete")]
-    assert complete and complete[0]["has_teleop"] is True
+def test_human_driven_steps_survive_into_the_dataset(rollout) -> None:
+    """ADR 0034 (platform repo) over the real wire: intervention ticks must
+    land as the per-step ``control_source`` label training reads. The column
+    is present for every session (the local sink normalizes for merge), so a
+    pure-policy rollout would still have it — with no intervention rows."""
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    col = "annotation.interlatent.control_source"
+    dataset, _eid, _stats = rollout
+    parquets = list(dataset.rglob("*.parquet"))
+    assert parquets
+    sources: list[str] = []
+    for p in parquets:
+        table = pq.read_table(p)
+        if col in table.column_names:
+            sources += [str(v) for v in table.column(col).to_pylist()]
+    assert sources, f"{col} missing from {[p.name for p in parquets]}"
+    assert "intervention" in sources, sorted(set(sources))

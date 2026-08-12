@@ -2,9 +2,8 @@
 
 A **coordinator** assigns work: it pairs nodes, tracks GPU boxes, brokers
 inference and teleop sessions, and tells each node what to converge to. The
-hosted Interlatent dashboard is one implementation of the contract in
-:mod:`interlatent.coordinator.protocol`; ``interlatent up`` runs another on
-your own machine.
+contract it implements is :mod:`interlatent.coordinator.protocol`, and
+``interlatent up`` runs one on your own machine.
 
 The SDK talks to *a* coordinator and never asks which one — see
 ``docs/adr/0038-coordinator-protocol-one-control-plane.md``.
@@ -19,9 +18,7 @@ from __future__ import annotations
 from .state import Coordinator, PolicyChangeError
 from .protocol import (
     API_PREFIX,
-    COORDINATOR_ONLY,
     MANDATORY,
-    OPTIONAL,
     PROTOCOL_VERSION,
     ROUTES,
     Route,
@@ -31,9 +28,7 @@ __all__ = [
     "API_PREFIX",
     "Coordinator",
     "PolicyChangeError",
-    "COORDINATOR_ONLY",
     "MANDATORY",
-    "OPTIONAL",
     "PROTOCOL_VERSION",
     "ROUTES",
     "Route",

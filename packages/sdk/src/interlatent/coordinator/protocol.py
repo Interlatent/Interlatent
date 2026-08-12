@@ -1,10 +1,18 @@
 """The Interlatent Coordinator Protocol — the SDK's one control-plane contract.
 
 A **coordinator** is whatever HTTP service a node, a GPU box, the CLI, and the
-teleop web app talk to in order to be assigned work. The hosted Interlatent
-dashboard is one implementation; ``interlatent up`` ships another. The SDK does
-not know which it is talking to and must never branch on it — that dual-mode
-fork is what collapsed the 2026-06 stack (see ADR 0038, superseding 0023).
+teleop web app talk to in order to be assigned work. ``interlatent up`` is the
+coordinator this repo ships, and implementing this contract is the only thing
+that makes something else one. The SDK reaches a coordinator by address and
+must never branch on which one is on the other end — that dual-mode fork is
+what collapsed the 2026-06 stack (see ADR 0038, superseding 0023).
+
+**One tier.** Every route below is part of the contract; a coordinator serves
+all of them or it is not a coordinator. The table used to carry three tiers,
+which only ever described what a *second* implementation did not serve —
+``coordinator-only`` was literally "the hosted control plane 404s these". That
+control plane is gone, so the tiers collapsed and the thirteen routes nothing
+will ever serve were deleted rather than left advertised (ADR 0039).
 
 This module is the machine-readable half of ``docs/coordinator-protocol.md``.
 The two are pinned to each other by ``tests/test_coordinator_protocol.py``, so
@@ -23,16 +31,18 @@ __all__ = [
     "API_PREFIX",
     "Route",
     "ROUTES",
+    "TIER_MANDATORY",
     "MANDATORY",
-    "OPTIONAL",
-    "COORDINATOR_ONLY",
     "by_tier",
 ]
 
 #: Advertised by ``GET /api/v1/capabilities`` and by ``interlatent up``.
-#: Bump the integer only for a breaking change; the compatibility rule is the
-#: same one ``proto/messages.proto`` follows — additive changes only.
-PROTOCOL_VERSION = "interlatent.coordinator/1"
+#: Bump the integer only for a breaking change. ``/2`` is one, deliberately:
+#: ADR 0039 **removed** thirteen routes and collapsed the tier model, which
+#: breaks the additive-only compatibility rule this constant used to promise
+#: (the same rule ``proto/messages.proto`` follows). Advertising a surface no
+#: coordinator serves was judged worse than a version bump.
+PROTOCOL_VERSION = "interlatent.coordinator/2"
 
 #: Every route hangs off this. A coordinator address is a **bare origin** with
 #: no trailing slash and no ``/api/v1`` suffix (``https://host`` /
@@ -41,13 +51,12 @@ PROTOCOL_VERSION = "interlatent.coordinator/1"
 #: three separate places — one convention now, resolved in one place.
 API_PREFIX = "/api/v1"
 
-#: A coordinator MUST serve these or nothing works.
+#: The only tier. A coordinator MUST serve every route in :data:`ROUTES`;
+#: absent any one of them something concrete breaks — a node cannot pair, a box
+#: refuses to boot, every gRPC call is rejected, or an operator verb has no
+#: spelling. Teleop is the one surface with a runtime condition on top (it
+#: needs a relay), and ``GET /capabilities`` is how a caller asks about that.
 TIER_MANDATORY = "mandatory"
-#: A coordinator MAY serve these; every SDK caller degrades on 404.
-TIER_OPTIONAL = "optional"
-#: Served only by a self-hosted coordinator. The hosted dashboard 404s these,
-#: and the CLI says so by name rather than reporting a bare 404.
-TIER_COORDINATOR_ONLY = "coordinator-only"
 
 
 @dataclass(frozen=True)
@@ -117,61 +126,36 @@ ROUTES: tuple[Route, ...] = (
           "Create an inference session and assign it to a node."),
     Route("DELETE", "/inference/sessions/{session_id}", TIER_MANDATORY,
           "Stop a session by unassigning it. MUST NOT kill the node."),
-    # -- Inbox plane ---------------------------------------------------
-    Route("POST", "/episodes", TIER_OPTIONAL,
-          "Register an episode row. 409 means 'already exists', tolerated."),
-    Route("POST", "/episodes/{episode_id}/upload-urls", TIER_OPTIONAL,
-          "Exchange file keys for presigned PUT urls."),
-    Route("POST", "/episodes/{episode_id}/upload-complete", TIER_OPTIONAL,
-          "Signal the inbox that every file landed."),
     # -- Capability discovery ------------------------------------------
-    Route("GET", "/capabilities", TIER_OPTIONAL,
-          "Protocol version and which optional tiers are served."),
+    Route("GET", "/capabilities", TIER_MANDATORY,
+          "Protocol version and which conditional surfaces are live."),
     # -- Teleop --------------------------------------------------------
-    Route("GET", "/teleop-recordings", TIER_OPTIONAL,
+    Route("GET", "/teleop-recordings", TIER_MANDATORY,
           "List teleop recordings."),
-    Route("POST", "/teleop-recordings", TIER_OPTIONAL,
+    Route("POST", "/teleop-recordings", TIER_MANDATORY,
           "Create a teleop recording and assign it to a node."),
-    Route("POST", "/teleop-recordings/{recording_id}/stop", TIER_OPTIONAL,
+    Route("POST", "/teleop-recordings/{recording_id}/stop", TIER_MANDATORY,
           "Stop a teleop recording."),
-    Route("POST", "/inference/sessions/{session_id}/teleop-token", TIER_OPTIONAL,
+    Route("POST", "/inference/sessions/{session_id}/teleop-token", TIER_MANDATORY,
           "Mint a teleop token for role=node|browser."),
-    Route("POST", "/teleop-recordings/{recording_id}/teleop-token", TIER_OPTIONAL,
+    Route("POST", "/teleop-recordings/{recording_id}/teleop-token", TIER_MANDATORY,
           "Mint a teleop token for role=node|browser."),
-    # -- Hosted analysis and dataset surfaces --------------------------
-    Route("GET", "/environments/{env_id}/episodes", TIER_OPTIONAL,
-          "List an environment's episodes."),
-    Route("POST", "/environments/{env_id}/process", TIER_OPTIONAL,
-          "Kick the hosted merge pipeline."),
-    Route("GET", "/environments/{env_id}/processing-status", TIER_OPTIONAL,
-          "Poll the hosted merge pipeline."),
-    Route("POST", "/environments/{env_id}/cancel-processing", TIER_OPTIONAL,
-          "Cancel the hosted merge pipeline."),
-    Route("POST", "/environments/{env_id}/analyze", TIER_OPTIONAL,
-          "Request hosted policy analysis."),
-    Route("GET", "/episodes/{episode_id}", TIER_OPTIONAL,
-          "Fetch one episode row."),
-    Route("GET", "/episodes/{episode_id}/status", TIER_OPTIONAL,
-          "Poll an episode's processing status."),
-    Route("GET", "/episodes/{episode_id}/results", TIER_OPTIONAL,
-          "Fetch analysis results."),
-    Route("GET", "/episodes/{episode_id}/meta", TIER_OPTIONAL,
-          "Fetch episode metadata."),
-    Route("GET", "/episodes/{episode_id}/chunks/{chunk}", TIER_OPTIONAL,
-          "Fetch one dataset chunk."),
-    Route("POST", "/episodes/{episode_id}/inbox-gc", TIER_OPTIONAL,
-          "Drop a partially uploaded inbox session."),
-    # -- Coordinator-only ----------------------------------------------
-    Route("PUT", "/coordinator/recording", TIER_COORDINATOR_ONLY,
+    # -- Coordinator administration ------------------------------------
+    Route("PUT", "/coordinator/recording", TIER_MANDATORY,
           "Set the recording destination stamped onto every session."),
 )
 
 
 def by_tier(tier: str) -> tuple[Route, ...]:
-    """Every route in ``tier``, in declaration order."""
+    """Every route in ``tier``, in declaration order.
+
+    One tier exists (:data:`TIER_MANDATORY`), so this returns either the whole
+    table or nothing. It survives the collapse because the tier is still a
+    field on :class:`Route` and a column in the doc table, and deriving
+    :data:`MANDATORY` through it is what makes a mistyped tier show up as a
+    missing route rather than as nothing at all.
+    """
     return tuple(r for r in ROUTES if r.tier == tier)
 
 
 MANDATORY: tuple[Route, ...] = by_tier(TIER_MANDATORY)
-OPTIONAL: tuple[Route, ...] = by_tier(TIER_OPTIONAL)
-COORDINATOR_ONLY: tuple[Route, ...] = by_tier(TIER_COORDINATOR_ONLY)

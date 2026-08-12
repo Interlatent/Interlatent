@@ -1,6 +1,6 @@
 # The action interface
 
-Every robot exposes one **action interface** that both the cloud policy (engine path)
+Every robot exposes one **action interface** that both the policy loop (engine path)
 and your own code (manual path) drive — a final actuator sitting *below* the DRTC action
 schedule. Actions are **joint-space**: a vector of joint targets, one per joint. There is
 no IK or Cartesian frame — the arguments are joint angles, not a workspace point.
@@ -57,7 +57,7 @@ contract errors (unknown/missing joint, out-of-range) exit non-zero **before** a
 `--timeout`/`--rate-hz` tune the settle loop, `--robot-arg key=value` (repeatable) passes
 adapter config, `-v` turns on debug logging, and `--reset-latch`/`--token` are the
 Nori-only e-stop recovery (never moves the robot; see
-[ADR 0016](adr/0016-teleop-estop-ingress-human-only-reset.md)). This is the manual path only — for a cloud
+[ADR 0016](adr/0016-teleop-estop-ingress-human-only-reset.md)). This is the manual path only — to run a
 policy use `interlatent-node run`.
 
 ### The contract

@@ -1,14 +1,14 @@
 # Changelog
 
-## 3.0.0 — the SDK detaches from the platform
+## 3.0.0 — the SDK runs on a coordinator you own
 
 **Breaking.** A coordinator address is now required everywhere. Anything that
 invoked `interlatent`, `interlatent-preflight`, `interlatent-serve` or
-`Interlatent()` without one was relying on a hardcoded `https://interlatent.com`
-that no longer exists. The fix is one line:
+`Interlatent()` without one was relying on a hardcoded default that no longer
+exists. The fix is one line:
 
 ```bash
-export INTERLATENT_COORDINATOR=https://interlatent.com   # or your own
+export INTERLATENT_COORDINATOR=http://10.0.0.2:8900   # the one you run
 ```
 
 Paired nodes are unaffected: `node.toml` has always stored the address, and the
@@ -27,34 +27,34 @@ interlatent config --output-dir /data/lerobot    # where recordings land
 interlatent down                                 # refuses while a session is live
 ```
 
-The same verbs drive the hosted dashboard with `--coordinator
-https://interlatent.com`. That is the whole point: **one protocol, two
-implementations, no second set of verbs.** ADR 0023 blamed a coordinator for the
-2026-06 collapse; the actual cause it names is that the old one served a bespoke
-`/admin/*` *alongside* `/api/v1/*`, forking every operator flow. This one serves
-`/api/v1/*` only. See
+`--coordinator` (or `INTERLATENT_COORDINATOR`) points the same verbs at any
+coordinator you run — your laptop, a box on the LAN, a rented GPU host. That is
+the whole point: **one protocol, one client, no second set of verbs.** ADR 0023
+blamed a coordinator for the 2026-06 collapse; the actual cause it names is that
+the old one served a bespoke `/admin/*` *alongside* `/api/v1/*`, forking every
+operator flow. This one serves `/api/v1/*` only. See
 [ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md).
 
 `interlatent down` waits for nodes to converge to idle before exiting, because
 the node's teardown is what sends `CloseSession` — the only trigger for the
 dataset build. Stopping a session unassigns it; it never kills anything.
 
-### Recording without an account
+### Recording lands where you point it
 
-`sinks.py` returns: a finished dataset publishes to the hosted inbox, **a local
-directory, or an S3-compatible bucket**, the latter two merging on stop into one
-flat training-ready LeRobot dataset. `docs/concepts.md` has documented this since
+`sinks.py` returns: a finished dataset publishes to **a local directory or an
+S3-compatible bucket you own**, both merging on stop into one flat
+training-ready LeRobot dataset. `docs/concepts.md` has documented this since
 2026-07 and it has not been true since 2026-06; it is true again.
 
 Configure it once on the coordinator and it is stamped onto every session it
-issues. A box publishing locally needs no API key and never contacts a control
-plane — the recorder's auth gate now asks the *destination* whether a key is
-required instead of demanding one unconditionally.
+issues. A box publishing locally needs no credentials at all — the recorder's
+auth gate now asks the *destination* whether a key is required instead of
+demanding one unconditionally.
 
-### Teleop runs without a hosted service
+### Teleop runs on a relay you run
 
 `interlatent up` can serve the WebTransport relay itself (`pip install
-'interlatent[teleop-relay]'`), ported from the deployment that already ran it.
+'interlatent[teleop-relay]'`), so a VR session needs nothing off the LAN.
 Because no public CA issues certificates for `10.0.0.5`, the coordinator mints a
 short-lived ECDSA P-256 certificate and hands its SHA-256 to the browser as
 `serverCertificateHashes`, rotating well inside the 14-day cap Chromium imposes.
@@ -66,8 +66,7 @@ together and would have undone the auth model at the teleop layer.
 nothing re-dialled, so any relay blip ended the VR session permanently and the
 operator had to take the headset off. It now runs the same 1→15 s re-mint-and-
 redial ladder the node has always had, and clears `specReceived` so a
-reconnected browser re-requests its kinematic spec. This fixes a real fragility
-against the hosted relay too, not just the embedded one.
+reconnected browser re-requests its kinematic spec.
 
 ### The coordinator is the token authority
 
@@ -84,7 +83,7 @@ key returns `UNAUTHENTICATED` for every `Infer`.
 
 ### One coordinator address, resolved in one place
 
-Eight hardcoded copies of `https://interlatent.com` in two incompatible
+Eight hardcoded copies of a default coordinator address in two incompatible
 spellings (bare origin vs `/api/v1`-suffixed), reconciled at runtime by three
 separate fixups, collapse into `interlatent._coordinator.resolve()` and a twin
 in the server dist. One convention: a coordinator address is a bare origin, and
@@ -92,24 +91,29 @@ callers append `/api/v1/…`. `INTERLATENT_API_BASE` is still read for one minor
 with a warning.
 
 Also gone: `DEFAULT_DRTC_URL`, which pointed at one specific Modal deployment.
-`INTERLATENT_BYPASS_KEY` becomes `INTERLATENT_EXTRA_HEADERS`, so the SDK stops
-naming a hosting vendor in its own configuration surface.
+`INTERLATENT_BYPASS_KEY`, `--bypass-key` and the `bypass_key` node.toml key,
+which existed only to send `x-vercel-protection-bypass` past the hosted
+deployment's preview auth. With that deployment gone the header has nothing to
+get past, so the whole chain is deleted rather than renamed — the SDK stops
+naming a hosting vendor in its own configuration surface. A `bypass_key` line
+left in an existing `~/.interlatent/node.toml` is simply ignored.
 
 ### The control-plane contract has a name: the coordinator protocol
 
 The HTTP surface the node, the GPU box, the CLI and the teleop web app have
-always spoken to the dashboard is now written down as the **Interlatent
-Coordinator Protocol** — `docs/coordinator-protocol.md`, with a machine-readable
+always spoken is now written down as the **Interlatent Coordinator Protocol** —
+`docs/coordinator-protocol.md`, with a machine-readable
 twin at `interlatent.coordinator.protocol` and a test
 (`tests/test_coordinator_protocol.py`) that fails if the two disagree by so much
 as a reworded summary.
 
-Nothing changes at runtime yet; this is the contract being frozen before it
-grows a second implementation. Routes are tiered: **mandatory** (a node cannot
+Nothing changes at runtime; this is the surface `interlatent up` already serves,
+written down so a third party can implement it too. Routes are tiered: **mandatory** (a node cannot
 pair, a box cannot boot, or every RPC is rejected without them), **optional**
 (every SDK caller already degrades on 404 — teleop, for instance, simply turns
-itself off for the session), and **coordinator-only** (the hosted dashboard 404s
-these by design, and the CLI should say so by name).
+itself off for the session), and **coordinator-only** (operator routes such as
+setting the recording destination, where a 404 must be reported by name rather
+than as a generic failure).
 
 Two implicit contracts are promoted to documented ones because they were
 discoverable only by reading the source: `GET /api/v1/environments` doubles as
@@ -119,10 +123,10 @@ anything — `CloseSession` is the only trigger for the dataset build and the
 server's idle-GC discards recordings whose session was never closed.
 
 See [ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md), which
-supersedes ADR 0023's "the dashboard remains the only control plane". The short
+supersedes ADR 0023's refusal to ship a control plane at all. The short
 version: ADR 0023 blamed a coordinator for a collapse that was actually caused
 by *two* control-plane surfaces (`/api/v1/*` and a bespoke `/admin/*`) forking
-every operator flow. One protocol with two implementations is not that, and the
+every operator flow. One protocol with one client is not that, and the
 `/api/v1`-only rule is what keeps the distinction real.
 
 ### A failed publish no longer deletes the episode it just built
@@ -138,9 +142,9 @@ dropped its spool entries as they were acked over gRPC.
 Every step before that point is careful about this — a rebuild failure returns
 early, zero-step sessions skip, the 409 case is tolerated — but the one path where
 the data is *most* valuable, because it survived the whole build, was the one that
-threw it away. It only ever fired on a hosted outage, which is why it went
-unnoticed; with local and S3 destinations landing next, a wrong bucket or an
-expired credential makes it routine.
+threw it away. It only ever fired when a publish failed outright, which is why
+it went unnoticed; with local and S3 destinations landing next, a wrong bucket
+or an expired credential makes it routine.
 
 On publish failure the built dataset is now moved out of the working directory to
 `~/.interlatent/failed-publish/<episode_id>/` (override with
@@ -199,16 +203,16 @@ Pre-warm config is backend-first: whatever `GET /compute/boxes/{id}/warmup-targe
 returns wins, because it derives the policy *and* the camera keys from the attached
 environment, so the warm can't disagree with what the node later asks for. The
 fallback when that fetch returns nothing was gated on `_has_box_identity()` — but
-that is true for an owner `ilat_` key too, not just the dashboard's admin key it was
+that is true for an owner-key box too, not just the admin-provisioned boxes it was
 written for. So on a self-hosted box, `interlatent-serve --warmup-policy ...` was
 silently dropped the moment registration succeeded, which is always. It now falls
-back for owner-key and unidentified boxes; a dashboard-provisioned box still skips,
-which is the case the rule was guarding.
+back for owner-key and unidentified boxes; a box whose warmup target the coordinator
+provisions still skips, which is the case the rule was guarding.
 
 - Added `--warmup-image-keys` / `DRTC_WARMUP_IMAGE_KEYS`. MolmoAct2 can't build its
   feature dict without camera keys, so before this there was no way to pre-warm one
-  outside the dashboard — it was skipped with a message pointing at a Compute page
-  you may not have wanted to use yet. Bare names are normalized
+  without an environment attached on the coordinator — it was skipped with a message
+  telling you to go configure one. Bare names are normalized
   (`cam_high` → `observation.images.cam_high`). Match the node's `--camera` names:
   `PolicyRuntime` caches on `(backend, policy_uri)` and ignores session metadata on
   reuse, so a mismatched warm is *inherited* by the first real session, not discarded.
@@ -228,8 +232,8 @@ regenerated against the installed protobuf, and an optional systemd unit using
 The DRTC serving stack moved out of the closed engine into `packages/server/`,
 published as a second dist. `pip install 'interlatent-server[lerobot]'` on a CUDA
 machine, run `interlatent-serve --advertise-address <ip>`, and the box registers with
-the dashboard as a self-hosted compute box. Same server code, same wire protocol, same
-episode recording as Interlatent's managed boxes. See [docs/self-hosting.md](docs/self-hosting.md).
+your coordinator as a compute box. Same server code, same wire protocol, same
+episode recording every session has always used. See [docs/self-hosting.md](docs/self-hosting.md).
 
 - Fixed: the dist could not be imported at all. Two relative imports carried over from
   the engine's package layout (`...cloud.box_status`, `...storage.lerobot_*`) resolved
@@ -271,14 +275,14 @@ as a protocol change.
 ### BREAKING: client-side collection removed (ADR 0022)
 
 Collection is streaming-first and server-side: a robot node streams JPEG
-RecordTicks to a hosted recorder (DRTC GPU box or teleop recorder pod),
-which builds the LeRobot dataset and uploads it through the inbox→merge
-path. The long-deprecated local path — stage steps + JPEGs on-device,
+RecordTicks to a server-side recorder (the DRTC GPU box or the teleop
+recorder), which builds the LeRobot dataset and publishes it. The
+long-deprecated local path — stage steps + JPEGs on-device,
 build a LeRobot dataset locally, `upload()` it — is gone.
 
 - Removed `Interlatent.watch() / collect() / tick() / add_frame() /
   checkpoint() / upload() / register_cameras() / sb3_callback()`. For one
-  release these raise a `RuntimeError` pointing at hosted collection;
+  release these raise a `RuntimeError` pointing at streaming collection;
   the stubs disappear in the next release.
 - Removed the staging internals: `_media` (MediaBuffer), `_db`,
   `_storage`, `_schema`, `_watcher`, `_step_source`, `_dataset`,
@@ -287,7 +291,7 @@ build a LeRobot dataset locally, `upload()` it — is gone.
 - Removed the `interlatent-sync-rollout` CLI and the
   `adapters.lerobot.sync_inference` package.
 - `Interlatent(db_path=...)` is accepted but ignored (DeprecationWarning).
-- Collection now requires an account/hosted session; the client, node,
+- Collection now requires a running session; the client, node,
   and protocol remain Apache-2.0.
 
 ### Added (ADR 0023: lossless node uplink)

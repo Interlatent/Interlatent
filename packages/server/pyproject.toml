@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interlatent-server"
 version = "0.2.0"
-description = "Self-hosted Interlatent DRTC policy server — run hosted-grade GPU inference on your own hardware, registered with the Interlatent dashboard."
+description = "Self-hosted Interlatent DRTC policy server — run GPU inference on your own hardware, registered with the coordinator you run."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

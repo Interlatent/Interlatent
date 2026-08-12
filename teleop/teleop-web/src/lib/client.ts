@@ -1,11 +1,10 @@
 /**
  * Minimal typed API client for the standalone teleop webapp.
  *
- * Zero dependencies — plain fetch. Auth is a key issued by whichever
- * coordinator you point this at ('ilat_…' from the hosted dashboard, the
- * 'ilop_…' operator key `interlatent up` prints), sent as `x-api-key` on
- * every request. The key and the coordinator address live in localStorage
- * (set from the app's Settings panel):
+ * Zero dependencies — plain fetch. Auth is the 'ilop_…' operator key the
+ * coordinator you point this at printed at `interlatent up`, sent as
+ * `x-api-key` on every request. The key and the coordinator address live
+ * in localStorage (set from the app's Settings panel):
  *
  *   interlatent.coordinator — required; no default (see getApiBase below).
  *                             The pre-rename `interlatent.apiBase` is still
@@ -27,18 +26,21 @@
 export const API_BASE_STORAGE_KEY = 'interlatent.coordinator';
 const LEGACY_API_BASE_KEY = 'interlatent.apiBase';
 export const API_KEY_STORAGE_KEY = 'interlatent.apiKey';
-/** Where the hosted dashboard serves the coordinator protocol.
- *  Offered as a suggestion in the settings panel; never a default —
- *  this app talks to whatever coordinator you point it at. */
-export const HOSTED_COORDINATOR = 'https://interlatent.com';
+/** Sentinel base that routes `vite dev` traffic through the dev server's
+ *  /api proxy — see resolveApiBase(). It is not a default, not a suggestion,
+ *  and no longer names a live deployment: it is the address vite.config.ts's
+ *  proxy `apiTarget` also defaults to, and the two must stay equal for the
+ *  redirect to land anywhere. Override both with TELEOP_API_TARGET (and by
+ *  typing that same address into Settings) to proxy to your own coordinator. */
+export const DEV_PROXY_BASE = 'https://interlatent.com';
 
 /** The configured coordinator, or '' when none has been set.
  *
- *  There is no default. This app is a client of whatever coordinator you run —
- *  a hosted dashboard or `interlatent up` on your own LAN — and silently
- *  defaulting to one of them is how a self-hosted deployment ends up quietly
- *  talking to somebody else's control plane. `hasCoordinator()` lets the UI
- *  ask for one instead of failing at the first request. */
+ *  There is no default. This app is a client of the coordinator you run —
+ *  `interlatent up` on your own LAN or wherever you deployed it — and
+ *  silently defaulting to an address is how a self-hosted deployment ends up
+ *  quietly talking to somebody else's control plane. `hasCoordinator()` lets
+ *  the UI ask for one instead of failing at the first request. */
 export function getApiBase(): string {
   const stored =
     localStorage.getItem(API_BASE_STORAGE_KEY) ??
@@ -63,19 +65,17 @@ function isDevProxy(): boolean {
 }
 
 /**
- * Under `vite dev` we return the empty string instead of the hosted base — a
+ * Under `vite dev` we return the empty string instead of DEV_PROXY_BASE — a
  * same-origin URL that the dev server's /api proxy (vite.config.ts) forwards to
- * the same backend, server-side, where CORS does not apply. A base pointing
- * anywhere else (self-hosted backend) is left alone.
+ * the coordinator, server-side, where CORS does not apply. A base pointing
+ * anywhere else is left alone and called directly.
  *
- * The hosted deployment's teleop CORS policy now defaults to allowing any
- * origin on the paths this app calls, so a direct dev-origin call would very
- * likely work too — but the proxy keeps dev working against a deployment that
- * has narrowed `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which
- * would otherwise fail the preflight with `400 Disallowed CORS origin`.
+ * The proxy is what keeps dev working against a coordinator that has narrowed
+ * `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which would otherwise
+ * fail the dev origin's preflight with `400 Disallowed CORS origin`.
  */
 function resolveApiBase(base: string): string {
-  return import.meta.env.DEV && base === HOSTED_COORDINATOR ? '' : base;
+  return import.meta.env.DEV && base === DEV_PROXY_BASE ? '' : base;
 }
 
 export function getApiKey(): string {

@@ -48,7 +48,6 @@ def control_loop(
     teleop_channel: Any = None,
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
-    bypass_key: Optional[str] = None,
     # False for teleop-recording assignments (no policy loaded): never
     # client.step(); disengaged ticks hold pose but still record.
     policy_enabled: bool = True,
@@ -160,7 +159,7 @@ def control_loop(
     def _report(state_keys, act_keys):
         return _ctrl._report_robot_features(
             api_base, node_id, api_key, state_keys, act_keys,
-            teleop_profile=_teleop_schema, bypass_key=bypass_key,
+            teleop_profile=_teleop_schema,
         )
 
     try:

@@ -9,14 +9,12 @@ SSD.
 
 On :meth:`CloseSession` the recorder is finalised and a
 :class:`LeRobotRebuilder` build is kicked off (against the local
-on-disk staging) followed by the standard inbox-upload protocol used
-by the SDK today: ``POST /api/v1/episodes`` → ``POST
-.../upload-urls`` → presigned ``PUT`` → ``POST .../upload-complete``.
+on-disk staging); the finished dataset is then handed to the session's
+:class:`~.sinks.DatasetSink` — a local directory or an S3 bucket.
 
 This file lives on the engine side only — the SDK never imports it.
-The auth header reused for backend HTTP calls is the same
-``x-api-key`` value the Pi already presents on gRPC metadata, so we
-inherit per-user ownership scoping for free.
+Publishing talks to nothing of ours and needs no key: the hosted
+upload inbox this recorder used to POST to is gone (ADR 0039).
 """
 
 from __future__ import annotations
@@ -26,14 +24,12 @@ import json
 import logging
 import os
 import shutil
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
 
-from ..coordinator import api_v1
 from ..protocol import messages_pb2 as pb  # noqa: F401  (type-only ref in docstrings)
-from .sinks import BackendInboxSink, DatasetSink
+from .sinks import DatasetSink
 from ..storage.lerobot_rebuild import LeRobotRebuilder, StepRow
 from ..storage.lerobot_live import (
     FpsDivergenceError,
@@ -64,11 +60,6 @@ _MAX_STEPS_PER_SESSION = 108_000
 # stalling the gRPC handler indefinitely.
 _ENQUEUE_TIMEOUT_S = 5.0
 
-# Upload defaults — match the SDK's behaviour.
-_UPLOAD_BATCH_SIZE = 100
-_PUT_TIMEOUT = 300.0
-_HTTP_TIMEOUT = 60.0
-
 
 _IMAGE_KEY_PREFIX = "observation.images."
 
@@ -77,7 +68,13 @@ def _failed_publish_root() -> Path:
     """Where a built-but-unpublishable dataset is parked instead of deleted.
 
     Override with ``INTERLATENT_FAILED_PUBLISH_DIR``; defaults under the
-    same ``~/.interlatent`` home the node spool and box-id already use.
+    same ``~/.interlatent`` home the node spool, box-id, s3-cache and the
+    default ``--output-dir`` (``~/.interlatent/episodes``) already use.
+
+    Deliberately a *sibling* of that default rather than a subdirectory:
+    everything under the output dir is one canonical LeRobot dataset, and
+    a parked episode is by definition one that could not be merged into
+    it. A quarantine inside the dataset would be picked up as data.
     """
     override = os.environ.get("INTERLATENT_FAILED_PUBLISH_DIR", "").strip()
     if override:
@@ -111,13 +108,6 @@ def _short_cam(key: str) -> str:
     return key
 
 
-#: Historical name for the shared normalizer. The two colliding conventions
-#: this used to reconcile are gone (a coordinator address is a bare origin,
-#: canonicalised in ``interlatent_server.coordinator``); the alias stays because
-#: the recorder's call sites read better with it spelled out.
-_api_v1_root = api_v1
-
-
 # ----------------------------------------------------------------------
 # Recorder
 # ----------------------------------------------------------------------
@@ -127,10 +117,12 @@ _api_v1_root = api_v1
 class RecorderConfig:
     """Static per-session config, set once at :meth:`OpenSession`.
 
-    ``layer`` defaults to ``"inference:<policy_uri>"`` to match the
-    Model row auto-created by the backend in
-    ``routers/inference.py:create_session``. Override via
-    OpenSession metadata if the backend's convention ever changes.
+    The whole struct is handed to the sink at publish time, so the
+    descriptive fields (``layer``, ``model_id``, ``task_id``,
+    ``sdk_version``) are provenance a destination may record even though
+    nothing in this module reads them any more — the inbox POST that did
+    is gone (ADR 0039). ``layer`` still defaults to
+    ``"inference:<policy_uri>"``; override via OpenSession metadata.
     """
 
     episode_id: str
@@ -140,21 +132,22 @@ class RecorderConfig:
     fps: int
     policy_uri: str
     layer: str
-    api_key: str
-    api_base: str
     sdk_version: str = "drtc-server"
     # ADR 0016: build the LeRobot dataset live during the session (video
     # streaming-encoded as frames arrive) instead of rebuilding everything
     # at CloseSession. Set by the teleop-record pod only; serve_gpu keeps
     # the close-time rebuild (its measured fps genuinely diverges).
     live_encode: bool = False
-    # Durable Task link (backend ``tasks`` row id), echoed back to
-    # POST /episodes so the catalog row attributes without a lookup.
+    # Durable task-row link, carried through for a destination that wants
+    # to attribute the episode without a lookup.
     task_id: Optional[str] = None
-    # Where the finished dataset goes. None = the hosted inbox, which is what
-    # every pre-sink session did. A coordinator that stamps `output_dir` or
-    # `s3_uri` onto its sessions makes the whole inbox tier unnecessary
-    # (ADR 0002).
+    # Where the finished dataset goes: a local directory or an S3 bucket
+    # (ADR 0002). There is no remote fallback behind None any more, so in
+    # practice this is always set — `transport._maybe_build_recorder`
+    # refuses to build a recorder without a destination, and
+    # `interlatent-serve` always supplies one. None here means a
+    # hand-built recorder with nowhere to publish; `upload()` quarantines
+    # the finished dataset rather than pretend it shipped.
     sink: Optional["DatasetSink"] = None
 
 
@@ -219,9 +212,10 @@ class SessionRecorder:
         # "intervention" for a mid-rollout override of a running policy,
         # ADR 0034) — a human drove the robot for at least part of this
         # episode. Aggregated here (the pod is the authority on what it
-        # executed) and reported episode-level as ``has_teleop`` on
-        # upload-complete, which the backend stores as the Episode badge
-        # (see CONTEXT.md "Episode collection origin").
+        # executed) and logged at publish. The per-step label itself rides
+        # into the dataset as the ``control_source`` column, which is what
+        # DAgger-style training actually reads; this counter is the
+        # episode-level summary the operator sees.
         self._teleop_steps = 0
         # ADR 0016 live-encode path. The builder is fed from _write_one
         # (executor, serialized by the drain loop); the JPEG + JSONL
@@ -545,14 +539,15 @@ class SessionRecorder:
             self._drain_task = None
 
     async def discard(self) -> int:
-        """Drop captured data without uploading.
+        """Drop captured data without publishing it.
 
-        Used by the idle-GC: if the Pi disappears without sending
-        CloseSession, the partial capture is bound to an
-        InferenceSession.id the user has already moved past, so
-        uploading would just populate a stale dashboard row. Cancels
-        the drain task, removes the working dir, and reports the
-        number of rows that would have been uploaded.
+        Used by the idle-GC for a session that captured NOTHING: if the
+        Pi disappears without sending CloseSession, an empty capture is
+        not worth merging into the canonical dataset. (A session that did
+        capture steps is published instead — see
+        ``transport._idle_gc_loop``.) Cancels the drain task, removes the
+        working dir, and reports the number of rows that would have been
+        published.
 
         Idempotent against re-entry via the same ``_uploaded`` flag
         ``upload()`` uses — exactly one of upload/discard ever runs.
@@ -705,7 +700,23 @@ class SessionRecorder:
         # our session_id, so both lanes upload under config.episode_id.
         episode_id = self.config.episode_id
 
-        sink = self.config.sink or BackendInboxSink()
+        sink = self.config.sink
+        if sink is None:
+            # There is no remote fallback to publish to any more (ADR 0039),
+            # and no honest way to invent a destination here. Park the
+            # finished dataset instead of deleting it: it is complete, it
+            # just has nowhere to go.
+            log.error(
+                "SessionRecorder %s: no dataset destination configured; "
+                "keeping the built dataset instead of publishing it. Give "
+                "interlatent-serve an --output-dir (or an s3_uri on the "
+                "session) — see ADR 0002.",
+                self.config.episode_id,
+            )
+            self._quarantine_dataset(dataset_root)
+            self._cleanup_working_dir()
+            return
+
         try:
             await sink.publish(
                 episode_id=episode_id,
@@ -715,13 +726,19 @@ class SessionRecorder:
             )
             if self._dropped:
                 log.warning(
-                    "SessionRecorder %s: uploaded with %d dropped frames",
+                    "SessionRecorder %s: published with %d dropped frames",
                     self.config.episode_id, self._dropped,
                 )
             else:
                 log.info(
-                    "SessionRecorder %s: upload complete (%d steps, %d cams)",
+                    "SessionRecorder %s: publish complete (%d steps, %d cams)",
                     self.config.episode_id, self._step_count, len(self._cameras),
+                )
+            if self._teleop_steps:
+                log.info(
+                    "SessionRecorder %s: %d/%d step(s) were human-driven "
+                    "(ADR 0034)",
+                    self.config.episode_id, self._teleop_steps, self._step_count,
                 )
             if self._dedup_acked:
                 log.info(
@@ -731,7 +748,7 @@ class SessionRecorder:
                 )
         except Exception:
             log.exception(
-                "SessionRecorder %s: backend upload failed",
+                "SessionRecorder %s: publish to the dataset destination failed",
                 self.config.episode_id,
             )
             # The dataset is BUILT and complete — only shipping it failed.
@@ -741,134 +758,6 @@ class SessionRecorder:
             self._quarantine_dataset(dataset_root)
         finally:
             self._cleanup_working_dir()
-
-    # ------------------------------------------------------------------
-    # Upload internals
-    # ------------------------------------------------------------------
-
-    def _build_headers(self) -> dict[str, str]:
-        return {
-            "x-api-key": self.config.api_key,
-            "Accept": "application/json",
-        }
-
-    async def _post_episodes_create(self, episode_id: str) -> None:
-        import httpx
-
-        body = {
-            "episode_id": episode_id,
-            "environment": self.config.env_slug,
-            "layer": self.config.layer,
-            "model_id": self.config.model_id,
-            "tags": {
-                "source": "drtc-server",
-                "policy_uri": self.config.policy_uri,
-            },
-            "sdk_version": self.config.sdk_version,
-            "model_framework": "drtc",
-        }
-        if self.config.task_id:
-            body["task_id"] = self.config.task_id
-        url = f"{_api_v1_root(self.config.api_base)}/episodes"
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            r = await client.post(url, json=body, headers=self._build_headers())
-            if r.status_code == 409:
-                # Pre-existing episode row — tolerate (idle-GC may have
-                # fired and committed the upload before a tardy
-                # CloseSession arrived).
-                log.info(
-                    "SessionRecorder %s: episode row already existed (409)",
-                    self.config.episode_id,
-                )
-                return
-            r.raise_for_status()
-
-    async def _upload_dataset_dir(self, episode_id: str, root: Path) -> None:
-        """Walk ``root``, mint presigned URLs in batches, ``PUT`` each file."""
-        import httpx
-
-        # Collect manifest entries (matches SDK ``_inbox/<uuid>/<rel_path>``).
-        session_uuid = uuid.uuid4().hex
-        manifest: list[dict[str, Any]] = []
-        for f in sorted(root.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = f.relative_to(root).as_posix()
-            manifest.append({
-                "key": f"_inbox/{session_uuid}/{rel}",
-                "local": str(f),
-                "size": f.stat().st_size,
-            })
-        if not manifest:
-            log.warning(
-                "SessionRecorder %s: dataset root contained zero files",
-                self.config.episode_id,
-            )
-            return
-
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            headers = self._build_headers()
-
-            for i in range(0, len(manifest), _UPLOAD_BATCH_SIZE):
-                batch = manifest[i : i + _UPLOAD_BATCH_SIZE]
-                url = (
-                    f"{_api_v1_root(self.config.api_base)}/episodes/"
-                    f"{episode_id}/upload-urls"
-                )
-                req_body = {
-                    "files": [{"key": e["key"], "size": e["size"]} for e in batch],
-                }
-                r = await client.post(url, json=req_body, headers=headers)
-                r.raise_for_status()
-                presigned: dict[str, str] = r.json().get("presigned_urls", {})
-
-                # PUT each file. Concurrency is bounded by the asyncio
-                # gather; httpx pools the connections.
-                async def _put(entry: dict[str, Any]) -> None:
-                    put_url = presigned.get(entry["key"])
-                    if not put_url:
-                        raise RuntimeError(
-                            f"Backend did not return a presigned URL for {entry['key']}"
-                        )
-                    # Read+upload with a fresh client per call would be
-                    # wasteful; httpx.AsyncClient is fine to share across
-                    # PUTs but S3 doesn't accept the same auth headers,
-                    # so we open a per-PUT call with no global headers.
-                    async with httpx.AsyncClient(timeout=_PUT_TIMEOUT) as put_client:
-                        with open(entry["local"], "rb") as fh:
-                            data = fh.read()
-                        resp = await put_client.put(put_url, content=data)
-                        if not (200 <= resp.status_code < 300):
-                            raise RuntimeError(
-                                f"S3 PUT {entry['key']} -> "
-                                f"{resp.status_code} {resp.text[:160]}"
-                            )
-
-                await asyncio.gather(*(_put(e) for e in batch))
-
-    async def _post_upload_complete(self, episode_id: str) -> None:
-        import httpx
-
-        url = (
-            f"{_api_v1_root(self.config.api_base)}/episodes/"
-            f"{episode_id}/upload-complete"
-        )
-        body = {
-            "manifest": None,
-            # Pod-reported collection origin: ≥1 executed step came from a
-            # human over the teleop relay. The backend stores it as the
-            # episode's has_teleop badge; the SDK upload path never sets it.
-            "has_teleop": self._teleop_steps > 0,
-        }
-        if self._teleop_steps:
-            log.info(
-                "SessionRecorder %s: reporting has_teleop=True "
-                "(%d/%d teleop steps)",
-                self.config.episode_id, self._teleop_steps, self._step_count,
-            )
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            r = await client.post(url, json=body, headers=self._build_headers())
-            r.raise_for_status()
 
     # ------------------------------------------------------------------
     # Cleanup

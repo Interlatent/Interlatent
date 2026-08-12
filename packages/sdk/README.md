@@ -1,27 +1,29 @@
 # interlatent (Python SDK)
 
 The robot-side half of [Interlatent](https://github.com/interlatent/interlatent): run VLA
-policies on real hardware against managed cloud GPU pods, drive robots directly, and record
-episodes through a hosted session.
+policies on real hardware against a GPU box you run, drive robots directly, and record
+episodes into storage you own.
 
 What's in this package:
 
-1. **DRTC inference client** (`interlatent.inference`) — `connect_drtc(api_key=..., environment=...)`
-   opens a real-time action-chunking session against a managed GPU pod provisioned by the
-   [Interlatent dashboard](https://interlatent.com). The pod endpoint is resolved from your
-   API key per-session; you never dial it yourself.
+1. **DRTC inference client** (`interlatent.inference`) — `connect_drtc(server_address=..., …)`
+   opens a real-time action-chunking session against a GPU box running
+   [`interlatent-server`](https://pypi.org/project/interlatent-server/). You dial the box
+   directly, or let a session hand your node its address.
 2. **Robot node daemon** (`interlatent-node`) — a long-running daemon for always-on robots,
-   with camera capture. Pair it once, then `interlatent-node run`; it polls the dashboard and
-   converges to whatever inference session is assigned to it.
-3. **Dashboard CLI** (`interlatent`) — a thin client over the dashboard API (not a daemon).
-   List GPU pods and paired nodes, create environments, and drive sessions.
+   with camera capture. Pair it once against your coordinator, then `interlatent-node run`;
+   it polls the coordinator and converges to whatever inference session is assigned to it.
+3. **Coordinator + fleet CLI** (`interlatent`) — run a coordinator of your own
+   (`interlatent up`), register GPU boxes and nodes against it, create environments, and
+   drive sessions.
 4. **Offline control** — named behaviors (`interlatent behavior run`, `interlatent.Robot`) and
-   one-shot joint moves (`interlatent-act`), both without an API key or a network.
+   one-shot joint moves (`interlatent-act`), both without a key or a network.
 
 > **Recording is server-side.** The old client-side collection verbs (`watch()`, `tick()`,
 > `collect()`, `upload()`, `checkpoint()`, `sb3_callback()`, `register_cameras()`) were
 > removed in ADR 0018 and now raise `RuntimeError` with a pointer. A robot node streams
-> per-tick observations to a hosted recorder, which builds and uploads the LeRobot dataset.
+> per-tick observations to the GPU box's recorder, which builds the LeRobot dataset and
+> publishes it to the session's destination — a local directory or an S3 bucket you own.
 > `Interlatent(db_path=..., fps=...)` is accepted but ignored.
 
 ## Install
@@ -66,18 +68,19 @@ cannot install (CAN tooling, the ZED SDK, a running dimos stack). See the per-ex
 `pyproject.toml` and
 [ROBOT.md](https://github.com/interlatent/interlatent/blob/main/ROBOT.md).
 
-## Quickstart — cloud inference
+## Quickstart — DRTC inference
 
 ```python
 from interlatent.inference.integration import connect_drtc
 
 client = connect_drtc(
-    api_key="ilat_...",                   # or rely on INTERLATENT_API_KEY
-    environment="my-arm",                 # dashboard environment slug (must exist)
+    server_address="10.0.0.7:50051",      # your GPU box, or rely on INTERLATENT_DRTC_URL
+    api_key="ilop_...",                   # or rely on INTERLATENT_API_KEY
+    environment="my-arm",                 # environment slug (must exist)
     policy_uri="lerobot/smolvla_base",
     task="pick up the red cube",
     fps=30,
-    record=True,                          # the pod records the episode server-side
+    record=True,                          # the box records the episode server-side
 )
 
 while running:
@@ -98,25 +101,34 @@ An observation is just an `np.savez` blob — keys mirror LeRobot features:
 
 ## Command-line tools
 
-Auth for the cloud commands is `--api-key` or `INTERLATENT_API_KEY`; the base URL defaults to
-`https://interlatent.com` (`--api-base` / `INTERLATENT_API_BASE`).
+Auth is `--api-key` or `INTERLATENT_API_KEY` — the `ilop_` operator key your coordinator
+prints. The coordinator address is `--coordinator` or `INTERLATENT_COORDINATOR`; it has **no
+default**, so nothing ever talks to a control plane you did not name.
 
 ```bash
-# Dashboard client
-interlatent gpus ls                        # GPU boxes on your account
+# Run a coordinator on this machine
+interlatent up                                 # prints the ilop_ operator key
+interlatent config --output-dir ~/episodes     # where finished datasets are published
+interlatent status
+interlatent logs -f
+interlatent down
+
+# Fleet
+interlatent gpu add --name box0 --url 10.0.0.7:50051   # register a box by address
+interlatent gpus ls                        # GPU boxes this coordinator knows about
 interlatent nodes ls                       # paired robot nodes
 interlatent env create --slug my-arm --robot-type so101 --task "pick and place"
 interlatent session ls
-interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base
+interlatent session start --node my-arm --gpu box0 --policy lerobot/smolvla_base
 interlatent session stop <session-id>
 
-# Named behaviors — offline, no API key
+# Named behaviors — offline, no key
 interlatent behavior ls --robot so101
 interlatent behavior validate my_behaviors.toml --robot so101
 interlatent behavior run home --robot so101 --port /dev/ttyACM0
 
 # Node daemon
-interlatent-node pair --name my-arm --api-key ilat_...
+interlatent-node pair --name my-arm --coordinator http://10.0.0.2:8900 --api-key ilop_...
 interlatent-node run --robot so101 --port /dev/ttyACM0 --camera top=/dev/video0
 
 # One-shot manual move (needs [lerobot])
@@ -125,12 +137,12 @@ interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30
 
 ### `interlatent-preflight` — DRTC connectivity check
 
-Opens a real DRTC session against a managed GPU pod and pushes synthetic observations — no
-robot or cameras needed. Reports the network-vs-compute latency split and a PASS/WARN/FAIL
-verdict:
+Opens a real DRTC session against a GPU box and pushes synthetic observations — no robot or
+cameras needed. Reports the network-vs-compute latency split and a PASS/WARN/FAIL verdict:
 
 ```bash
-export INTERLATENT_API_KEY=ilat_...
+export INTERLATENT_COORDINATOR=http://10.0.0.2:8900
+export INTERLATENT_API_KEY=ilop_...
 interlatent-preflight \
     --environment my-arm \
     --policy lerobot/smolvla_base \
@@ -138,8 +150,9 @@ interlatent-preflight \
     --steps 300
 ```
 
-A green preflight means the cloud path is healthy — it does not exercise cameras, joints, or
-the motor bus.
+The coordinator is used only to fetch the environment's observation schema; `--server
+<host>:50051` dials a box directly. A green preflight means the inference path is healthy —
+it does not exercise cameras, joints, or the motor bus.
 
 ## Offline behaviors
 
@@ -153,30 +166,24 @@ robot.close()
 
 ## HTTP resources
 
-`Interlatent` is the HTTP surface for environments and episodes:
+`Interlatent` is the HTTP surface for the environments on your coordinator:
 
 ```python
 from interlatent import Interlatent
 
 client = Interlatent(
-    api_key="ilat_...",   # or INTERLATENT_API_KEY
-    base_url=None,        # default https://interlatent.com, or INTERLATENT_API_BASE
+    api_key="ilop_...",                # or INTERLATENT_API_KEY
+    base_url="http://10.0.0.2:8900",   # or INTERLATENT_COORDINATOR
     timeout=30.0,
 )
 
 envs = client.environments.list()
 env = client.environments.create(slug="ant-v5", display_name="Ant-v5")
-status = client.environments.processing_status("ant-v5")
-
-episode = client.episodes.retrieve("episode-id")
-results = client.episodes.results("episode-id")
-status = client.episodes.wait("episode-id", timeout=600, poll=5.0)
 ```
 
 | Resource | Methods |
 |----------|---------|
-| `client.environments` | `list()`, `get()`, `create()`, `episodes()`, `process()`, `processing_status()`, `cancel_processing()`, `analyze()` |
-| `client.episodes` | `retrieve()`, `create()`, `upload_urls()`, `upload_complete()`, `gc_inbox()`, `status()`, `results()`, `wait()`, `meta()`, `chunk()` |
+| `client.environments` | `list()`, `get()`, `create()` (see [docs/coordinator-protocol.md](../../docs/coordinator-protocol.md)) |
 
 All constructor arguments are keyword-only, and the client is a context manager
 (`with Interlatent(...) as client:` closes the HTTP session on exit).
@@ -204,7 +211,7 @@ client.create_environment(
 
 [Repo README](https://github.com/interlatent/interlatent) ·
 [getting-started](https://github.com/interlatent/interlatent/blob/main/docs/getting-started.md) ·
-[going-to-cloud](https://github.com/interlatent/interlatent/blob/main/docs/going-to-cloud.md) ·
+[self-hosting](https://github.com/interlatent/interlatent/blob/main/docs/self-hosting.md) ·
 [robots-and-policies](https://github.com/interlatent/interlatent/blob/main/docs/robots-and-policies.md) ·
 [behaviors](https://github.com/interlatent/interlatent/blob/main/docs/behaviors.md) ·
 [examples](https://github.com/interlatent/interlatent/tree/main/examples)

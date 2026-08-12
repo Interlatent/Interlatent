@@ -1,4 +1,4 @@
-# 0012 — Teleop: a thin client receiver stub, engine on the platform
+# 0012 — Teleop: a thin client receiver stub, engine off the node
 
 - Status: Accepted (amended by [0017](0017-robot-data-ships-in-the-sdk.md))
 - Date: 2026-06-24
@@ -6,7 +6,7 @@
 > **Amendment (0017, 2026-07-16):** the boundary here is now read as "the SDK
 > ships no IK *solver* / retargeting," not "no kinematic *data*." Robot
 > embodiment data (URDF, `ik_config.json`, `kinematic_spec.json`) ships in the SDK
-> wheel as `interlatent_robots/<kind>/`; the solver stays on the platform.
+> wheel as `interlatent_robots/<kind>/`; the solver stays out of the SDK.
 
 > **Amendment (2026-07-17):** teleop's supported scope is **remote human
 > demonstration** — policy-less VR teleop recordings. Mid-policy takeover
@@ -24,8 +24,8 @@ the text below now describes only where it *was*. Two changes:
    solve in the browser and the standalone producer brought that code
    open-source with it; this ADR's "the SDK ships no IK solver" was already
    false in practice before it was written down here.
-2. **The relay is no longer hosted-only.** `interlatent up` runs an embedded
-   WebTransport relay, so VR teleop needs no hosted service at all.
+2. **The relay ships with the stack.** `interlatent up` runs an embedded
+   WebTransport relay, so VR teleop needs no service the operator does not run.
 
 What survives unchanged is the part that mattered most: `SafetyGate` is the
 last hop before the motors and runs on the robot, never across the network.
@@ -45,21 +45,22 @@ turns intent into an absolute joint target and drives the arm. Historically the
 node owned almost all of this — keyboard-to-target integration, WebXR
 pose→joint inverse kinematics, pose retargeting, and per-robot kinematic
 profiles all ran in the node's control loop. That is a lot of robotics machinery
-to ship and maintain in the open-source robot SDK, and most of it is product
-surface that belongs with the hosted platform.
+to ship and maintain in the open-source robot SDK, and most of it is not robot
+code at all — it is the closed-source teleop **engine**, which has no reason to
+sit inside a 30 Hz control loop on a Raspberry Pi.
 
 We need teleop to keep working on the robot while drawing a clean open-core line:
 what is genuinely *client-side* (must run next to the motors) versus what is
-*engine* (can run on the platform).
+*engine* (can run off the robot, and is not ours to open-source).
 
 ## Decision
 
 The open-source SDK keeps only a **thin client receiver stub plus the last-hop
 safety clamp**. Everything that *computes* a joint target from operator intent
-moves to the platform.
+moves off the node.
 
 **Stays in the OSS SDK** (`interlatent/node/teleop/`):
-- `channel.py` — `TeleopChannel`: a background WebSocket to the hosted teleop
+- `channel.py` — `TeleopChannel`: a background WebSocket to the teleop
   relay. Mints a node-role token (`POST …/teleop-token?role=node`), receives
   frames, and surfaces the latest one with a 250 ms staleness drop.
 - `frame.py` — `TeleopFrame`: the authoritative wire-frame decoder (full schema:
@@ -69,18 +70,18 @@ moves to the platform.
   motion — workspace + velocity + deadman + staleness clamp. It is the **last
   hop before the motors**, so it must run on the robot, not across a network.
 - `robot_profile.py` — static per-robot joint limits / velocity caps / rest pose
-  that `SafetyGate` needs and that the platform reads (reported via the
+  that `SafetyGate` needs and that the retarget stage reads (reported via the
   robot-features endpoint) to retarget against the robot's schema.
 
 The node consumes only `mode="targets"` frames — absolute joint vectors the
-platform already computed — and routes them through the `SafetyGate` and the
+teleop engine already computed — and routes them through the `SafetyGate` and the
 adapter delta clamp before `send_action`. A `keys`/`pose` frame (which would
 require local integration/IK) is held at the current pose, because the engine
-that would compute it now lives on the platform.
+that would compute it no longer runs on the node.
 
-**Leaves the OSS SDK** (runs on the closed platform): `keyboard.py` (held-key
-integration), `kinematics.py` (FK/IK), `retarget.py` (WebXR pose retargeting).
-The platform performs these and streams `mode="targets"`.
+**Leaves the OSS SDK** (runs off the node, in the closed engine): `keyboard.py`
+(held-key integration), `kinematics.py` (FK/IK), `retarget.py` (WebXR pose
+retargeting). The engine performs these and streams `mode="targets"`.
 
 A second, source-agnostic guard — the **adapter delta clamp** — caps the
 per-tick joint jump for *every* action (policy and teleop alike) configured per
@@ -90,18 +91,18 @@ robot (`--robot-arg max_step=…`, or `max_step_rad` for the axol adapter). See 
 ## Consequences
 
 - Teleop keeps working on real robots, but the SDK no longer ships kinematics,
-  IK, or retargeting — less code to maintain in the public repo, and the
-  product-differentiating modality engine stays with the hosted platform.
+  IK, or retargeting — less code to maintain in the public repo, and the closed
+  modality engine stays out of it and off the control loop.
 - The wire contract (`TeleopFrame`, the relay, the token endpoint) is unchanged,
   so the existing producers and relay interoperate without modification. The
   node keeps the **full** frame schema even though it only acts on `targets`.
 - Safety is not weakened by the split: the `SafetyGate` (teleop) and the delta
   clamp (all sources) both remain client-side, so a network glitch, a bad chunk,
   or a malformed teleop frame cannot drive the motors with an unbounded jump.
-- Trade-off: a robot driven by `keys`/`pose` intent now depends on the platform
+- Trade-off: a robot driven by `keys`/`pose` intent now depends on the engine
   to resolve targets (a round-trip), instead of computing them locally. We accept
-  this — those modalities are a hosted feature, and the latency-critical inner
-  loop (policy inference + safety) stays local. Third parties who want fully
+  this — those modalities are resolved off the node, and the latency-critical
+  inner loop (policy inference + safety) stays local. Third parties who want fully
   local teleop can still write a custom `--loop` that does its own integration.
 - Relates to [0011](0011-vendor-robot-subpackage-via-robot-kind.md): the delta
   clamp is configured through the same per-adapter config surface.

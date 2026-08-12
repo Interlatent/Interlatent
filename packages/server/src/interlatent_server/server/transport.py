@@ -16,16 +16,15 @@ allocate a :class:`SessionRecorder` per session. Each Infer enqueues
 one step (observation state + first action + raw JPEG bytes from the
 npz payload) onto a bounded async queue; a background drain task
 writes to local SSD. On CloseSession (or idle-GC eviction) the
-recorder builds a LeRobot dataset and uploads it through the standard
-inbox protocol, using the same ``x-api-key`` the gRPC client already
-authenticated with.
+recorder builds a LeRobot dataset and hands it to that session's
+destination — a local directory or an S3 bucket (ADR 0002). Recording
+reads no credential of any kind.
 
-API-key validation is not in this file. When the public-facing
-endpoint needs it,
-:func:`interlatent_server.server.auth.wrap_servicer_with_auth`
-wraps every RPC. The ``serve_gpu`` entrypoint applies it by default on
-a self-hosted (owner-key) box, with the owner-scoped check; a
-dashboard-provisioned box runs unguarded (managed network posture).
+API-key validation is not in this file, and is orthogonal to recording.
+When the gRPC port needs guarding,
+:func:`interlatent_server.server.auth.wrap_servicer_with_auth` wraps
+every RPC; ``serve_gpu`` applies it by default and ``--insecure`` opts
+out.
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ from typing import AsyncIterator, Optional
 
 
 from ..box_status import report_status as _report_box_status
-from ..coordinator import CoordinatorNotConfigured, resolve
 from .sinks import DatasetSink, sink_from_metadata
 from ..protocol import messages_pb2 as pb
 from ..protocol import messages_pb2_grpc as pb_grpc
@@ -95,21 +93,6 @@ def _peek_policy_config(request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Resolved lazily, not at import: a module-level os.environ read froze
-# whatever was set when this module first loaded, which is before
-# `interlatent-serve` exports the address it resolved from --coordinator.
-#
-# Returns "" rather than raising when nothing is configured. A box publishing
-# to a local directory or an S3 bucket never calls the coordinator at all, and
-# demanding an address it will not use would make a fully detached box refuse
-# to record.
-def _default_coordinator() -> str:
-    try:
-        return resolve()
-    except CoordinatorNotConfigured:
-        return ""
-
-
 @dataclass
 class SessionState:
     runtime: PolicyRuntime
@@ -130,13 +113,12 @@ class SessionState:
     # evicted from ``_sessions``. The InferenceServicer keeps a second
     # ref in ``_lingering_uploads`` for the same reason.
     upload_task: Optional[asyncio.Task] = None
-    # Backend InferenceSession id this gRPC session serves (from OpenSession
-    # metadata ``episode_id``) — the join key ``_by_episode`` indexes on so a
+    # Session id this gRPC session serves (from OpenSession metadata
+    # ``episode_id``) — the join key ``_by_episode`` indexes on so a
     # reconnecting node supersedes the live session. Plus the node's robot
-    # kind and the api key (used for the recorder's HTTP upload).
+    # kind.
     episode_id: str = ""
     robot_kind: str = ""
-    api_key: str = ""
 
 
 class InferenceServicer(pb_grpc.InferenceServiceServicer):
@@ -327,13 +309,12 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             synchronous=synchronous,
         )
 
-        # Session identity index. The episode_id is the backend
-        # InferenceSession id (same value the recorder pins); a reconnecting
-        # node re-opens with the same episode_id, so the index overwrites —
-        # newest gRPC session wins.
+        # Session identity index. The episode_id is the caller's session id
+        # (same value the recorder pins); a reconnecting node re-opens with
+        # the same episode_id, so the index overwrites — newest gRPC session
+        # wins.
         state.episode_id = md.get("episode_id") or session_id
         state.robot_kind = (md.get("robot_kind") or "").strip()
-        state.api_key = _api_key_from_context(context)
 
         # ADR 0024: a reconnect for an episode we're already recording
         # supersedes the old gRPC session immediately — and hands its
@@ -349,7 +330,6 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
                 session_id=session_id,
                 request=request,
                 metadata=md,
-                context=context,
             )
         if recorder is not None:
             recorder.start()  # idempotent for an inherited (running) recorder
@@ -606,8 +586,8 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         A node that reconnects mid-recording re-opens with the same
         episode_id. Before this existed, the abandoned session lingered in
         ``_sessions`` holding its recorder until the idle-GC or the
-        recorder pod's stop-drain force-closed it — UPLOADING a second
-        inbox session under the same episode UUID, which the merge then
+        recorder pod's stop-drain force-closed it — PUBLISHING a second
+        dataset under the same episode UUID, which the merge then
         rejects as a duplicate. Retire the old session immediately
         instead: drop it from every index, detach its recorder, and hand a
         still-open recorder back so the new session continues the same
@@ -641,8 +621,8 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             log.warning(
                 "episode %s: session %s superseded by reconnect %s but its "
                 "recorder already began closing/uploading — the new session "
-                "records separately; expect a same-UUID inbox session that "
-                "the merge will quarantine",
+                "records separately; expect a same-UUID duplicate that the "
+                "merge will quarantine",
                 episode_id, old_sid, new_session_id,
             )
             return None
@@ -663,28 +643,36 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         session_id: str,
         request: pb.OpenSessionRequest,
         metadata: dict[str, str],
-        context,
     ) -> Optional[SessionRecorder]:
-        """Return a recorder iff metadata opts in, and auth is present *if
-        the destination needs it*.
+        """Return a recorder iff metadata opts in and a destination exists.
 
-        Only the hosted inbox needs an API key — it is what authenticates the
-        upload. A local directory or an S3 bucket the operator gave us
-        credentials for needs nothing from us, and demanding a key there was
-        the last thing making account-free collection impossible. When the key
-        IS required and absent, disable recording rather than crash inference.
+        Takes no gRPC ``context``: it used to, solely to read the caller's
+        ``x-api-key`` off the invocation metadata, and there is nothing
+        left on this path that a credential could answer for.
+
+        Recording is unconditionally account-free: a local directory or an
+        S3 bucket the operator gave us credentials for needs nothing from
+        us, and the one destination that did need a key — the hosted inbox
+        — is gone (ADR 0039). No key is read here at all.
+
+        What is required is somewhere to put the data. ADR-0002's
+        precedence is the session's ``recording`` block, then this box's
+        own flags, and ``interlatent-serve`` defaults ``--output-dir`` to
+        ``~/.interlatent/episodes``, so the second step always resolves in
+        practice. A destination-less recorder would capture a whole
+        episode and have nowhere to publish it, so refuse up front —
+        disabling recording rather than crashing inference.
         """
         if not _truthy(metadata.get("record")):
             return None
 
         sink = sink_from_metadata(metadata) or self._dataset_sink
-        api_key = _api_key_from_context(context)
-        if not api_key and (sink is None or sink.requires_api_key()):
+        if sink is None:
             log.warning(
-                "Session %s requested recording but no x-api-key present and "
-                "the destination is the hosted inbox; disabling recorder. "
-                "Pass the key via gRPC metadata, or configure a local/S3 "
-                "destination on your coordinator.",
+                "Session %s requested recording but this box has no dataset "
+                "destination; disabling recorder. Give interlatent-serve an "
+                "--output-dir (or an --s3-uri), or set output_dir / s3_uri on "
+                "the session's recording block.",
                 session_id,
             )
             return None
@@ -694,15 +682,15 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         env_slug = metadata.get("env_slug") or "default"
         task = metadata.get("task") or env_slug
         fps = _int_or(metadata.get("fps"), 30)
-        # ``episode_id`` defaults to the server's session_id — the Pi
-        # snippet pins it from InferenceSession.id so the dashboard
-        # join works without any extra round-trip.
+        # ``episode_id`` defaults to the server's session_id. A caller that
+        # pins it from its own session id (what the node does) gets an
+        # episode named the same on both sides, which is what makes the
+        # captured dataset traceable back to the run that produced it.
         episode_id = metadata.get("episode_id") or session_id
         model_id = metadata.get("model_id") or request.model_id or None
-        # Layer string MUST match the Model row's ``layer`` field to
-        # let the backend route the episode to the right Model. The
-        # backend creates rows with layer = "inference:<policy_uri>",
-        # so we derive the same here unless overridden.
+        # Descriptive provenance carried to the sink, not routing: nothing
+        # server-side reads it. "inference:<policy_uri>" stays the default
+        # spelling so existing captures keep the same shape.
         policy_uri = request.policy_uri or ""
         layer = metadata.get("layer") or f"inference:{policy_uri}"
 
@@ -720,11 +708,9 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             fps=fps,
             policy_uri=policy_uri,
             layer=layer,
-            api_key=api_key,
-            api_base=metadata.get("api_base") or _default_coordinator(),
             live_encode=self._live_encode,
-            # Precedence: the coordinator's per-session block, then this
-            # box's own flags, then the hosted inbox.
+            # Precedence (ADR 0002): the coordinator's per-session block,
+            # then this box's own flags. There is no third step.
             sink=sink,
         )
         return SessionRecorder(working_dir, config)
@@ -849,13 +835,11 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
                         task.add_done_callback(_on_discard)
                         continue
                     # The session recorded steps but went silent without a
-                    # CloseSession — almost always a dashboard stop that never
-                    # reached the box (the node daemon exited without closing),
-                    # a crash, or a network drop. The capture is already bound
-                    # to an InferenceSession.id whose dashboard row exists, so
-                    # UPLOAD fills that row instead of leaving it permanently
-                    # empty. This is the durable safety net for any missed
-                    # CloseSession — dropping here silently loses the episode.
+                    # CloseSession — almost always a stop that never reached
+                    # the box (the node daemon exited without closing), a
+                    # crash, or a network drop. Publish it anyway: this is the
+                    # durable safety net for any missed CloseSession, and
+                    # dropping here silently loses the episode.
                     log.info(
                         "Idle-GC uploading orphaned session %s (silent for "
                         ">%.0fs, %d steps, episode_id=%s)",
@@ -892,22 +876,6 @@ def _int_or(value: Optional[str], default: int) -> int:
         return int(value) if value is not None else default
     except (TypeError, ValueError):
         return default
-
-
-def _api_key_from_context(context) -> str:
-    """Pull ``x-api-key`` from the gRPC invocation metadata.
-
-    The auth wrapper validates the key on the way in; we just read it
-    back here so the recorder can present the same identity to the
-    Interlatent backend on its HTTP upload calls.
-    """
-    if context is None:
-        return ""
-    try:
-        md = dict(context.invocation_metadata() or [])
-    except Exception:
-        return ""
-    return (md.get("x-api-key") or "").strip()
 
 
 # ----------------------------------------------------------------------

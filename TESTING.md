@@ -5,7 +5,7 @@ and they are released independently, so read this per-deliverable:
 
 | Deliverable | Test roots | CI job |
 |---|---|---|
-| `packages/sdk` (`interlatent`) — DRTC client, node, dashboard CLI | `tests/`, `packages/sdk/tests/` | `test` (x86 + ARM, py3.11/3.12) |
+| `packages/sdk` (`interlatent`) — DRTC client, node, CLI | `tests/`, `packages/sdk/tests/` | `test` (x86 + ARM, py3.11/3.12) |
 | `packages/server` (`interlatent-server`) — the DRTC policy server | `packages/server/tests/` | `server` (x86, py3.11/3.12) |
 | …its dataset writers against the **real** lerobot, + one full DRTC rollout | `test_lerobot_real_build.py`, `test_drtc_end_to_end.py` | `server-lerobot` |
 | `teleop/teleop-web` — the WebXR VR producer | `teleop/teleop-web/src/**/__tests__/` (vitest) | `teleop-web` |
@@ -24,15 +24,27 @@ Everything runs with **no GPU and no robot**.
 
 - **SDK.** The DRTC client control loop against the `echo` / `tiny_torch` test backends
   (chunk merging, latency estimation, scheduling), motion-path arbitration, the robot
-  adapters' pure logic, the dashboard CLI argument/URL plumbing, and the **node daemon**
+  adapters' pure logic, the CLI argument/URL plumbing, and the **node daemon**
   (heartbeat payload, long-poll assignment dispatch, the convergence table, the
   disk-pressure spool gate, and OpenSession metadata assembly) — `tests/test_node_daemon.py`.
+- **Coordinator.** The control plane runs in-process under CI: `test_coordinator.py`
+  (state machine, long-poll wakeup, one-session-per-box, persistence across reload),
+  `test_coordinator_auth.py` (the `ilop_`/`ilnode_`/`ilbox_` principals and the
+  cross-scope rejections), `test_coordinator_resolution.py` (address resolution and the
+  no-default `CoordinatorNotConfigured`), `test_coordinator_teleop.py` (tokens,
+  certificates, relay pairing), `test_coordinator_protocol.py` (pins the route table in
+  [`docs/coordinator-protocol.md`](docs/coordinator-protocol.md) to
+  `interlatent.coordinator.protocol` — edit one and the other must move with it), and
+  `test_coordinator_e2e.py` (a real `NodeDaemon` against a real coordinator over real
+  HTTP, asserting that stopping a session unassigns rather than kills).
 - **Server.** Identity resolution, the owner-checked gRPC auth wrapper, box status
   reporting, `interlatent-serve` registration, an import walk of every module on a
   bare install (no torch, no lerobot), and the two halves of streaming-first
   collection: the **session recorder** (admission control, tick dedupe, measured
-  fps, the live-encode lane and its fallbacks, the inbox upload protocol) and
-  the **LeRobot v3 writer** (feature discovery, row→frame conversion, and the parquet
+  fps, the live-encode lane and its fallbacks, and destination-sink selection across
+  all three sinks — local directory, S3, and the protocol's presigned upload-url
+  inbox) and the **LeRobot v3 writer** (feature discovery,
+  row→frame conversion, and the parquet
   post-edits that carry `episode_uuid` / `control_source` / `failure_type`).
   `LeRobotDataset` itself is stubbed — lerobot drags torch — so what is covered is
   everything on this side of that seam. Not the policy path: loading a real checkpoint
@@ -56,23 +68,30 @@ run by hand.
   control timestamps; a fresher inference overrides stale plans.
 - [ ] **Latency estimator** — Jacobson-Karels split tracks network vs. compute and
   drives `min_execution_horizon` / `cooldown_steps` sanely.
-- [ ] **`connect_drtc(api_key=…, environment=…)`** — resolves the account and dials the
-  per-session GPU endpoint the dashboard returns; `INTERLATENT_API_KEY` and
-  `INTERLATENT_API_BASE` env vars are honored (`--api-key` / `--api-base` on
-  `interlatent-preflight`).
+- [ ] **`connect_drtc(server_address=…, environment=…)`** — dials the GPU endpoint and
+  opens a session; `INTERLATENT_DRTC_URL` is honored (`--server` on
+  `interlatent-preflight`), and calling with no address at all raises instead of
+  guessing one.
 - [x] **`step()` returns `None` while the first chunk is in flight**, then streams
   actions at the control rate. `test_drtc_end_to_end.py` runs a real rollout —
   `connect_drtc()` over a real localhost gRPC socket into the `echo` backend, ticks
-  journalled through the real spool, then the recorder's rebuild and inbox upload
-  against a local HTTP stub. It asserts the episode actually reaches
-  `upload-complete`, which is the only externally visible difference between "the
-  recording survived" and "the rebuild raised and the staging was deleted".
+  journalled through the real spool, then the recorder's real rebuild and upload
+  through the protocol's `upload-urls` / `upload-complete` routes, served by a local
+  HTTP stub. The assertion is that `upload-complete` was called and that the uploaded
+  tree is a complete LeRobot dataset — the only externally visible difference between
+  "the recording survived" and "the rebuild raised and the staging was deleted".
 
-## Tier 2 — Node + dashboard CLI (CI where possible)
+## Tier 2 — Coordinator + node + CLI (CI where possible)
 
-- [ ] **`interlatent-node pair --name … --api-key …`** — registers the robot against the
-  dashboard (mock the API for CI).
-- [x] **`interlatent-node run`** — polls the dashboard and converges to the
+- [x] **Coordinator** — `interlatent up`'s service under test in-process:
+  pair/heartbeat/poll, session assign and unassign, box registration and the `authz`
+  probe, key scoping, and address resolution (`test_coordinator.py`,
+  `test_coordinator_auth.py`, `test_coordinator_resolution.py`,
+  `test_coordinator_teleop.py`, `test_coordinator_protocol.py`,
+  `test_coordinator_e2e.py`).
+- [ ] **`interlatent-node pair --name … --coordinator … --api-key …`** — registers the
+  robot against a coordinator (mock the API for CI).
+- [x] **`interlatent-node run`** — long-polls the coordinator and converges to the
   assigned session; keeps driving the robot while a session is assigned.
   `tests/test_node_daemon.py` drives the daemon against a scripted HTTP client
   and a stubbed `connect_drtc`: the full convergence table (start / noop /
@@ -84,7 +103,7 @@ run by hand.
   `interlatent session ls|start|stop` build correct requests and parse responses.
 - [x] **Offline CLI** — `interlatent behavior ls|validate|run` lists, validates and runs
   behaviors, and `interlatent-act` reads a pose, settles a move, and rejects unknown /
-  missing / out-of-range joints — all with no API key and no cloud
+  missing / out-of-range joints — all with no key and no coordinator
   (`test_behavior_cli.py`, `test_behaviors*.py`, `test_act_cli.py`).
 - [ ] **Session lifecycle** — `session start` → node converges → `session stop`
   closes the DRTC link and triggers any recorded dataset to build/publish.
@@ -98,9 +117,9 @@ run by hand.
 
 ## Tier 3 — Server-side recording + dataset storage
 
-Collection is streaming-first: the node streams `RecordTick`s to a hosted recorder,
-which builds and uploads the dataset. The client-side verbs (`watch()` / `tick()` /
-`collect()`) were removed in ADR 0018 and now raise.
+Collection is streaming-first: the node streams `RecordTick`s to the recorder on the
+GPU box, which builds and publishes the dataset. The client-side verbs
+(`watch()` / `tick()` / `collect()`) were removed in ADR 0018 and now raise.
 
 - [x] **`LeRobotRebuilder`** emits a valid LeRobot v3.0 dataset on disk (parquet
   frames + MP4 video + JSON metadata). Two layers, because one is not enough:
@@ -113,11 +132,13 @@ which builds and uploads the dataset. The client-side verbs (`watch()` / `tick()
   discarded the episode. See `storage/lerobot_codec.py`.
 - [ ] **Recording destinations** — the `output_dir` / `s3_uri` keys the node puts in
   the OpenSession metadata pick the server's sink and flush on stop into one flat
-  dataset; the hosted inbox path requires an API key.
+  dataset; a local directory needs no coordinator at all (`test_sinks.py`).
 
-## Tier 4 — Real policy on a cloud pod (manual, against the dashboard)
+## Tier 4 — Real policy on a real GPU box (manual)
 
-- [ ] **End-to-end rollout** — pair a node, start a session against a real pod with
-  a real policy (e.g. SmolVLA), confirm smooth control at the loop rate.
+- [ ] **End-to-end rollout** — the control-plane half of this is covered in Tier 2; what
+  is manual is the hardware. Bring up a coordinator, pair a node, register a GPU box,
+  start a session with a real policy (e.g. SmolVLA), confirm smooth control at the loop
+  rate.
 - [ ] **Latency at the control rate** — measure round-trip and confirm the client
   stays scheduled ahead; the arm does not stutter.

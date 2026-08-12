@@ -2,13 +2,14 @@
 
 ## Policies
 
-Policies run on a managed cloud GPU pod or on your own box
-([self-hosting.md](self-hosting.md)) — the list is the same either way.
+Policies run on a GPU box you run ([self-hosting.md](self-hosting.md)) — a
+workstation with an NVIDIA card, or a machine you rent from RunPod, Lambda or
+Vast. The list is the same either way.
 
 | Policy | Backend | Status | Notes |
 |---|---|---|---|
 | SmolVLA (`lerobot/smolvla_base`, fine-tunes) | `lerobot` | ✅ | ~50–150 ms/infer on A10G+ |
-| Pi0 / Pi0.5 | `lerobot` | ✅ | ≥24 GB VRAM pod |
+| Pi0 / Pi0.5 | `lerobot` | ✅ | ≥24 GB VRAM |
 | ACT | `lerobot` | ✅ | light, great first policy |
 | Diffusion Policy | `lerobot` | ✅ | |
 | VQ-BeT | `lerobot` | ✅ | |
@@ -19,7 +20,7 @@ Policies run on a managed cloud GPU pod or on your own box
 
 Pick a policy by passing its URI to `connect_drtc(policy_uri=…)` or
 `interlatent session start --policy …`; override the backend with
-`--backend` (default `lerobot`). If LeRobot's policy factory can load it, a pod
+`--backend` (default `lerobot`). If LeRobot's policy factory can load it, a box
 can serve it.
 
 ## Robots (client side)

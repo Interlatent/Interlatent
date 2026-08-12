@@ -33,7 +33,7 @@ Two costs follow, and the second is the one that hurt:
    on *every packet build*. With N dead streams, every datagram send,
    every ACK, every frame pays O(N) — and N grows at frame rate.
 
-Field signature (Jetson Orin Nano node → Fly relay → Quest 3, July
+Field signature (Jetson Orin Nano node → relay → Quest 3, July
 2026): with the preview offer pinned at 24 Hz, per-frame delivery time
 grew **monotonically ~40 ms → ~100+ ms over one minute**; delivered fps
 decayed ~23 → ~9 per camera; headset glass-to-eye `video_lag` grew in
@@ -83,8 +83,8 @@ load-shedding policy above it):
   *not* involved: it is pure load-shedding (in-flight cap + TTL reset) and no
   longer touches aioquic bookkeeping. A TTL-reset stream stays parked in the GC
   until its RESET is acked, then discards.
-- **Relay** (monorepo `teleop-quic-relay/server.py`, deployed
-  separately on Fly): `RelayProtocol.note_uni_done()` +
+- **Relay** (`teleop-quic-relay/server.py`, the WebTransport relay the
+  browser connects to): `RelayProtocol.note_uni_done()` +
   `sweep_uni_discards()`, swept at frame cadence on the destination
   connection and piggybacked on datagram sends. **The fix must exist at
   both endpoints; either one alone re-creates the decay.**

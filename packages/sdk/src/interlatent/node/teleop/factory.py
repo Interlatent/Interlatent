@@ -39,7 +39,6 @@ def make_teleop_channel(
     api_base: str,
     api_key: str,
     token_path: Optional[str] = None,
-    bypass_key: Optional[str] = None,
     robot_kind: Optional[str] = None,
 ):
     """Return a QUIC teleop channel, or ``None`` when teleop is unavailable."""
@@ -52,7 +51,6 @@ def make_teleop_channel(
             api_base=api_base,
             token_path=probe_path,
             api_key=api_key,
-            bypass_key=bypass_key,
             role="node",
         )
         transport = str(data.get("transport") or "")
@@ -110,6 +108,5 @@ def make_teleop_channel(
         api_base=api_base,
         api_key=api_key,
         token_path=token_path,
-        bypass_key=bypass_key,
         robot_kind=robot_kind,
     )
