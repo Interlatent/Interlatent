@@ -1,12 +1,16 @@
 /**
  * Minimal typed API client for the standalone teleop webapp.
  *
- * Zero dependencies — plain fetch. Auth is an Interlatent API key
- * ('ilat_…') sent as `x-api-key` on every request; the key and the API
- * base URL live in localStorage (set from the app's Settings panel):
+ * Zero dependencies — plain fetch. Auth is a key issued by whichever
+ * coordinator you point this at ('ilat_…' from the hosted dashboard, the
+ * 'ilop_…' operator key `interlatent up` prints), sent as `x-api-key` on
+ * every request. The key and the coordinator address live in localStorage
+ * (set from the app's Settings panel):
  *
- *   interlatent.apiBase  — default https://interlatent.com
- *   interlatent.apiKey   — required for every call
+ *   interlatent.coordinator — required; no default (see getApiBase below).
+ *                             The pre-rename `interlatent.apiBase` is still
+ *                             read once so an operator need not re-enter it.
+ *   interlatent.apiKey      — required for every call
  *
  * The response types below are copied from Interlatent-Main
  * site/src/lib/api.ts @ f7e4bfb6 (2026-07-30) — TeleopIkHints and

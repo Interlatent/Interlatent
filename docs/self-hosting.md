@@ -12,9 +12,18 @@ coordinator and publishing to `--output-dir` never contacts interlatent.com.
 robot node ──native gRPC (50051)──▶ your GPU box (interlatent-server)
                                         │ dials out only
                                         ▼
-                            Interlatent dashboard/backend
-                (register · warmup target · status · episode inbox)
+                                  a coordinator
+                    (register · warmup target · status · authz)
+
+          `interlatent up` on your own LAN, or the hosted dashboard —
+             two deployments of one protocol, and the box cannot
+                           tell which it registered with
 ```
+
+Where a finished dataset lands is a separate question, answered by the
+session's destination rather than by the coordinator: a local directory, an
+S3 bucket you own, or the hosted episode inbox. See
+[coordinator-protocol.md](coordinator-protocol.md) for the full contract.
 
 ## What you need
 
@@ -23,7 +32,7 @@ robot node ──native gRPC (50051)──▶ your GPU box (interlatent-server)
 - A coordinator to register with, and a key for it: the `ilop_` operator key
   `interlatent up` prints, or an `ilat_` key from the dashboard.
 - An address your robot nodes can reach the machine at — public IP, LAN IP,
-  or VPN address. The dashboard hands it to nodes verbatim.
+  or VPN address. The coordinator hands it to nodes verbatim.
 
 ## Docker (recommended)
 
@@ -98,14 +107,17 @@ regenerates them.
    destination points: a local directory, an S3 bucket you own, or the hosted
    inbox via backend-issued presigned URLs — **no cloud credentials ever live
    on your machine** in the hosted case, only your own revocable key.
-4. Graceful exit (Ctrl-C / `docker stop`) reports `stopped` so the dashboard
+4. Graceful exit (Ctrl-C / `docker stop`) reports `stopped` so the coordinator
    doesn't show a ghost box.
 
 ## Security
 
-The gRPC port is guarded **by default**: every RPC's `x-api-key` must belong
-to the account that registered the box (checked against the backend, cached
-60 s). Your nodes already send it. `--insecure` (or
+The gRPC port is guarded **by default**: every RPC's `x-api-key` must be one
+the coordinator will vouch for, probed at
+`GET /api/v1/compute/boxes/{box_id}/authz` and cached 60 s. Against the hosted
+dashboard that means the account that registered the box; against
+`interlatent up` it means the `ilop_` operator key or a node token that
+coordinator issued. Your nodes already send it. `--insecure` (or
 `INTERLATENT_INSECURE=1`) disables the check for air-gapped networks — never
 expose an insecure box to the public internet; it is an open GPU.
 
@@ -114,9 +126,10 @@ anything but your nodes.
 
 ## Limits
 
-- The dashboard shows a self-hosted box but cannot stop/restart it — the
-  machine is yours ("managed by its operator"). Remove the box row from the
-  dashboard when you retire the machine.
+- A coordinator shows a self-hosted box but cannot stop/restart it — the
+  machine is yours ("managed by its operator"). Drop the box row when you
+  retire the machine: `interlatent gpu rm <name>`, or the equivalent on the
+  dashboard.
 - Teleop never touches the GPU box: the browser↔node path goes through a QUIC
   relay. Against the hosted dashboard that is the hosted relay; a self-hosted
   coordinator runs its own (`pip install 'interlatent[teleop-relay]'`).
