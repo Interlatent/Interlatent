@@ -64,6 +64,16 @@ EXEMPT = {
     # other adapters/dimos module imports dimos inside functions and is covered
     # by this suite as normal.
     "interlatent.adapters.dimos.blueprints",
+    # THE isolation boundary for [teleop-relay], and the same shape as
+    # _quic_client above: aioquic lands in exactly one clearly-marked module.
+    # It cannot defer its imports — `RelayProtocol` subclasses aioquic's
+    # `QuicConnectionProtocol`, so the base class is needed at class-creation
+    # time. Nothing imports it on a base install: `relay_supervisor.start_relay`
+    # try/excepts `import aioquic` first and returns None (teleop simply off)
+    # before it ever touches this module, and a coordinator with no relay
+    # answers the teleop-token route with a 404, which the node treats as
+    # definitive.
+    "interlatent.coordinator.relay",
 }
 
 # Declared in [project].dependencies — always present in a real install, so a

@@ -537,12 +537,17 @@ class _StubRebuilder:
 
     last: "_StubRebuilder | None" = None
 
-    def __init__(self, *, root, fps, task, env_slug, vcodec=None) -> None:
+    def __init__(
+        self, *, root, fps, task, env_slug, vcodec=None,
+        force_control_source=False, measured_fps=None,
+    ) -> None:
         self.root = Path(root)
         self.fps = fps
         self.task = task
         self.env_slug = env_slug
         self.vcodec = vcodec
+        self.force_control_source = force_control_source
+        self.measured_fps = measured_fps
         self.built_rows: list = []
         type(self).last = self
 
@@ -905,3 +910,138 @@ def test_discard_aborts_the_live_builder(live, tmp_path: Path) -> None:
 
     asyncio.run(main())
     assert _StubLive.last.aborted == 1
+
+
+# ----------------------------------------------------------------------
+# Publish failure must not delete a built dataset
+# ----------------------------------------------------------------------
+
+
+def test_failed_publish_root_honours_the_env_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(tmp_path / "parked"))
+    assert rec_mod._failed_publish_root() == tmp_path / "parked"
+
+
+def test_failed_publish_root_defaults_under_the_interlatent_home(monkeypatch) -> None:
+    monkeypatch.delenv("INTERLATENT_FAILED_PUBLISH_DIR", raising=False)
+    monkeypatch.setattr(rec_mod.Path, "home", staticmethod(lambda: Path("/home/pilot")))
+    assert rec_mod._failed_publish_root() == Path("/home/pilot/.interlatent/failed-publish")
+
+
+def test_publish_failure_keeps_the_dataset_instead_of_deleting_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The regression this whole fix exists for.
+
+    The dataset is fully built; only shipping it failed. Before the fix the
+    ``finally: self._cleanup_working_dir()`` rmtree'd it and the episode was
+    gone for good.
+    """
+    parked = tmp_path / "parked"
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
+    http = _FakeHttp(create_status=500)
+    _install_stubs(monkeypatch, http)
+
+    async def main() -> SessionRecorder:
+        rec = _rec(tmp_path)
+        rec.start()
+        for i in range(3):
+            _tick(rec, i, ts=i * 100_000_000)
+        await rec.upload()
+        return rec
+
+    rec = asyncio.run(main())
+
+    # Working dir is still cleaned up — we did not simply stop tidying.
+    assert not rec.working_dir.exists()
+    # ...but the built dataset survived, intact, outside it.
+    kept = parked / "ep-1"
+    assert kept.is_dir()
+    assert (kept / "meta" / "info.json").exists()
+    assert (kept / "data" / "chunk-000.parquet").read_bytes() == b"PAR1"
+
+
+def test_quarantine_disambiguates_a_repeated_episode_id(
+    monkeypatch, tmp_path: Path
+) -> None:
+    parked = tmp_path / "parked"
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
+    rec = _rec(tmp_path)
+
+    for _ in range(2):
+        built = tmp_path / "build"
+        built.mkdir()
+        (built / "info.json").write_text("{}")
+        rec._quarantine_dataset(built)
+
+    assert sorted(p.name for p in parked.iterdir()) == ["ep-1", "ep-1.1"]
+
+
+@pytest.mark.parametrize("root", [None, "missing"])
+def test_quarantine_is_a_noop_without_a_dataset(
+    monkeypatch, tmp_path: Path, root
+) -> None:
+    parked = tmp_path / "parked"
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
+    rec = _rec(tmp_path)
+    rec._quarantine_dataset(None if root is None else tmp_path / root)
+    assert not parked.exists()
+
+
+def test_a_failing_custom_sink_quarantines_too(monkeypatch, tmp_path: Path) -> None:
+    """Not just the hosted inbox. With local and S3 destinations, a publish
+    failure becomes routine — a wrong bucket, an expired key — so the
+    quarantine has to cover whatever sink is configured, not one code path."""
+    parked = tmp_path / "parked"
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
+    _install_stubs(monkeypatch, _FakeHttp())
+
+    class _ExplodingSink:
+        def requires_api_key(self):
+            return False
+
+        def normalize_for_merge(self):
+            return True
+
+        async def publish(self, **_kw):
+            raise RuntimeError("bucket does not exist")
+
+    async def main() -> SessionRecorder:
+        rec = _rec(tmp_path, sink=_ExplodingSink())
+        rec.start()
+        for i in range(3):
+            _tick(rec, i, ts=i * 100_000_000)
+        await rec.upload()
+        return rec
+
+    rec = asyncio.run(main())
+    assert not rec.working_dir.exists()
+    assert (parked / "ep-1" / "meta" / "info.json").exists()
+
+
+def test_the_sink_drives_merge_normalization(monkeypatch, tmp_path: Path) -> None:
+    """A merge-on-stop sink aggregates sessions into one dataset, and
+    lerobot's aggregate_datasets rejects mismatched `features` — so the
+    control_source column must not depend on whether a human intervened."""
+    _install_stubs(monkeypatch, _FakeHttp())
+
+    class _MergingSink:
+        def requires_api_key(self):
+            return False
+
+        def normalize_for_merge(self):
+            return True
+
+        async def publish(self, **_kw):
+            return None
+
+    async def main() -> None:
+        rec = _rec(tmp_path, sink=_MergingSink())
+        rec.start()
+        for i in range(3):
+            _tick(rec, i, ts=i * 100_000_000)
+        await rec.upload()
+
+    asyncio.run(main())
+    assert _StubRebuilder.last.force_control_source is True
+    assert _StubRebuilder.last.measured_fps is not None

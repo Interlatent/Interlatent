@@ -30,6 +30,17 @@ export interface QuicLinkOpts {
   onStream?: (data: ArrayBuffer) => void;
   /** Called once on close/error so the UI can surface disconnect. */
   onClose?: (reason: string) => void;
+  /** SHA-256 digests of a self-signed server certificate to trust.
+   *
+   * A self-hosted coordinator's embedded relay lives at a LAN address, and no
+   * public CA issues certificates for those — so Chromium's escape hatch is to
+   * pin the certificate by digest. Absent, the browser validates against the
+   * public roots as before, which is what the hosted relay needs.
+   *
+   * Chromium constrains this: the certificate must be ECDSA P-256 and valid
+   * for at most 14 days. The coordinator mints and rotates it, and returns the
+   * current digest on every token mint, so a rotation cannot strand us. */
+  serverCertificateHashes?: Array<{ algorithm: string; value: string }>;
 }
 
 /** Bound on one inbound uni stream — a preview JPEG is ~8-15 KB, so anything
@@ -38,6 +49,16 @@ const MAX_STREAM_BYTES = 512 * 1024;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+/** `"a1b2…"` -> `Uint8Array`. serverCertificateHashes takes a BufferSource. */
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim().replace(/[^0-9a-fA-F]/g, '');
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return out;
+}
 
 /** `String(err)` on a WebTransportError yields a bare "WebTransportError:
  *  Opening handshake failed." and drops the two fields that actually localise
@@ -72,11 +93,20 @@ export class QuicTeleopLink {
     // `WebTransport` is not in older TS DOM libs; the cast keeps tsc happy
     // without pulling a lib bump. Feature-detected by the caller.
     const WT = (globalThis as unknown as { WebTransport?: unknown }).WebTransport as
-      | (new (u: string) => WebTransport)
+      | (new (u: string, opts?: Record<string, unknown>) => WebTransport)
       | undefined;
     if (!WT) throw new Error('WebTransport unsupported in this browser');
 
-    const wt = new WT(url);
+    const hashes = this.opts.serverCertificateHashes;
+    const wt = hashes?.length
+      ? new WT(url, {
+          serverCertificateHashes: hashes.map((h) => ({
+            algorithm: h.algorithm,
+            // The API wants raw bytes, not the hex the coordinator sends.
+            value: hexToBytes(h.value),
+          })),
+        })
+      : new WT(url);
     this.wt = wt;
     // Subscribe to `closed` BEFORE awaiting `ready`. A failed handshake rejects
     // both, and `closed` usually carries the more specific reason of the two —

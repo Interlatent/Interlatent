@@ -43,7 +43,7 @@ schedule keyed on monotonic control timestamps), `inference/client/latency.py`
 | Teleop receiver | `node/teleop/` (factory, quic_channel, frame, safety, robot_profile) | Thin receiver for VR teleop — see below |
 | Robot data | `interlatent_robots/<kind>/`, read via `robots.py` | Per-kind URDF + `kinematic_spec.json` shipped in the wheel ([ADR 0017](docs/adr/0017-robot-data-ships-in-the-sdk.md)) |
 | Offline behaviors | `robot.py`, `behaviors/` | `il.Robot("so101").act("home")` — named min-jerk moves, no account, no policy ([docs/behaviors.md](docs/behaviors.md)) |
-| Dashboard CLI | `cli/main.py` | `interlatent` — thin client over the dashboard API ([commands](docs/concepts.md#the-dashboard-cli)) |
+| Coordinator CLI | `cli/main.py` | `interlatent` — thin client over the dashboard API ([commands](docs/concepts.md#the-dashboard-cli)) |
 | Tick spool | `inference/client/spool.py` | Write-through disk journal for the RecordTick uplink: delete-after-ack, drain-done at close, hard-stop when full |
 | JPEG encode | `node/jpeg.py`, `node/nvjpeg.py`, `node/gpujpeg.py` | Capability-adaptive frame encoder, resolved once at runtime: nvJPEG → GPUJPEG → PyTurboJPEG → OpenCV → PIL |
 | HTTP client | `_client.py`, `_resources.py` | `Interlatent` — environments/episodes API surface used by the daemon and CLI |
@@ -118,14 +118,29 @@ the path's latency.
 
 ## Relationship to Interlatent Cloud
 
-The [Interlatent dashboard](https://interlatent.com) is the control plane, and stays the
-control plane whichever GPU runs the policy: the client and node speak `proto/messages.proto`
-to the box, and authenticate to the dashboard with an API key (`ilat_…`) to discover boxes,
-pair nodes, and drive sessions. The **serving stack itself is open** — a box you provision
-on the dashboard and a box you run yourself execute the same code, differing only in
-identity (a managed system key vs. your own `ilat_` key) and in who pays for the hardware.
+There are **two contracts in this system**, and keeping them apart explains most of the
+layout. `proto/messages.proto` is the *data* plane: the gRPC the client and node speak to
+a GPU box. [`docs/coordinator-protocol.md`](docs/coordinator-protocol.md) is the *control*
+plane: the HTTP a node, a box, the CLI and the teleop app speak to whatever assigns them
+work. Both are additive-only.
 
-Client, node, server, and protocol are all Apache-2.0; episode recording runs through hosted
-sessions, so collection requires an account. What remains private is the platform around the
-boxes: provisioning and warm pools, the dataset/canonical store and merge pipeline, offline
-policy improvement, and the annotation stack.
+The service on the other end of that second contract is a **coordinator**. The
+[Interlatent dashboard](https://interlatent.com) is one implementation of it — currently
+the only one, with a self-hosted implementation landing in the CLI. They are two
+deployments of one contract, not two modes: nothing in the SDK branches on which it is
+talking to. See [ADR 0038](docs/adr/0038-coordinator-protocol-one-control-plane.md), which
+supersedes ADR 0023's "the dashboard remains the only control plane".
+
+A coordinator is never in the data path. DRTC is direct node↔box, so a running session
+survives the coordinator's absence — the node keeps driving the robot and its poll and
+heartbeat simply backoff-retry.
+
+The **serving stack itself is open** (`packages/server`) — a box you provision on the
+dashboard and a box you run yourself execute the same code, differing only in identity
+(a managed system key vs. your own `ilat_` key) and in who pays for the hardware.
+
+Episode recording happens through hosted sessions (ADR 0022), so collection requires an
+account; the client, node, server, and protocol are all Apache-2.0. Existing stock LeRobot
+datasets can be imported through the dashboard's HF import. What remains private is the
+platform around the boxes: provisioning and warm pools, the dataset/canonical store and
+merge pipeline, offline policy improvement, and the annotation stack.

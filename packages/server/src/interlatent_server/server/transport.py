@@ -43,6 +43,8 @@ from typing import AsyncIterator, Optional
 
 
 from ..box_status import report_status as _report_box_status
+from ..coordinator import CoordinatorNotConfigured, resolve
+from .sinks import DatasetSink, sink_from_metadata
 from ..protocol import messages_pb2 as pb
 from ..protocol import messages_pb2_grpc as pb_grpc
 from .chunk_buffer import ChunkBuffer, InMemoryChunkBuffer, StoredChunk
@@ -93,9 +95,19 @@ def _peek_policy_config(request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_API_BASE = os.environ.get(
-    "INTERLATENT_API_BASE", "https://interlatent.com/api/v1"
-)
+# Resolved lazily, not at import: a module-level os.environ read froze
+# whatever was set when this module first loaded, which is before
+# `interlatent-serve` exports the address it resolved from --coordinator.
+#
+# Returns "" rather than raising when nothing is configured. A box publishing
+# to a local directory or an S3 bucket never calls the coordinator at all, and
+# demanding an address it will not use would make a fully detached box refuse
+# to record.
+def _default_coordinator() -> str:
+    try:
+        return resolve()
+    except CoordinatorNotConfigured:
+        return ""
 
 
 @dataclass
@@ -146,8 +158,13 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         warmup_warning: Optional[str] = None,
         live_encode: bool = False,
         record_backpressure: bool = False,
+        dataset_sink: Optional["DatasetSink"] = None,
     ) -> None:
         self._buf = chunk_buffer or InMemoryChunkBuffer()
+        # Serve-level fallback destination. Per-session metadata wins:
+        # the coordinator owns the destination (ADR 0002) and the node
+        # forwards its block verbatim.
+        self._dataset_sink = dataset_sink
         self._sessions: dict[str, SessionState] = {}
         self._next_step: dict[str, int] = {}
         # Monotonic timestamp of the last RecordTick whose control_source
@@ -648,23 +665,26 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
         metadata: dict[str, str],
         context,
     ) -> Optional[SessionRecorder]:
-        """Return a recorder iff metadata opts in AND auth is present.
+        """Return a recorder iff metadata opts in, and auth is present *if
+        the destination needs it*.
 
-        Recording requires an API key (used for the post-rollout HTTP
-        upload back to the Interlatent backend). When the gRPC client
-        somehow reached us without ``x-api-key`` — i.e. when local-dev
-        is running without the auth wrapper — we silently disable
-        recording rather than crash inference.
+        Only the hosted inbox needs an API key — it is what authenticates the
+        upload. A local directory or an S3 bucket the operator gave us
+        credentials for needs nothing from us, and demanding a key there was
+        the last thing making account-free collection impossible. When the key
+        IS required and absent, disable recording rather than crash inference.
         """
         if not _truthy(metadata.get("record")):
             return None
 
+        sink = sink_from_metadata(metadata) or self._dataset_sink
         api_key = _api_key_from_context(context)
-        if not api_key:
+        if not api_key and (sink is None or sink.requires_api_key()):
             log.warning(
-                "Session %s requested recording but no x-api-key present; "
-                "disabling recorder. Pass the key via gRPC metadata so the "
-                "recorder can authenticate the inbox upload.",
+                "Session %s requested recording but no x-api-key present and "
+                "the destination is the hosted inbox; disabling recorder. "
+                "Pass the key via gRPC metadata, or configure a local/S3 "
+                "destination on your coordinator.",
                 session_id,
             )
             return None
@@ -701,8 +721,11 @@ class InferenceServicer(pb_grpc.InferenceServiceServicer):
             policy_uri=policy_uri,
             layer=layer,
             api_key=api_key,
-            api_base=metadata.get("api_base") or _DEFAULT_API_BASE,
+            api_base=metadata.get("api_base") or _default_coordinator(),
             live_encode=self._live_encode,
+            # Precedence: the coordinator's per-session block, then this
+            # box's own flags, then the hosted inbox.
+            sink=sink,
         )
         return SessionRecorder(working_dir, config)
 

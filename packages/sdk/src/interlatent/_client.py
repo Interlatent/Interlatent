@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
 import warnings
 from typing import NoReturn
 
 
+from ._coordinator import resolve
 from ._http import HTTPClient
 from ._resources import (
     EnvironmentsResource,
@@ -48,8 +48,6 @@ class Interlatent:
     episodes, routing).
     """
 
-    _BASE_URL = "https://interlatent.com"
-
     def __init__(
         self,
         *,
@@ -68,7 +66,7 @@ class Interlatent:
             )
         del db_path, fps  # accepted for signature compatibility only
         self._api_key = api_key
-        self._base_url = base_url or os.environ.get("INTERLATENT_API_BASE") or self._BASE_URL
+        self._base_url = resolve(base_url, purpose="client")
         self._http = HTTPClient(
             base_url=self._base_url,
             api_key=api_key,

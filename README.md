@@ -185,8 +185,10 @@ You can run servers off of your own GPUs or on cloud providers such as runpod or
 [docs/self-hosting.md](docs/self-hosting.md)), and start it with `interlatent-serve`. You can then start a session:
 
 ```bash
-interlatent gpus ls
-interlatent session start --node my-arm --gpu <gpu-addr> --policy lerobot/smolvla_base
+interlatent up               # run a coordinator here (or point at a hosted one)
+interlatent gpus ls          # GPU boxes it knows about
+interlatent nodes ls         # robot nodes paired to it
+interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base
 interlatent session stop <session-id>
 ```
 

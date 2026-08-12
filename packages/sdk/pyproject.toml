@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interlatent"
-version = "2.0.0"
+version = "3.0.0"
 description = "Interlatent SDK — one open interface to control robots: drive them, run policies, and collect data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -64,11 +64,19 @@ turbo = [
 ]
 
 # pip install 'interlatent[teleop-quic]'
-# In-browser teleop: the node dials the QUIC/WebTransport relay and consumes
-# joint-target datagrams (node/teleop/quic_channel.py). This is the ONLY teleop
-# transport — the old WebSocket path is gone — so a node that should accept
-# teleop needs this extra. Without aioquic, node/teleop/factory.py logs
-# "QUIC teleop unavailable" and disables teleop for the session.
+# Low-latency in-browser teleop path: the node dials the QUIC/WebTransport relay
+# and consumes joint-target datagrams (node/teleop/quic_channel.py). aioquic is
+# optional — only needed on nodes running the QUIC transport; the default WS
+# teleop path (node/teleop/channel.py) needs only `websockets` (a core dep).
+# `interlatent up` serving teleop itself: the vendored WebTransport relay plus
+# the short-lived self-signed certificate the browser pins. A coordinator
+# without these still runs; its teleop-token route just 404s, which turns
+# teleop off cleanly.
+teleop-relay = [
+  "aioquic>=1.3.0,<2",
+  "cryptography>=42",
+]
+
 teleop-quic = [
   # >=1.3: the video tee's stream-completion check reads
   # QuicConnection._streams (validated on 1.3.x; see quic teleop ADR).

@@ -1,15 +1,10 @@
 # Interlatent — Context
 
-The project's vocabulary. Structure is in [ARCHITECTURE.md](ARCHITECTURE.md); the
-mental model is in [docs/concepts.md](docs/concepts.md).
-
-The shape in one paragraph: one **adapter** per robot family puts every supported
-robot behind the same **action interface**, which is driven either directly and
-offline by a **Robot** handle, or on a **Session**'s behalf by a **Node** — the
-[Interlatent dashboard](https://interlatent.com) assigns the session and provisions
-a **GPU pod**, the node dials the pod, and the pod loads policies and serves action
-chunks over the DRTC gRPC protocol. Both ends of that protocol live in this repo:
-`packages/sdk` is the client, `packages/server` is the pod.
+The robot-side stack for running robot policies on GPUs: a **Coordinator**
+assigns sessions and names a **GPU pod** per session, a **Node** drives the robot
+and connects to the pod, and the pod loads policies and serves action chunks over
+the DRTC gRPC protocol. The `interlatent` CLI manages nodes, pods and sessions
+against a coordinator — the hosted dashboard or one you run yourself.
 
 ## Language
 
@@ -19,12 +14,29 @@ action chunks. Identified by a **policy URI**.
 _Avoid_: model (overloaded — used for the recorded-dataset "Model layer" too).
 
 **Node**:
-The long-running `interlatent-node` daemon on the robot. It pairs to the account
-with an API key, polls the dashboard, and converges to whatever inference session
-the dashboard assigns it. The DRTC GPU endpoint is provided per-session by the
-dashboard. _Avoid_: calling this a "coordinator" — there is no self-hosted control
-plane; the dashboard is the control plane (the *compute* may be self-hosted — see
-**GPU pod** — but session assignment always comes from the dashboard).
+The long-running `interlatent-node` daemon on the robot. It pairs to an account
+with an API key, long-polls its **Coordinator**, and converges to whatever
+inference session it is assigned. The DRTC GPU endpoint is provided per-session
+by the coordinator. _Avoid_: saying the node polls "the dashboard" — the
+dashboard is one coordinator, and the node cannot tell which one it has.
+
+**Coordinator**:
+Whatever service assigns the work: it pairs **Nodes**, tracks **GPU pods**,
+brokers **Sessions** and teleop sessions, and answers the long-poll each node
+converges against. The hosted [Interlatent dashboard](https://interlatent.com)
+is one implementation; a self-hosted one runs from the `interlatent` CLI. These
+are two *deployments of one contract* — the **Coordinator protocol**
+(`docs/coordinator-protocol.md`, frozen as `interlatent.coordinator.protocol`)
+— and emphatically **not two modes**: the SDK contains no branch on which one it
+is talking to, because a fork like that is what collapsed the 2026-06 stack
+(ADR 0038, superseding 0023). A coordinator address is required everywhere;
+there is no hosted default.
+It is **never in the data path** — DRTC is direct node↔pod — so a running
+session survives its absence, and stopping a session means *unassigning* it, so
+the node's own teardown runs `CloseSession` (the only trigger for the dataset
+build; an unclosed recording is discarded). _Avoid_: "the control plane" as if
+there were one global one; a deployment has exactly one coordinator, the world
+has many.
 
 **Session**:
 A live binding of a node (or a hand-written `connect_drtc()` loop) to a policy URI
@@ -34,12 +46,12 @@ DRTC link and triggers any recorded dataset to be built/published.
 
 **GPU pod**:
 A GPU box that loads a policy and serves action chunks over the DRTC gRPC
-protocol. Two flavors, one protocol: **managed** pods the dashboard provisions
-and warm-pools, and **self-hosted** pods — your own hardware running
+protocol. Two flavors, one protocol: **managed** pods a hosted **Coordinator**
+provisions and warm-pools, and **self-hosted** pods — your own hardware running
 `interlatent-serve` from the `interlatent-server` dist (`packages/server/`),
-registered to your account with your API key (see `docs/self-hosting.md`).
-Either way the dashboard assigns sessions and the node dials the pod directly.
-List the pods available to your account with `interlatent gpus ls`.
+registered to whichever coordinator you point it at (see
+`docs/self-hosting.md`). Either way the coordinator assigns sessions and the
+node dials the pod directly. List them with `interlatent gpus ls`.
 
 **Preflight**:
 A non-destructive connectivity check (`interlatent-preflight`) that opens a real
@@ -329,10 +341,12 @@ link. See [docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md).
 
 ## Relationships
 
-- A **Node** is paired once and may be assigned many **Sessions** over its life.
+- A **Node** is paired once, to exactly one **Coordinator**, and may be assigned
+  many **Sessions** over its life.
 - A **Session** pins one **policy URI** on one **GPU pod** for its lifetime.
-- The **dashboard** assigns sessions and provisions the GPU pod, returning the
-  DRTC endpoint to the node/client per-session.
+- The **Coordinator** assigns sessions and returns the DRTC endpoint to the
+  node/client per-session. When that coordinator is the hosted dashboard it also
+  provisions the pod; a self-hosted one brokers pods you registered yourself.
 
 ## Flagged ambiguities
 

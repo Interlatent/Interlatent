@@ -689,6 +689,28 @@ export function VRTeleopOverlay({
               applyMapperHints(spec as unknown as Record<string, unknown>);
               maybeReady();
             },
+            // Present only against a self-hosted coordinator; the hosted relay
+            // has a real certificate and needs no pinning.
+            serverCertificateHashes: tok.server_certificate_hashes ?? undefined,
+            // Lets the socket survive a relay restart. It re-mints rather than
+            // reusing the original token, so a relay that moved (or rotated
+            // its certificate) is picked up rather than dialled at a stale
+            // address forever.
+            // Only offered when the caller gave us a minter; without one a
+            // reconnect could only reuse a token the relay may have dropped,
+            // so the socket keeps its old close-once behaviour.
+            remint: mintToken && (async () => {
+              const fresh = await mintToken();
+              if (!fresh.webtransport_url) {
+                throw new Error('no webtransport_url on re-mint');
+              }
+              return {
+                url: fresh.webtransport_url,
+                token: fresh.token,
+                serverCertificateHashes:
+                  fresh.server_certificate_hashes ?? undefined,
+              };
+            }),
           });
         } catch (e) {
           setStatus('error');

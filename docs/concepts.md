@@ -32,9 +32,11 @@ in [CONTEXT.md](../CONTEXT.md).
 
 ## Sessions
 
-A robot opens a **session** against a GPU pod (`OpenSession`), binding it to a policy URI
-and metadata (language `task`, `fps`, optional recording). The dashboard provisions the
-pod, keeps policies warm-pooled, and returns the endpoint per-session.
+A robot opens a **session** against a GPU box (`OpenSession`) binding it to a policy URI and
+metadata (language `task`, `fps`, optional recording). The coordinator names the box and
+returns its endpoint per-session. A hosted coordinator additionally provisions the box and
+keeps policies warm-pooled, which is why a hosted session starts inference quickly; a
+self-hosted one brokers boxes you registered yourself.
 
 ## Observations and actions on the wire
 
@@ -46,19 +48,22 @@ timestamped per control step.
 ## Environments and episodes
 
 An **environment** is a label for one robot/policy collection (e.g. `"so101-kitchen"`); an
-**episode** is one rollout. On Interlatent Cloud they're first-class objects: the
-environment owns a canonical hosted LeRobot dataset accumulated across sessions, and
-episodes get a dashboard viewer and analysis.
+**episode** is one rollout. Every coordinator owns environments — they key the dataset a
+session records into. On Interlatent Cloud they are additionally first-class objects with a
+canonical hosted dataset accumulated across sessions, an episode viewer, and analysis.
 
 ## Datasets
 
 Everything records to **LeRobot v3.0 datasets** — parquet frames + MP4 video + JSON
-metadata. Recording is **streaming-first**: your node JPEG-encodes each camera frame per
-control tick and streams `RecordTick`s to the hosted recorder (the session's GPU pod, or a
-teleop recorder pod), which persists every tick and builds the dataset at session close.
-The finished dataset goes to a **destination** configured on the dashboard: the hosted
-inbox, a local directory, or an S3-compatible bucket. The local/S3 destinations
-*merge-on-stop* — each session is appended into one flat LeRobot dataset.
+metadata. Recording is **streaming-first**:
+your node JPEG-encodes each camera frame per control tick and streams `RecordTick`s to
+the hosted recorder (the session's GPU pod, or a teleop recorder pod), which persists
+every tick and builds the dataset at session close. The finished dataset is published to a **destination**: the hosted inbox, a local
+directory, or an S3-compatible bucket. The local and S3 destinations *merge-on-stop* —
+each session is appended into one flat, training-ready LeRobot dataset — and need no
+account. Configure it once on your coordinator (`interlatent config --output-dir …`),
+which stamps it onto every session it issues; the node forwards that block verbatim to
+the box. `interlatent-serve --output-dir` / `--s3-uri` sets a per-box fallback.
 
 The uplink is lossless by design: ticks journal to a disk spool on the node and are
 deleted only after the server acknowledges them, so a link drop or node crash never
@@ -67,28 +72,51 @@ removed in SDK 2.0.0 —
 [ADR 0018](adr/0018-collection-verbs-removed-streaming-only.md); datasets already on disk
 enter the platform through the dashboard's HF import.
 
+## The coordinator
+
+A **coordinator** is whatever service assigns work: it pairs nodes, tracks GPU boxes, brokers
+inference and teleop sessions, and answers the long-poll each node converges against. The
+[Interlatent dashboard](https://interlatent.com) is one; `interlatent up` runs another on your
+own machine. They are two deployments of **one contract** — see
+[the coordinator protocol](coordinator-protocol.md) — and the SDK never asks which one it is
+talking to.
+
+A coordinator address is required everywhere (`--coordinator`, `INTERLATENT_COORDINATOR`).
+There is no default: silently defaulting to a hosted control plane is how a self-hosted fleet
+ends up quietly phoning home.
+
+A coordinator is never in the data path. DRTC is direct node↔box and teleop is
+browser↔relay↔node, so a running session survives the coordinator's absence — the node keeps
+driving the robot and its poll just backoff-retries.
+
 ## The node
 
-`interlatent-node` pairs a robot machine to your account
-(`interlatent-node pair --name <name> --api-key ilat_…`), then polls the
-[dashboard](https://interlatent.com) and converges to whatever inference session is
-assigned to it (policy, cameras, DRTC endpoint). It is the managed counterpart of
-hand-writing the `connect_drtc()` loop, which drives its own session —
-[examples/03](../examples/03_run_on_so101.py).
+`interlatent-node` is a long-running daemon for robots that should be remotely operable: it
+pairs the machine to a coordinator (`interlatent-node pair --name <name> --coordinator <url>
+--api-key …`), long-polls it, and converges to whatever session is assigned to it (policy,
+cameras). The DRTC GPU endpoint is provided per-session by the coordinator. The node is the
+managed counterpart of hand-writing the `connect_drtc()` loop — it relies on a coordinator for
+session assignment, while the loop in [examples/03](../examples/03_run_on_so101.py) drives a
+session itself.
 
-## The dashboard CLI
+## The CLI
 
-`interlatent` is a thin client over the dashboard API — it is **not** a daemon. Authenticate
-with `--api-key` or `INTERLATENT_API_KEY` (`ilat_…`); the base URL defaults to
-https://interlatent.com (override with `--api-base` / `INTERLATENT_API_BASE`). Commands:
+`interlatent` is a session manager. It can **run** a coordinator, and it is a client of one:
 
-- `interlatent gpus ls` — GPU pods available to your account
-- `interlatent nodes ls` — robot nodes paired to your account
-- `interlatent session ls | start | stop` — e.g.
-  `interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_base`
-- `interlatent env create --slug <slug>` — create an environment
-- `interlatent behavior ls | validate | run` — offline named behaviors, no account needed
-  (see [behaviors.md](behaviors.md))
+```bash
+interlatent up                       # start a coordinator here; prints an operator key
+interlatent gpu add --name rig --url 10.0.0.7:50051
+interlatent gpus ls                  # GPU boxes
+interlatent nodes ls                 # robot nodes
+interlatent session start --node my-arm --gpu rig --policy lerobot/smolvla_base
+interlatent session stop <session-id>
+interlatent config --output-dir /data/lerobot   # where recordings land
+interlatent down                     # refuses while a session is live
+```
 
-Stopping a session closes the DRTC link, which is what triggers the pod to build and publish
-any recorded dataset.
+The same commands drive the hosted dashboard with `--coordinator https://interlatent.com` —
+it is one protocol, so there is no second set of verbs.
+
+Stopping a session **unassigns** it. That is not a detail: the node's own teardown is what
+sends `CloseSession`, which is the only trigger for the dataset build, and a box discards any
+recording whose session never closed. Stopping by killing something loses the episode.

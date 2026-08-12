@@ -348,6 +348,8 @@ class LeRobotRebuilder:
         env_slug: str,
         repo_id: Optional[str] = None,
         vcodec: Optional[str] = None,
+        force_control_source: bool = False,
+        measured_fps: Optional[float] = None,
     ) -> None:
         # ``root`` must NOT yet exist. ``LeRobotDataset.create()`` calls
         # ``root.mkdir(exist_ok=False)`` internally and will raise
@@ -359,6 +361,16 @@ class LeRobotRebuilder:
         # ``repo_id`` is required by LeRobotDataset.create even when we
         # never push to the Hub. Synthesize a stable per-env identifier.
         self.repo_id = repo_id or f"interlatent/{(env_slug or 'session').strip('/')}"
+        # When True, always emit the ``control_source`` column even if no
+        # teleop occurred this session. Merge-on-stop sinks aggregate sessions
+        # into one dataset and lerobot's ``aggregate_datasets`` rejects
+        # mismatched ``features``, so a schema that varies with whether a human
+        # happened to intervene makes the merge fail on the second session.
+        self.force_control_source = bool(force_control_source)
+        # The real capture rate, stamped into info["interlatent"] for reference
+        # when the dataset ``fps`` is pinned to the declared rate so merges stay
+        # consistent. None = not recorded.
+        self.measured_fps = measured_fps
         # None keeps lerobot's own default ("libsvtav1"). The DRTC recorder
         # (Modal's gVisor-sandboxed teleop-record pod) passes "h264": SVT-AV1
         # tries to set worker-thread scheduling priority
@@ -445,7 +457,7 @@ class LeRobotRebuilder:
 
         failure_types: list[str] = []
         metric_names: list[str] = []
-        has_control_source = False
+        has_control_source = bool(self.force_control_source)
         for eid in episode_uuids:
             for row in rows_by_episode[eid]:
                 ft = row.failure_type
@@ -686,6 +698,10 @@ class LeRobotRebuilder:
             "task": self.task,
             "metric_names": list(metric_names),
         }
+        if self.measured_fps is not None:
+            # The dataset's ``fps`` is pinned to the declared rate so sessions
+            # stay mergeable; the rate actually captured is preserved here.
+            info["interlatent"]["measured_fps"] = float(self.measured_fps)
 
         with open(info_path, "w") as fh:
             json.dump(info, fh, indent=2)

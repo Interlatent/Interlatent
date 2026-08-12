@@ -40,9 +40,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from .coordinator import api_v1, resolve
+
 log = logging.getLogger("interlatent-serve")
 
-DEFAULT_API_BASE = "https://interlatent.com"
 BOX_ID_PATH = Path.home() / ".interlatent" / "box-id"
 
 
@@ -131,11 +132,11 @@ def _register(
     gpu_count: int = 1,
     vram_gb: int | None = None,
     warmup_policy: str | None,
-) -> None:
-    """One dashboard-registration handshake. Raises SystemExit with an
+) -> str | None:
+    """One registration handshake; returns a box-scoped key if issued. Raises SystemExit with an
     actionable message on failure — serving an unregistered box that the
     user *asked* to register would just hide the problem."""
-    url = f"{api_base.rstrip('/')}/api/v1/compute/boxes/register"
+    url = f"{api_v1(api_base)}/compute/boxes/register"
     payload = {
         "box_id": box_id,
         "name": name,
@@ -164,13 +165,14 @@ def _register(
             pass
         raise SystemExit(
             f"Box registration failed (HTTP {e.code}): {detail or '<no body>'}\n"
-            "Check INTERLATENT_API_KEY (an ilat_... key from the dashboard) "
-            "and --api-base."
+            "Check INTERLATENT_API_KEY (an ilop_ operator key from "
+            "`interlatent up`, or an ilat_ key from the dashboard) and "
+            "--coordinator."
         )
     except Exception as e:
         raise SystemExit(
             f"Box registration failed: {e}\n"
-            f"Could not reach {url} — check the network and --api-base."
+            f"Could not reach {url} — check the network and --coordinator."
         )
     # Log the endpoint verbatim: this is the address the dashboard hands
     # nodes, and the failure it hides is silent on this side. A bare
@@ -185,6 +187,11 @@ def _register(
         "--advertise-address host:external-port.",
         body.get("name"), box_id, endpoint, body.get("status"),
     )
+    # A self-hosted coordinator mints a box-scoped key at registration; using
+    # it for status reports and the warmup-target fetch means a compromised
+    # box cannot act as the operator. The hosted dashboard issues none, and
+    # the box keeps presenting the key it registered with.
+    return (body.get("key") or "").strip() or None
 
 
 def _serve_argv(args) -> list[str]:
@@ -207,7 +214,7 @@ def main() -> None:
     p = argparse.ArgumentParser(
         prog="interlatent-serve",
         description="Self-hosted Interlatent DRTC policy server: register "
-        "this GPU machine with the dashboard, then serve.",
+        "this GPU machine with a coordinator, then serve.",
     )
     p.add_argument(
         "--api-key",
@@ -216,9 +223,11 @@ def main() -> None:
         "registers, reports status, and gates its gRPC port with it.",
     )
     p.add_argument(
+        "--coordinator",
         "--api-base",
-        default=os.environ.get("INTERLATENT_API_BASE", "") or DEFAULT_API_BASE,
-        help=f"Backend base URL (default {DEFAULT_API_BASE}).",
+        dest="coordinator",
+        default=None,
+        help="Coordinator base URL, e.g. http://10.0.0.5:8900 or https://interlatent.com. Env: INTERLATENT_COORDINATOR.",
     )
     p.add_argument(
         "--advertise-address",
@@ -271,11 +280,15 @@ def main() -> None:
         serve_gpu.main()
         return
 
+    coordinator = resolve(args.coordinator)
+
     if not args.api_key.strip():
         raise SystemExit(
-            "An API key is required to register with the dashboard: pass "
-            "--api-key or set INTERLATENT_API_KEY (create one on the "
-            "dashboard). Use --no-register for a purely local run."
+            "An API key is required to register with a coordinator: pass "
+            "--api-key or set INTERLATENT_API_KEY. Against a self-hosted "
+            "coordinator this is the operator key `interlatent up` printed; "
+            "against the hosted dashboard it is your ilat_ key. Use "
+            "--no-register for a purely local run."
         )
     if not args.advertise_address.strip():
         raise SystemExit(
@@ -293,8 +306,8 @@ def main() -> None:
     gpu_count, vram_gb = _detect_gpu_capacity()
     log.info("GPU: %s x%d (%s GB each)", gpu_model, gpu_count, vram_gb or "?")
 
-    _register(
-        api_base=args.api_base,
+    box_key = _register(
+        api_base=coordinator,
         api_key=args.api_key.strip(),
         box_id=box_id,
         name=args.name,
@@ -308,8 +321,13 @@ def main() -> None:
     # Hand the owner-key identity to serve_gpu / box_status / the recorder
     # via the environment — credentials.resolve() picks it up everywhere.
     os.environ["INTERLATENT_BOX_ID"] = box_id
-    os.environ["INTERLATENT_API_BASE"] = args.api_base
-    os.environ["INTERLATENT_API_KEY"] = args.api_key.strip()
+    os.environ["INTERLATENT_API_BASE"] = coordinator
+    os.environ["INTERLATENT_COORDINATOR"] = coordinator
+    # Prefer the box-scoped key when the coordinator issued one: it is enough
+    # for status reports and the warmup-target fetch, so a compromised box
+    # cannot act as the operator. The hosted dashboard issues none, and the
+    # box keeps presenting the key it registered with.
+    os.environ["INTERLATENT_API_KEY"] = box_key or args.api_key.strip()
     os.environ["INTERLATENT_ADVERTISE_ADDRESS"] = endpoint
     # Never inherit a stray system secret into the BYO identity.
     os.environ.pop("INTERLATENT_ADMIN_KEY", None)
