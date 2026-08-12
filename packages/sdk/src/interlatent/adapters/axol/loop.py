@@ -42,7 +42,6 @@ def control_loop(
     teleop_channel: Any = None,  # accepted, dropped (no teleop for Axol yet)
     node_id: Optional[str] = None,
     image_resize: Optional[int] = None,
-    bypass_key: Optional[str] = None,
     # False for teleop-recording assignments (no policy loaded): never
     # client.step(); every tick holds pose and still records. Declaring it
     # explicitly matters — while it fell into ``**_`` this loop ran inference
@@ -120,7 +119,6 @@ def control_loop(
         # No teleop_profile: Axol reports feature names only (ADR 0003).
         return _ctrl._report_robot_features(
             api_base, node_id, api_key, state_keys, act_keys,
-            bypass_key=bypass_key,
         )
 
     try:

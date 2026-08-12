@@ -1,9 +1,8 @@
 """interlatent-server — the open-source Interlatent DRTC policy server.
 
-The same server that powers Interlatent's hosted GPU boxes, packaged so
-you can run it on a GPU machine of your own: `interlatent-serve`
-registers the box with the Interlatent dashboard (your API key, your
-hardware) and serves policies to your robot nodes over native gRPC.
+Run it on a GPU machine of your own: `interlatent-serve` registers the
+box with the coordinator you run (your key, your hardware) and serves
+policies to your robot nodes over native gRPC.
 
 Layout:
   - :mod:`interlatent_server.cli`         — the ``interlatent-serve`` entry point

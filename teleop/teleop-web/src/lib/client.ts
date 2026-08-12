@@ -1,23 +1,20 @@
 /**
  * Minimal typed API client for the standalone teleop webapp.
  *
- * Zero dependencies — plain fetch. Auth is a key issued by whichever
- * coordinator you point this at ('ilat_…' from the hosted dashboard, the
- * 'ilop_…' operator key `interlatent up` prints), sent as `x-api-key` on
- * every request. The key and the coordinator address live in localStorage
- * (set from the app's Settings panel):
+ * Zero dependencies — plain fetch. Auth is the 'ilop_…' operator key the
+ * coordinator you point this at printed at `interlatent up`, sent as
+ * `x-api-key` on every request. The key and the coordinator address live
+ * in localStorage (set from the app's Settings panel):
  *
  *   interlatent.coordinator — required; no default (see getApiBase below).
  *                             The pre-rename `interlatent.apiBase` is still
  *                             read once so an operator need not re-enter it.
  *   interlatent.apiKey      — required for every call
  *
- * The response types below are copied from Interlatent-Main
- * site/src/lib/api.ts @ f7e4bfb6 (2026-07-30) — TeleopIkHints and
- * TeleopTokenOut verbatim (the copied VRTeleopOverlay imports
- * TeleopTokenOut from here); InferenceSessionOut and TeleopRecordingOut
- * are deliberately loose subsets (only the fields this UI reads, plus an
- * index signature) so backend additions never break the app.
+ * The response types below mirror the coordinator's teleop payloads.
+ * InferenceSessionOut and TeleopRecordingOut are deliberately loose subsets
+ * (only the fields this UI reads, plus an index signature) so additions on
+ * the coordinator side never break the app.
  */
 
 // ---------------------------------------------------------------------------
@@ -27,18 +24,13 @@
 export const API_BASE_STORAGE_KEY = 'interlatent.coordinator';
 const LEGACY_API_BASE_KEY = 'interlatent.apiBase';
 export const API_KEY_STORAGE_KEY = 'interlatent.apiKey';
-/** Where the hosted dashboard serves the coordinator protocol.
- *  Offered as a suggestion in the settings panel; never a default —
- *  this app talks to whatever coordinator you point it at. */
-export const HOSTED_COORDINATOR = 'https://interlatent.com';
-
 /** The configured coordinator, or '' when none has been set.
  *
- *  There is no default. This app is a client of whatever coordinator you run —
- *  a hosted dashboard or `interlatent up` on your own LAN — and silently
- *  defaulting to one of them is how a self-hosted deployment ends up quietly
- *  talking to somebody else's control plane. `hasCoordinator()` lets the UI
- *  ask for one instead of failing at the first request. */
+ *  There is no default. This app is a client of the coordinator you run —
+ *  `interlatent up` on your own LAN or wherever you deployed it — and
+ *  silently defaulting to an address is how a self-hosted deployment ends up
+ *  quietly talking to somebody else's control plane. `hasCoordinator()` lets
+ *  the UI ask for one instead of failing at the first request. */
 export function getApiBase(): string {
   const stored =
     localStorage.getItem(API_BASE_STORAGE_KEY) ??
@@ -47,7 +39,7 @@ export function getApiBase(): string {
     localStorage.getItem(LEGACY_API_BASE_KEY);
   const base = (stored ?? '').trim();
   if (!base) return '';
-  return resolveApiBase(base.replace(/\/+$/, ''));
+  return base.replace(/\/+$/, '');
 }
 
 /** False until the operator has told us where their coordinator is. */
@@ -55,27 +47,21 @@ export function hasCoordinator(): boolean {
   return getApiBase() !== '' || isDevProxy();
 }
 
+/** True under `vite dev` with no coordinator set: calls go same-origin and
+ *  vite.config.ts proxies `/api` to TELEOP_API_TARGET server-side, so the UI
+ *  must not stop to ask for an address. Blank *is* the mechanism — there is no
+ *  sentinel address to type, and no default target: set TELEOP_API_TARGET to
+ *  say which coordinator dev proxies to.
+ *
+ *  The proxy is what keeps dev working against a coordinator that has narrowed
+ *  `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which would otherwise
+ *  fail the dev origin's preflight with `400 Disallowed CORS origin`. A base
+ *  that *is* set is called directly, and takes the CORS rules as they come. */
 function isDevProxy(): boolean {
   const stored =
     localStorage.getItem(API_BASE_STORAGE_KEY) ??
     localStorage.getItem(LEGACY_API_BASE_KEY);
-  return Boolean(import.meta.env.DEV && stored && stored.trim());
-}
-
-/**
- * Under `vite dev` we return the empty string instead of the hosted base — a
- * same-origin URL that the dev server's /api proxy (vite.config.ts) forwards to
- * the same backend, server-side, where CORS does not apply. A base pointing
- * anywhere else (self-hosted backend) is left alone.
- *
- * The hosted deployment's teleop CORS policy now defaults to allowing any
- * origin on the paths this app calls, so a direct dev-origin call would very
- * likely work too — but the proxy keeps dev working against a deployment that
- * has narrowed `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which
- * would otherwise fail the preflight with `400 Disallowed CORS origin`.
- */
-function resolveApiBase(base: string): string {
-  return import.meta.env.DEV && base === HOSTED_COORDINATOR ? '' : base;
+  return Boolean(import.meta.env.DEV && !(stored ?? '').trim());
 }
 
 export function getApiKey(): string {
@@ -157,7 +143,7 @@ async function toError(res: Response): Promise<Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Types — copied from site/src/lib/api.ts @ f7e4bfb6 (2026-07-30)
+// Types — the coordinator's teleop response payloads
 // ---------------------------------------------------------------------------
 
 export interface TeleopIkHints {
@@ -198,7 +184,7 @@ export interface TeleopTokenOut {
   server_certificate_hashes?: Array<{ algorithm: string; value: string }> | null;
 }
 
-/** Loose subset of the dashboard's InferenceSessionOut — only what this
+/** Loose subset of the coordinator's InferenceSessionOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped |
  *  provision_failed. */
 export interface InferenceSessionOut {
@@ -211,7 +197,7 @@ export interface InferenceSessionOut {
   [key: string]: unknown;
 }
 
-/** Loose subset of the dashboard's TeleopRecordingOut — only what this
+/** Loose subset of the coordinator's TeleopRecordingOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped | failed. */
 export interface TeleopRecordingOut {
   id: string;
@@ -339,7 +325,7 @@ export function mintRecordingTeleopToken(recordingId: string): Promise<TeleopTok
 // ---------------------------------------------------------------------------
 
 /**
- * Drop-in replacement for the dashboard's react-query `useTeleopToken()`
+ * Mints a teleop token via the coordinator, replacing the react-query `useTeleopToken()`
  * mutation hook (site/src/lib/api.ts) with the one call shape the overlay
  * uses: `mint.mutate({ sessionId }, { onSuccess, onError })`. Plain fetch,
  * no react-query. (The app shell always passes an explicit `mintToken`

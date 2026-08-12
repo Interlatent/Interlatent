@@ -1,29 +1,29 @@
-"""``interlatent-serve`` — run a self-hosted DRTC policy server.
+"""``interlatent-serve`` — run a DRTC policy server on your own GPU.
 
-The self-hosted counterpart of a dashboard-provisioned GPU box: the
-operator brings the GPU, the Interlatent dashboard stays the control
-plane. On start the CLI
+The operator brings the GPU; the coordinator they run (``interlatent up``)
+stays the control plane. On start the CLI
 
 1. mints (once) and persists a box UUID at ``~/.interlatent/box-id``,
 2. detects the GPU model,
-3. registers the box with the dashboard —
+3. registers the box with the coordinator —
    ``POST /api/v1/compute/boxes/register`` authenticated with the
-   operator's own ``ilat_`` API key — so it appears on the Compute page
-   as a launchable self-hosted box, and
+   operator key that coordinator minted (``ilop_...``) — so it becomes a
+   launchable box in ``interlatent gpus ls``, and
 4. execs the standard :mod:`interlatent_server.serve_gpu` server with
    the owner-key identity wired in (warmup-target fetch, status
    reports, and the default-on owner-checked RPC auth all use it).
 
-The box only ever dials *out* to the backend; nodes dial *in* to the
+The box only ever dials *out* to the coordinator; nodes dial *in* to the
 gRPC port at ``--advertise-address``. Registration is idempotent: a
 restart re-registers the same box row instead of orphaning a new one.
 
 Typical run (Docker image or bare metal):
 
-    INTERLATENT_API_KEY=ilat_... interlatent-serve \\
+    INTERLATENT_API_KEY=ilop_... interlatent-serve \\
+        --coordinator http://10.0.0.5:8900 \\
         --advertise-address 203.0.113.7 --port 50051
 
-``--no-register`` skips the dashboard entirely (pure-local smoke test —
+``--no-register`` skips registration entirely (pure-local smoke test —
 equivalent to running ``python -m interlatent_server.serve_gpu``).
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ BOX_ID_PATH = Path.home() / ".interlatent" / "box-id"
 def _resolve_box_id(override: str) -> str:
     """A stable per-machine box UUID. ``INTERLATENT_BOX_ID``/--box-id
     overrides; otherwise mint once and persist so restarts re-register
-    the same dashboard row (the backend upserts on it)."""
+    the same coordinator row (the coordinator upserts on it)."""
     if override.strip():
         return override.strip()
     if BOX_ID_PATH.exists():
@@ -65,7 +65,7 @@ def _resolve_box_id(override: str) -> str:
 
 
 def _detect_gpu_model() -> str:
-    """Human GPU label for the dashboard card. Best-effort, never raises."""
+    """Human GPU label for `interlatent gpus ls`. Best-effort, never raises."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -90,7 +90,7 @@ def _detect_gpu_capacity() -> tuple[int, int | None]:
     """``(gpu_count, vram_gb)`` for this box. Best-effort, never raises.
 
     ``gpu_model`` cannot carry this: it is ``nvidia-smi``'s first line only, so
-    a 2xH100 box and a 1xH100 box have always looked identical to the backend.
+    a 2xH100 box and a 1xH100 box have always looked identical to the coordinator.
     World-action models need at least 2 GPUs (ADR 0037, platform repo), and without a real
     count the launch gate can only fail late — the session opens, the sidecar
     dies at ``torchrun`` spawn, and the operator sees a dead process instead of
@@ -165,32 +165,30 @@ def _register(
             pass
         raise SystemExit(
             f"Box registration failed (HTTP {e.code}): {detail or '<no body>'}\n"
-            "Check INTERLATENT_API_KEY (an ilop_ operator key from "
-            "`interlatent up`, or an ilat_ key from the dashboard) and "
-            "--coordinator."
+            "Check INTERLATENT_API_KEY (the ilop_ operator key "
+            "`interlatent up` printed) and --coordinator."
         )
     except Exception as e:
         raise SystemExit(
             f"Box registration failed: {e}\n"
             f"Could not reach {url} — check the network and --coordinator."
         )
-    # Log the endpoint verbatim: this is the address the dashboard hands
+    # Log the endpoint verbatim: this is the address the coordinator hands
     # nodes, and the failure it hides is silent on this side. A bare
     # --advertise-address gets --port appended, which is the CONTAINER's
     # port — wrong whenever a provider proxies an external port to it
     # (RunPod's TCP proxy, a NAT forward). The box serves happily, the
     # node gets ECONNREFUSED against a port nobody listens on.
     log.info(
-        "Registered self-hosted box %r (%s) at %s — status %s on the "
-        "Compute page. Nodes will dial that address verbatim; if your "
-        "provider proxies an external port, pass it as "
-        "--advertise-address host:external-port.",
+        "Registered box %r (%s) at %s — status %s. Nodes will dial that "
+        "address verbatim; if your provider proxies an external port, pass "
+        "it as --advertise-address host:external-port.",
         body.get("name"), box_id, endpoint, body.get("status"),
     )
-    # A self-hosted coordinator mints a box-scoped key at registration; using
-    # it for status reports and the warmup-target fetch means a compromised
-    # box cannot act as the operator. The hosted dashboard issues none, and
-    # the box keeps presenting the key it registered with.
+    # A coordinator mints a box-scoped key at registration; using it for
+    # status reports and the warmup-target fetch means a compromised box
+    # cannot act as the operator. A coordinator that issues none leaves the
+    # box presenting the key it registered with.
     return (body.get("key") or "").strip() or None
 
 
@@ -213,31 +211,33 @@ def _serve_argv(args) -> list[str]:
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="interlatent-serve",
-        description="Self-hosted Interlatent DRTC policy server: register "
-        "this GPU machine with a coordinator, then serve.",
+        description="Interlatent DRTC policy server: register this GPU "
+        "machine with your coordinator, then serve.",
     )
     p.add_argument(
         "--api-key",
         default=os.environ.get("INTERLATENT_API_KEY", ""),
-        help="Your ilat_ API key (env INTERLATENT_API_KEY). The box "
-        "registers, reports status, and gates its gRPC port with it.",
+        help="The operator key `interlatent up` printed, ilop_... (env "
+        "INTERLATENT_API_KEY). The box registers, reports status, and "
+        "gates its gRPC port with it.",
     )
     p.add_argument(
         "--coordinator",
         "--api-base",
         dest="coordinator",
         default=None,
-        help="Coordinator base URL, e.g. http://10.0.0.5:8900 or https://interlatent.com. Env: INTERLATENT_COORDINATOR.",
+        help="Coordinator base URL, e.g. http://10.0.0.5:8900. "
+        "Env: INTERLATENT_COORDINATOR.",
     )
     p.add_argument(
         "--advertise-address",
         default=os.environ.get("INTERLATENT_ADVERTISE_ADDRESS", ""),
         help="host[:port] your robot nodes can reach this machine at "
         "(public IP, LAN IP, or VPN address). Required to register — "
-        "the dashboard hands this address to nodes.",
+        "the coordinator hands this address to nodes.",
     )
     p.add_argument("--name", default=socket.gethostname(),
-                   help="Display name on the Compute page (default: hostname).")
+                   help="Display name in `interlatent gpus ls` (default: hostname).")
     p.add_argument("--box-id", default=os.environ.get("INTERLATENT_BOX_ID", ""),
                    help="Override the persisted box UUID (advanced).")
     p.add_argument("--host", default="0.0.0.0")
@@ -246,8 +246,8 @@ def main() -> None:
         "--warmup-policy",
         default=os.environ.get("DRTC_WARMUP_POLICY", ""),
         help="Optional HF repo / local path to pre-warm when no env is "
-        "attached in the dashboard yet. Once an env IS attached, the "
-        "backend's warmup target wins.",
+        "attached to this box yet. Once an env IS attached, the "
+        "coordinator's warmup target wins.",
     )
     p.add_argument(
         "--warmup-image-keys",
@@ -263,7 +263,7 @@ def main() -> None:
     )
     p.add_argument(
         "--no-register", action="store_true",
-        help="Skip dashboard registration (pure-local smoke test).",
+        help="Skip coordinator registration (pure-local smoke test).",
     )
     args = p.parse_args()
 
@@ -285,16 +285,15 @@ def main() -> None:
     if not args.api_key.strip():
         raise SystemExit(
             "An API key is required to register with a coordinator: pass "
-            "--api-key or set INTERLATENT_API_KEY. Against a self-hosted "
-            "coordinator this is the operator key `interlatent up` printed; "
-            "against the hosted dashboard it is your ilat_ key. Use "
-            "--no-register for a purely local run."
+            "--api-key or set INTERLATENT_API_KEY. This is the operator key "
+            "(ilop_...) that `interlatent up` printed. Use --no-register "
+            "for a purely local run."
         )
     if not args.advertise_address.strip():
         raise SystemExit(
             "--advertise-address (or INTERLATENT_ADVERTISE_ADDRESS) is "
             "required: it is the address your robot nodes dial, and the "
-            "dashboard hands it to them verbatim. Use this machine's "
+            "coordinator hands it to them verbatim. Use this machine's "
             "public/LAN/VPN IP, e.g. --advertise-address 203.0.113.7"
         )
     endpoint = args.advertise_address.strip()
@@ -325,12 +324,10 @@ def main() -> None:
     os.environ["INTERLATENT_COORDINATOR"] = coordinator
     # Prefer the box-scoped key when the coordinator issued one: it is enough
     # for status reports and the warmup-target fetch, so a compromised box
-    # cannot act as the operator. The hosted dashboard issues none, and the
-    # box keeps presenting the key it registered with.
+    # cannot act as the operator. A coordinator that issues none leaves the
+    # box presenting the key it registered with.
     os.environ["INTERLATENT_API_KEY"] = box_key or args.api_key.strip()
     os.environ["INTERLATENT_ADVERTISE_ADDRESS"] = endpoint
-    # Never inherit a stray system secret into the BYO identity.
-    os.environ.pop("INTERLATENT_ADMIN_KEY", None)
 
     sys.argv = _serve_argv(args)
     if args.insecure:
@@ -340,7 +337,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        # Graceful goodbye so the dashboard doesn't show a ghost "ready"
+        # Graceful goodbye so the coordinator doesn't show a ghost "ready"
         # box (wait=True — a daemon thread would die with the process). On
         # a hard kill the row simply goes stale until the next re-register.
         box_status.report_status(

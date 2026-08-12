@@ -361,7 +361,7 @@ def test_stamp_info_json_is_a_noop_without_an_info_file(tmp_path: Path) -> None:
 
 
 def test_inject_episode_uuids_joins_index_to_uuid(tmp_path: Path) -> None:
-    """LeRobot keys episodes by int index; the dashboard keys by UUID. The
+    """LeRobot keys episodes by int index; the coordinator keys by UUID. The
     merge worker needs both to keep the join."""
     root = tmp_path / "ds"
     ep_dir = root / "meta" / "episodes" / "chunk-000"

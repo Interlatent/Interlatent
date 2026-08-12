@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/components/teleop/VRTeleopOverlay.tsx @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 import { useEffect, useRef, useState } from 'react';
 import { TeleopTokenOut, useTeleopToken } from '../lib/client';
 import { ClutchPoseMapper } from '../lib/teleop/clutchPoseMapper';
@@ -38,7 +37,7 @@ import { TeleopProfiler } from '../lib/teleop/teleopProfiler';
  * WebXR DAgger teleop overlay (Meta Quest, browser-native).
  *
  * The browser-native VR counterpart to the keyboard `TeleopOverlay`: the
- * operator opens the dashboard in the Quest Browser, hits "Enter VR", and a
+ * operator opens this app in the Quest Browser, hits "Enter VR", and a
  * WebXR `immersive-vr` session drives the arm through the same relay the
  * keyboard path uses.
  *
@@ -76,7 +75,8 @@ import { TeleopProfiler } from '../lib/teleop/teleopProfiler';
  *     release to drop (persisted); thumbstick-click resets the layout.
  *
  * WebXR notes:
- *   - requires a secure context (HTTPS) — the dashboard already is.
+ *   - requires a secure context (HTTPS); see the relay's TLS notes in
+ *     docs/teleop.md for serving this app over HTTPS on a LAN.
  *   - the session is entered from a user gesture (the button) per spec.
  *   - immersive-vr needs a GL base layer; `XRScene` (lib/teleop/xrScene.ts)
  *     renders into it: one world-anchored video quad per robot camera, side

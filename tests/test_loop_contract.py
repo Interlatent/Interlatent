@@ -346,7 +346,6 @@ def _drive(
         teleop_channel=FakeChannel(frames or [None] * ticks),
         node_id="node-1",
         image_resize=None,
-        bypass_key=None,
         policy_enabled=policy_enabled,
     )
     return trace

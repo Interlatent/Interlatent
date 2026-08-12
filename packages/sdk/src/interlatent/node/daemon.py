@@ -2,7 +2,7 @@
 
 The daemon owns three concurrent tasks:
 
-1. **Heartbeat** (10s): POST /nodes/{id}/heartbeat. Lets the dashboard
+1. **Heartbeat** (10s): POST /nodes/{id}/heartbeat. Lets the coordinator
    show the node as online.
 2. **Poll** (long-poll, up to ~25s per request): GET /nodes/{id}/poll.
    Returns the current desired session for this node (or null).
@@ -15,11 +15,11 @@ Convergence rules:
     desired None  + actual running  -> stop the loop, close client
     desired X     + actual None     -> open client + start loop with X
     desired X     + actual running Y -> stop, then start with X
-                                        (shouldn't happen unless the
-                                         backend was edited; backend
-                                         refuses to overwrite a busy
-                                         node — but we handle it
-                                         anyway for robustness)
+                                        (shouldn't happen: the
+                                         coordinator refuses to
+                                         overwrite a busy node — but we
+                                         handle it anyway for
+                                         robustness)
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ _LOG = logging.getLogger("interlatent.node.daemon")
 def _reachable_addresses() -> tuple[str, list[str]]:
     """Best-effort list of this host's non-loopback addresses (no extra deps).
 
-    The node is outbound-only today (it dials the dashboard + GPU), so this
+    The node is outbound-only today (it dials the coordinator + GPU box), so this
     is informational — useful for debugging and for future routing methods
     where the node must advertise an address.
     """
@@ -72,21 +72,16 @@ class NodeDaemonConfig:
     node_id: str
     token: str
     api_base: str
-    # Interlatent user API key (ilat_...). The node `token` authenticates
+    # Operator API key (ilop_...). The node `token` authenticates
     # heartbeat/poll against the nodes API, but the DRTC server validates
     # against `/environments` (require_auth), which rejects node tokens —
-    # so DRTC inference must use the user API key instead.
+    # so DRTC inference must use the operator key instead.
     drtc_api_key: Optional[str] = None
     # DRTC inference endpoint (gRPC-Web URL). Captured at `pair` time
     # and persisted to ~/.interlatent/node.toml. The daemon refuses to
     # start a session if this is unset everywhere (env var, this field,
-    # session payload) — there is no hosted default.
+    # session payload) — there is no default endpoint.
     drtc_url: Optional[str] = None
-    # Protection-bypass secret for a protected preview/test domain (e.g. a
-    # Vercel branch deployment). Sent as x-vercel-protection-bypass on every
-    # heartbeat/poll so the daemon reaches the same domain the node paired
-    # against. None on production.
-    bypass_key: Optional[str] = None
     robot_kind: Optional[str] = None
     robot_port: Optional[str] = None
     robot_extra: dict[str, str] = field(default_factory=dict)
@@ -107,8 +102,8 @@ class NodeDaemonConfig:
     # Sequential (request-response) chunking for every session this node runs:
     # one fully-drained chunk per observation, no async overlap. Diagnostic
     # fallback for high-latency policies whose overlapping plans thrash the robot
-    # (MolmoAct2). Node-level today; the per-Session home is the dashboard payload
-    # (see the SDK CONTEXT.md flagged ambiguity).
+    # (MolmoAct2). Node-level today; the per-Session home is the coordinator's
+    # session payload (see the SDK CONTEXT.md flagged ambiguity).
     synchronous: bool = False
 
     heartbeat_period_s: float = 10.0
@@ -126,10 +121,6 @@ class NodeDaemon:
     def __init__(self, cfg: NodeDaemonConfig) -> None:
         self.cfg = cfg
         _headers = {"x-api-key": cfg.token}
-        if (cfg.bypass_key or "").strip():
-            # Protected test domains (Vercel preview deployments) challenge
-            # un-bypassed requests; carry the automation bypass secret.
-            _headers["x-vercel-protection-bypass"] = cfg.bypass_key.strip()
         self._http = httpx.AsyncClient(
             base_url=cfg.api_base,
             headers=_headers,
@@ -137,10 +128,10 @@ class NodeDaemon:
         )
         self._known_session_id: str = ""  # what we've executed against
         # Server's most recently reported DRTC endpoint for our active
-        # session. We echo this back on each poll so the backend can
-        # wake us if the env's attached compute box (and therefore the
-        # GPU endpoint) changes — without this the long-poll would only
-        # fire on session_id changes and a box attached after the
+        # session. We echo this back on each poll so the coordinator can
+        # wake us if the session's assigned GPU box (and therefore the
+        # DRTC endpoint) changes — without this the long-poll would only
+        # fire on session_id changes and a box assigned after the
         # session was created would never reach us.
         self._known_endpoint: str = ""
         # The endpoint our active loop is actually connected to (post
@@ -194,9 +185,9 @@ class NodeDaemon:
             tick_spool.gc_orphans()
         except Exception:
             _LOG.warning("orphan spool scan failed (non-fatal)", exc_info=True)
-        # Best-effort: tell the dashboard what hardware is attached so
-        # the user can examine it (robot type, USB port, cameras). Never
-        # fatal — a failed report just leaves the panel empty.
+        # Best-effort: tell the coordinator what hardware is attached so
+        # the operator can examine it (robot type, USB port, cameras).
+        # Never fatal — a failed report just leaves the record empty.
         await self._report_hardware()
         try:
             await asyncio.gather(
@@ -208,7 +199,7 @@ class NodeDaemon:
             self._stop_active_loop()
 
     async def _report_hardware(self) -> None:
-        """POST the node's known hardware to the dashboard for examination.
+        """POST the node's known hardware to the coordinator for examination.
 
         Only what the daemon knows at launch — robot type, USB serial
         port, cameras (name -> device), extra robot args. State/action
@@ -242,7 +233,7 @@ class NodeDaemon:
 
         ``blocked`` is the active session's hard-stop state; the spool
         totals cover every session dir on disk (active + retained), so
-        the backend can see un-drained backlog and gate the next launch
+        the coordinator can see un-drained backlog and gate the next launch
         on drain-done instead of the old blind ~5s flush.
         """
         state: dict = {"blocked": False, "spool_pending": 0, "spool_bytes": 0}
@@ -266,7 +257,7 @@ class NodeDaemon:
     def _safety_state(self) -> dict:
         """Node-side motion-guard posture for the heartbeat (ADR 0037, platform repo).
 
-        The backend gates world-model launches on this. A world-action model
+        The coordinator gates world-model launches on this. A world-action model
         commits ~1.6 s of motion per chunk into a path that has no SafetyGate
         — the gate clamps teleop targets only — so the per-tick delta clamp is
         the sole magnitude guard, and it is **disabled unless
@@ -275,7 +266,7 @@ class NodeDaemon:
 
         ``context_ring`` advertises that this node can build a world-model
         context window at all: an older SDK omits the key entirely, which is
-        how the backend tells "not configured" apart from "cannot".
+        how the coordinator tells "not configured" apart from "cannot".
         """
         state: dict = {"max_step": None, "max_step_set": False, "context_ring": True}
         try:
@@ -339,7 +330,7 @@ class NodeDaemon:
                 data = r.json()
                 if data.get("changed"):
                     # Assignment envelope (typed: inference_session |
-                    # teleop_recording). Legacy backends only send the
+                    # teleop_recording). Older coordinators only send the
                     # bare ``session`` field.
                     envelope = data.get("assignment") or {}
                     if envelope.get("type") == "teleop_recording":
@@ -352,7 +343,7 @@ class NodeDaemon:
                     # OpenSession can take 30s+ on a cold container). Run
                     # it off the event loop so the heartbeat coroutine
                     # keeps firing — otherwise the node looks offline and
-                    # the backend drops its session assignment.
+                    # the coordinator drops its session assignment.
                     await asyncio.to_thread(self._converge, payload, kind)
             except Exception as e:
                 _LOG.warning("Poll failed: %s", e)
@@ -364,7 +355,7 @@ class NodeDaemon:
 
         Precedence (preserves the legacy endpoint precedence):
           1. ``INTERLATENT_DRTC_URL`` env var — operator override (direct)
-          2. the session's ``route`` block stamped by the dashboard
+          2. the session's ``route`` block stamped by the coordinator
           3. the session's legacy ``drtc_endpoint`` (direct)
           4. node config ``drtc_url`` — fixed fallback (direct)
         Returns ``None`` when nothing resolves.
@@ -462,7 +453,7 @@ class NodeDaemon:
         except Exception as e:
             _LOG.exception("Failed to start session %s: %s", desired_id, e)
             # Don't update _known_session_id — next poll will retry once
-            # the backend assignment changes (or the user fixes the issue
+            # the coordinator's assignment changes (or the user fixes the issue
             # and re-assigns).
             self._known_session_id = ""
             self._known_endpoint = ""
@@ -512,7 +503,7 @@ class NodeDaemon:
         is_recording = kind == "teleop_recording"
 
         # DRTC route resolution (see _resolve_route for precedence): env-var
-        # override > dashboard-stamped ``route`` > legacy ``drtc_endpoint`` >
+        # override > coordinator-stamped ``route`` > legacy ``drtc_endpoint`` >
         # node-config ``drtc_url``. The route's ``method`` selects a connector
         # (only ``direct`` today); the connector yields the address to dial.
         # If nothing resolves we refuse to start rather than hang against an
@@ -520,9 +511,9 @@ class NodeDaemon:
         route = self._resolve_route(session)
         if not route or not route.get("address"):
             _LOG.error(
-                "No DRTC endpoint for session %s. Attach a reachable compute "
-                "pod to this session in the Interlatent dashboard, or set "
-                "INTERLATENT_DRTC_URL to a fixed endpoint.",
+                "No DRTC endpoint for session %s. Assign a reachable GPU box "
+                "to this session (`interlatent session start --gpu <id>`), or "
+                "set INTERLATENT_DRTC_URL to a fixed endpoint.",
                 session.get("id", "?"),
             )
             return
@@ -538,7 +529,7 @@ class NodeDaemon:
         _LOG.info("DRTC route for session %s: method=%s endpoint=%s",
                   session.get("id", "?"), route.get("method", "direct"), drtc_endpoint)
 
-        # Pull recording context out of the session payload. The backend
+        # Pull recording context out of the session payload. The coordinator
         # populates ``collection_context`` from the parent Environment,
         # so by the time we get here we already know the env slug + task
         # + fps and can ask the GPU container to record + upload the
@@ -553,7 +544,7 @@ class NodeDaemon:
         # policy sees, so forward those keys through OpenSession.metadata.
         # The GPU backend ignores them for self-describing checkpoints.
         session_metadata: dict[str, str] = {}
-        # The pod-side teleop retarget stage picks the robot bundle
+        # The box-side teleop retarget stage picks the robot bundle
         # (URDF + ik_config) by robot kind. Without this an engaged VR
         # producer gets ee_state{ready:false, reason:"no_robot_kind"}.
         if self.cfg.robot_kind:
@@ -595,7 +586,7 @@ class NodeDaemon:
             image_resize if image_resize is not None else "native",
         )
 
-        # Recording destination is configured on the dashboard and rides in
+        # Recording destination is configured on the coordinator and rides in
         # the session payload's ``recording`` block. The node forwards it
         # verbatim into OpenSession metadata; the GPU container's recorder
         # interprets the keys (output_dir / s3_uri / s3_*) to pick a sink.
@@ -606,7 +597,7 @@ class NodeDaemon:
                 session_metadata[str(_k)] = str(_v)
 
         client = connect_drtc(
-            # DRTC auth needs the ilat_ user key; the node token is
+            # DRTC auth needs the ilop_ operator key; the node token is
             # rejected by the server's /environments probe.
             api_key=self.cfg.drtc_api_key or self.cfg.token,
             environment=env_slug,
@@ -637,18 +628,18 @@ class NodeDaemon:
             # inference exceeds a chunk's own duration, and DRTC's schedule is
             # replace-mode, so in async mode every late chunk falls below the
             # cursor and is discarded — the arm would never move at all. The
-            # backend sets it on the session so the node cannot be launched
+            # coordinator sets it on the session so the node cannot be launched
             # into a configuration that silently does nothing. See ADR 0037.
             synchronous=self.cfg.synchronous or bool(session.get("synchronous")),
         )
 
-        # Hosted teleop receiver. The QUIC channel owns a background
-        # WebTransport session to the co-located relay for the session lifetime
+        # Teleop receiver. The QUIC channel owns a background WebTransport
+        # session to the co-located relay for the session lifetime
         # (idle when no producer is engaged); the control loop reads the latest
         # frame and overrides the policy when engaged. We use ``drtc_api_key``
-        # because the teleop-token endpoint is owned by the user, not the node —
-        # the node token is rejected by the relay's auth. Skipped (teleop
-        # disabled) when no user key or session id is available.
+        # because the teleop-token endpoint is owned by the operator, not the
+        # node — the node token is rejected by the relay's auth. Skipped
+        # (teleop disabled) when no operator key or session id is available.
         # The factory returns a QUIC channel when the deployment is
         # QUIC-configured, else None (teleop unavailable — the control loop
         # handles a None channel).
@@ -674,13 +665,12 @@ class NodeDaemon:
                 # Recordings mint against their own route. Recording tokens
                 # are QUIC-only (ADR 0020): the factory reads transport
                 # "quic" off the token and builds the QUIC channel. 409s
-                # while the pod provisions are absorbed by the channel's
-                # retry loop.
+                # while the GPU box provisions are absorbed by the
+                # channel's retry loop.
                 token_path=(
                     f"/api/v1/teleop-recordings/{session['id']}/teleop-token"
                     if is_recording else None
                 ),
-                bypass_key=self.cfg.bypass_key,
                 # Lets the quic channel serve this robot's kinematic_spec to the
                 # browser from the installed interlatent[<kind>] data.
                 robot_kind=teleop_robot_kind,
@@ -702,7 +692,6 @@ class NodeDaemon:
             "api_base": self.cfg.api_base,
             "teleop_channel": teleop_channel,
             "node_id": self.cfg.node_id,
-            "bypass_key": self.cfg.bypass_key,
             "image_resize": image_resize,
             # False for teleop recordings: the loop must never client.step()
             # (no policy is loaded; the echo backend returns sinusoids).

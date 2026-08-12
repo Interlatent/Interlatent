@@ -2,8 +2,8 @@
  * Start a teleop recording from the web app.
  *
  * The gap this closes: the app could only *join* work created elsewhere, so a
- * headset-only session meant taking the Quest off to start a recording from the
- * dashboard. A recording needs no GPU/pod choice (the backend dispatches its own
+ * headset-only session meant taking the Quest off to start a recording from
+ * the CLI. A recording needs no GPU/pod choice (the backend dispatches its own
  * recording job), so a node and an environment are the whole form.
  *
  * Preconditions are the backend's job, not this component's — `createRecording`

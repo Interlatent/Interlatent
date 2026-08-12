@@ -1,12 +1,12 @@
 """Functional tests for the self-hosted server's auth + CLI plumbing.
 
-Covers the pieces that don't need a GPU, a policy, or a live backend:
+Covers the pieces that don't need a GPU, a policy, or a live coordinator:
 
-  - credentials.resolve()          — identity precedence (admin > owner > none)
+  - credentials.resolve()          — box identity, or None
   - auth.validate_key_for_box      — authz-probe URL/headers/status mapping
   - auth.build_box_key_validator   — TTL cache behavior
   - auth.wrap_servicer_with_auth   — every RPC gated, UNAUTHENTICATED on bad key
-  - box_status.report_status       — reportable-state + system-"stopped" filtering
+  - box_status.report_status       — reportable-state filtering
   - cli._resolve_box_id            — mint/persist/override semantics
   - cli._register                  — payload shape + failure modes
 
@@ -60,7 +60,7 @@ class _Env:
     VARS = (
         "INTERLATENT_BOX_ID",
         "INTERLATENT_API_BASE",
-        "INTERLATENT_ADMIN_KEY",
+        "INTERLATENT_COORDINATOR",
         "INTERLATENT_API_KEY",
     )
 
@@ -90,23 +90,39 @@ with _Env():
 with _Env(INTERLATENT_BOX_ID="b1", INTERLATENT_API_BASE="https://x.com/"):
     check("box id + base but no key -> None", credentials.resolve() is None)
 
-with _Env(
-    INTERLATENT_BOX_ID="b1",
-    INTERLATENT_API_BASE="https://x.com/",
-    INTERLATENT_ADMIN_KEY="sys-secret",
-    INTERLATENT_API_KEY="ilat_owner",
-):
-    c = credentials.resolve()
-    check("admin key wins over owner key", c.api_key == "sys-secret" and c.is_system)
-    check("api_root strips trailing slash", c.api_root == "https://x.com")
+with _Env(INTERLATENT_BOX_ID="b1", INTERLATENT_API_KEY="ilbox_k"):
+    check("key but no coordinator address -> None", credentials.resolve() is None)
 
 with _Env(
     INTERLATENT_BOX_ID="b1",
-    INTERLATENT_API_BASE="https://x.com",
-    INTERLATENT_API_KEY="ilat_owner",
+    INTERLATENT_API_BASE="https://x.com/",
+    INTERLATENT_API_KEY="ilbox_k",
 ):
     c = credentials.resolve()
-    check("owner key -> is_system=False", c.api_key == "ilat_owner" and not c.is_system)
+    check("box id + base + key -> identity", c.api_key == "ilbox_k")
+    check("api_root strips trailing slash", c.api_root == "https://x.com")
+
+# One identity, whatever kind of key the coordinator handed back: a box
+# registered with an operator key may be running on a box-scoped one, and
+# nothing downstream branches on which.
+with _Env(
+    INTERLATENT_BOX_ID="b1",
+    INTERLATENT_API_BASE="https://x.com",
+    INTERLATENT_API_KEY="ilop_operator",
+):
+    check("an operator key is the same identity", credentials.resolve().api_key
+          == "ilop_operator")
+
+with _Env(
+    INTERLATENT_BOX_ID="b1",
+    INTERLATENT_API_BASE="https://legacy.example",
+    INTERLATENT_COORDINATOR="https://x.com",
+    INTERLATENT_API_KEY="ilbox_k",
+):
+    check(
+        "INTERLATENT_COORDINATOR wins over the legacy API_BASE",
+        credentials.resolve().api_root == "https://x.com",
+    )
 
 
 # ---------------------------------------------------- auth.validate_key_for_box
@@ -399,33 +415,25 @@ _posts = []
 _real_post = box_status._post
 box_status._post = lambda *a: _posts.append(a)
 try:
-    OWNER = dict(
+    BOX = dict(
         INTERLATENT_BOX_ID="b1",
         INTERLATENT_API_BASE="https://x.com",
-        INTERLATENT_API_KEY="ilat_owner",
-    )
-    SYSTEM = dict(
-        INTERLATENT_BOX_ID="b1",
-        INTERLATENT_API_BASE="https://x.com",
-        INTERLATENT_ADMIN_KEY="sys-secret",
+        INTERLATENT_API_KEY="ilbox_k",
     )
 
-    with _Env(**OWNER):
+    with _Env(**BOX):
         box_status.report_status("ready", wait=True)
-        check("owner 'ready' posted", _posts[-1][0] == "ready")
+        check("'ready' posted", _posts[-1][0] == "ready")
+        # Every box self-reports its own graceful exit now — there is no
+        # provisioner narrating a box's lifecycle from the outside.
         box_status.report_status("stopped", detail="bye", wait=True)
-        check("owner 'stopped' posted (graceful BYO exit)", _posts[-1][0] == "stopped")
+        check("'stopped' posted (graceful exit)", _posts[-1][0] == "stopped")
+        box_status.report_status("uploading", wait=True)
+        check("'uploading' posted", _posts[-1][0] == "uploading")
         n = len(_posts)
         box_status.report_status("warming_up", wait=True)
         box_status.report_status("error", wait=True)
-        check("backend-owned states never posted", len(_posts) == n)
-
-    with _Env(**SYSTEM):
-        n = len(_posts)
-        box_status.report_status("stopped", wait=True)
-        check("system-key 'stopped' ignored", len(_posts) == n)
-        box_status.report_status("running", wait=True)
-        check("system-key 'running' posted", _posts[-1][0] == "running")
+        check("coordinator-owned states never posted", len(_posts) == n)
 
     with _Env():
         n = len(_posts)
@@ -568,24 +576,19 @@ def _backend_stubs() -> dict:
     }
 
 
-OWNER = dict(
+REGISTERED = dict(
     INTERLATENT_BOX_ID="b1",
     INTERLATENT_API_BASE="https://x.com",
-    INTERLATENT_API_KEY="ilat_owner",
-)
-SYSTEM = dict(
-    INTERLATENT_BOX_ID="b1",
-    INTERLATENT_API_BASE="https://x.com",
-    INTERLATENT_ADMIN_KEY="sys-secret",
+    INTERLATENT_API_KEY="ilbox_k",
 )
 
 
 def _warm(env: dict, target, policy="", image_keys=""):
-    """Run _warmup under `env` with the backend fetch stubbed to `target`."""
+    """Run _warmup under `env` with the coordinator fetch stubbed to `target`."""
     _LOADS.clear()
     with _Env(**env), mock.patch.dict(sys.modules, _backend_stubs()), \
             mock.patch.object(
-                serve_gpu, "_fetch_warmup_target_from_backend",
+                serve_gpu, "_fetch_warmup_target_from_coordinator",
                 mock.Mock(return_value=target),
             ):
         serve_gpu._warmup(policy, image_keys)
@@ -606,27 +609,27 @@ check(
 )
 check("empty / blank entries are dropped", serve_gpu._normalize_image_keys(" , ") == [])
 
-# _is_provisioned_box — the distinction the old code collapsed
-with _Env(**SYSTEM):
-    check("admin key -> provisioned box", serve_gpu._is_provisioned_box() is True)
-with _Env(**OWNER):
-    check("owner key -> NOT a provisioned box", serve_gpu._is_provisioned_box() is False)
-    check("owner key still counts as an identity", serve_gpu._has_box_identity() is True)
+# _has_box_identity — the only distinction left: registered, or not.
+with _Env(**REGISTERED):
+    check("a registered box has an identity", serve_gpu._has_box_identity() is True)
+with _Env():
+    check("an unregistered box has none", serve_gpu._has_box_identity() is False)
 
-# Rule 1: a backend target wins over the operator's flag.
-loads = _warm(OWNER, {"policy_uri": "org/from-backend", "image_keys": ["a"]},
+# Rule 1: a coordinator target wins over the operator's flag.
+loads = _warm(REGISTERED, {"policy_uri": "org/from-coordinator", "image_keys": ["a"]},
               policy="org/from-flag")
 check(
-    "backend target beats --warmup-policy",
-    len(loads) == 1 and loads[0]["policy_uri"] == "org/from-backend",
+    "coordinator target beats --warmup-policy",
+    len(loads) == 1 and loads[0]["policy_uri"] == "org/from-coordinator",
     str(loads),
 )
 
-# A PARTIAL target — the backend answers with the registered warmup_policy but
-# no cameras when no env is attached. Without the fill-in below, a MolmoAct2
-# pre-warm is unreachable: the guard skips for want of image_keys and there is
-# no env to go configure.
-loads = _warm(OWNER, {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []},
+# A PARTIAL target — the coordinator answers with the registered
+# warmup_policy but no cameras when no environment is attached. Without the
+# fill-in below, a MolmoAct2 pre-warm is unreachable: the guard skips for want
+# of image_keys and there is no environment to go configure.
+loads = _warm(REGISTERED,
+              {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []},
               policy="ignored", image_keys="top,left,right")
 check(
     "empty image_keys in the target are filled from --warmup-image-keys",
@@ -637,28 +640,25 @@ check(
 )
 check(
     "a partial target with no override still skips MolmoAct2",
-    _warm(OWNER, {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []}) == [],
+    _warm(REGISTERED,
+          {"policy_uri": "allenai/MolmoAct2-BimanualYAM", "image_keys": []}) == [],
 )
-loads = _warm(OWNER, {"policy_uri": "org/act", "image_keys": ["observation.images.a"]},
+loads = _warm(REGISTERED,
+              {"policy_uri": "org/act", "image_keys": ["observation.images.a"]},
               image_keys="top,left,right")
 check(
-    "image_keys the backend DID supply are not overridden",
+    "image_keys the coordinator DID supply are not overridden",
     len(loads) == 1
     and loads[0]["session_metadata"]["image_keys"] == "observation.images.a",
     str(loads),
 )
 
-# Rule 2: a provisioned box with no target does NOT fall back.
+# Rule 2: no target -> the operator's own flag, registered box or not. (This
+# used to fork: a provisioned box refused to fall back, and the fork caught a
+# registered self-hosted box too, so its --warmup-policy was silently ignored.)
+loads = _warm(REGISTERED, None, policy="org/act")
 check(
-    "provisioned box + no target -> no fallback to --warmup-policy",
-    _warm(SYSTEM, None, policy="org/act") == [],
-)
-
-# Rule 3: the regression this fixes — a self-hosted box ignored its own flag
-# because _has_box_identity() is true for an owner key too.
-loads = _warm(OWNER, None, policy="org/act")
-check(
-    "self-hosted box + no target -> honors --warmup-policy",
+    "registered box + no target -> honors --warmup-policy",
     len(loads) == 1 and loads[0]["policy_uri"] == "org/act",
     str(loads),
 )
@@ -667,14 +667,14 @@ check(
     "no identity at all -> honors --warmup-policy",
     len(loads) == 1 and loads[0]["policy_uri"] == "org/act",
 )
-check("no target and no flag -> nothing loaded", _warm(OWNER, None) == [])
+check("no target and no flag -> nothing loaded", _warm(REGISTERED, None) == [])
 
 # MolmoAct2 cannot build its feature dict without image_keys.
 check(
     "MolmoAct2 without image_keys is skipped, not attempted",
-    _warm(OWNER, None, policy="allenai/MolmoAct2-BimanualYAM") == [],
+    _warm(REGISTERED, None, policy="allenai/MolmoAct2-BimanualYAM") == [],
 )
-loads = _warm(OWNER, None, policy="allenai/MolmoAct2-BimanualYAM",
+loads = _warm(REGISTERED, None, policy="allenai/MolmoAct2-BimanualYAM",
               image_keys="cam_high,cam_left_wrist")
 check(
     "MolmoAct2 with --warmup-image-keys warms, keys normalized",
@@ -682,6 +682,18 @@ check(
     and loads[0]["session_metadata"]["image_keys"]
     == "observation.images.cam_high,observation.images.cam_left_wrist",
     str(loads),
+)
+
+
+# ------------------------------------------------ serve_gpu --output-dir
+print("serve_gpu --output-dir default")
+
+# Recording has no remote fallback any more, so an unset --output-dir would
+# mean a session records into nothing. The flag carries a real default.
+check(
+    "default recording destination is ~/.interlatent/episodes",
+    serve_gpu._DEFAULT_OUTPUT_DIR == str(Path.home() / ".interlatent" / "episodes"),
+    serve_gpu._DEFAULT_OUTPUT_DIR,
 )
 
 

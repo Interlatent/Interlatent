@@ -84,11 +84,6 @@ def lerobot_control_loop(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     node_id: Optional[str] = None,
-    # Protection-bypass secret for a protected preview/test domain (mirrors
-    # NodeDaemonConfig.bypass_key) — needed here because robot-features
-    # reporting makes its own request rather than reusing the daemon's
-    # shared httpx client.
-    bypass_key: Optional[str] = None,
     # Browser/VR teleop receiver (set by the daemon when a session is
     # teleop-capable). The node consumes ``mode="targets"`` frames — absolute
     # joint vectors the hosted teleop engine already computed — and routes them
@@ -305,7 +300,7 @@ def lerobot_control_loop(
     def _report(state_keys, act_keys):
         return _report_robot_features(
             api_base, node_id, api_key, state_keys, act_keys,
-            teleop_profile=_teleop_schema, bypass_key=bypass_key,
+            teleop_profile=_teleop_schema,
         )
 
     try:
@@ -507,7 +502,6 @@ def _report_robot_features(
     state_names: Optional[list],
     action_names: Optional[list],
     teleop_profile: Optional[dict] = None,
-    bypass_key: Optional[str] = None,
 ) -> bool:
     """POST the robot's per-element feature names + teleop profile to the node endpoint.
 
@@ -540,11 +534,6 @@ def _report_robot_features(
         if teleop_profile:
             payload["teleop_profile"] = teleop_profile
         headers = {"x-api-key": token}
-        if (bypass_key or "").strip():
-            # Protected test domains (Vercel preview deployments) challenge
-            # un-bypassed requests; carry the automation bypass secret same
-            # as the daemon's shared heartbeat/poll client.
-            headers["x-vercel-protection-bypass"] = bypass_key.strip()
         resp = httpx.post(
             url,
             headers=headers,

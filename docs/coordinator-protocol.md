@@ -1,17 +1,15 @@
 # The Interlatent Coordinator Protocol
 
-Version: `interlatent.coordinator/1`
+Version: `interlatent.coordinator/2`
 
 A **coordinator** is the service that assigns work. It pairs nodes, tracks GPU
 boxes, brokers inference and teleop sessions, and tells each node what to
-converge to. The robot-side stack in this repo talks to *a* coordinator and
-never asks which one it is:
+converge to. `interlatent up` runs one on your own machine; this document is
+what it serves, and what anything else claiming to be a coordinator must serve.
 
-- The hosted [Interlatent dashboard](https://interlatent.com) implements it.
-- `interlatent up` runs a self-hosted one on your own machine.
-
-Those are two deployments of one contract, **not two modes**. The SDK contains
-no branch on "is this the dashboard?" — see
+The robot-side stack in this repo reaches a coordinator by address and knows
+nothing else about it. There is one control plane and **no modes**: the SDK
+contains no branch on which coordinator it is talking to — see
 [ADR 0038](adr/0038-coordinator-protocol-one-control-plane.md) for why that rule
 is load-bearing rather than stylistic.
 
@@ -25,8 +23,8 @@ A coordinator address is a **bare origin**: scheme, host, optional port. No
 trailing slash, no `/api/v1` suffix.
 
 ```
-https://interlatent.com
 http://192.168.1.20:8900
+https://coordinator.internal.example
 ```
 
 Callers append `/api/v1/...` themselves. Two conflicting conventions used to
@@ -37,7 +35,8 @@ places. There is one convention now, resolved in one place.
 Resolution order, everywhere: explicit flag (`--coordinator`) →
 `INTERLATENT_COORDINATOR` → the stored config value → **error**. There is no
 default. A missing coordinator address is a configuration error with an
-actionable message, never a silent fallback to a hosted service.
+actionable message, never a silent fallback to some remote service. Nothing in
+this stack phones home.
 
 ### Trailing slashes
 
@@ -52,13 +51,19 @@ Every request carries `x-api-key`. Three principal kinds exist:
 
 | Prefix | Principal | Held by |
 |---|---|---|
-| `ilop_` | Operator | The CLI, and whoever administers the coordinator |
+| `ilop_` | Operator | The CLI, `interlatent-serve`, the teleop web app, and whoever administers the coordinator |
 | `ilnode_` | Node | One paired node, scoped to its own routes |
-| `ilat_` | User | The hosted dashboard's own user keys |
+| `ilbox_` | Box | One registered GPU box, scoped to its own routes |
+
+`interlatent up` prints the operator key on first start; it is the root
+credential, and the one the CLI, a registering GPU box, and the teleop web app
+present.
 
 A coordinator is the authority for the keys it issues. `POST /api/v1/nodes`
-mints an `ilnode_` token; the coordinator MUST reject that token on another
-node's routes.
+mints an `ilnode_` token and `POST /api/v1/compute/boxes/register` mints an
+`ilbox_` key; the coordinator MUST reject either on another node's or another
+box's routes. A box's per-RPC `authz` probe is authorized by the `ilbox_` key
+it was given at registration.
 
 `GET /api/v1/environments` doubles as the **auth probe**: `interlatent-server`
 validates a presented key by calling it and treating any 2xx as "this key is
@@ -66,29 +71,39 @@ real". That has been an implicit contract discoverable only by reading
 `packages/server/src/interlatent_server/server/auth.py`; it is part of the
 protocol and a coordinator must serve it for a GPU box to accept any RPC.
 
-## Tiers
+## One tier
 
-**mandatory** — a coordinator MUST serve these. Absent any one of them,
-something concrete breaks: a node cannot pair, a box refuses to boot, or every
-gRPC call is rejected.
+Every route in the table below is **mandatory**: a coordinator serves all of
+them or it is not a coordinator. Absent any one of them something concrete
+breaks — a node cannot pair, a box refuses to boot, every gRPC call is
+rejected, or an operator verb has no spelling at all.
 
-**optional** — a coordinator MAY serve these. Every SDK caller degrades on 404
-without failing the operation; teleop, for instance, is simply disabled for the
-session (`node/teleop/factory.py` treats 401/403/404 as definitive).
+Earlier versions of this document split the table into *mandatory*, *optional*
+and *coordinator-only*. Those tiers only ever described what a **second**
+implementation did not serve, and there is no second implementation: the
+thirteen routes that nothing shipping ever served were deleted in
+[ADR 0039](adr/0039-one-coordinator-one-protocol-tier.md) rather than left
+advertised, and the remainder became one tier.
 
-**coordinator-only** — the hosted dashboard does not serve these and 404s them.
-The CLI reports that by name rather than surfacing a bare 404.
-
-`GET /api/v1/capabilities` lets a caller find out in advance instead of
-discovering it at session teardown. It is itself optional; a 404 means "assume
-everything is served".
+One runtime condition sits on top of the table rather than inside it: **teleop
+needs a relay**. `interlatent up` ships an embedded one, but a coordinator
+running without a relay answers the token mints with a definitive 404 and the
+node turns teleop off for the session (`node/teleop/factory.py` treats
+401/403/404 as final). `GET /api/v1/capabilities` is how a caller asks in
+advance instead of discovering it mid-session:
 
 ```json
 {
-  "protocol": "interlatent.coordinator/1",
-  "optional_supported": ["/api/v1/episodes", "..."]
+  "protocol": "interlatent.coordinator/2",
+  "optional_supported": ["/api/v1/teleop-recordings", "..."]
 }
 ```
+
+`optional_supported` lists the conditional surfaces that are **live right
+now**, full paths, and it is empty when none are. The field keeps the name it
+had in `interlatent.coordinator/1` because shipped callers parse it. A list
+that lies is worse than no list, so a coordinator MUST NOT advertise a path it
+would 404.
 
 ## Routes
 
@@ -111,27 +126,13 @@ everything is served".
 | `GET` | `/api/v1/inference/sessions` | mandatory | List inference sessions. |
 | `POST` | `/api/v1/inference/sessions` | mandatory | Create an inference session and assign it to a node. |
 | `DELETE` | `/api/v1/inference/sessions/{session_id}` | mandatory | Stop a session by unassigning it. MUST NOT kill the node. |
-| `POST` | `/api/v1/episodes` | optional | Register an episode row. 409 means 'already exists', tolerated. |
-| `POST` | `/api/v1/episodes/{episode_id}/upload-urls` | optional | Exchange file keys for presigned PUT urls. |
-| `POST` | `/api/v1/episodes/{episode_id}/upload-complete` | optional | Signal the inbox that every file landed. |
-| `GET` | `/api/v1/capabilities` | optional | Protocol version and which optional tiers are served. |
-| `GET` | `/api/v1/teleop-recordings` | optional | List teleop recordings. |
-| `POST` | `/api/v1/teleop-recordings` | optional | Create a teleop recording and assign it to a node. |
-| `POST` | `/api/v1/teleop-recordings/{recording_id}/stop` | optional | Stop a teleop recording. |
-| `POST` | `/api/v1/inference/sessions/{session_id}/teleop-token` | optional | Mint a teleop token for role=node|browser. |
-| `POST` | `/api/v1/teleop-recordings/{recording_id}/teleop-token` | optional | Mint a teleop token for role=node|browser. |
-| `GET` | `/api/v1/environments/{env_id}/episodes` | optional | List an environment's episodes. |
-| `POST` | `/api/v1/environments/{env_id}/process` | optional | Kick the hosted merge pipeline. |
-| `GET` | `/api/v1/environments/{env_id}/processing-status` | optional | Poll the hosted merge pipeline. |
-| `POST` | `/api/v1/environments/{env_id}/cancel-processing` | optional | Cancel the hosted merge pipeline. |
-| `POST` | `/api/v1/environments/{env_id}/analyze` | optional | Request hosted policy analysis. |
-| `GET` | `/api/v1/episodes/{episode_id}` | optional | Fetch one episode row. |
-| `GET` | `/api/v1/episodes/{episode_id}/status` | optional | Poll an episode's processing status. |
-| `GET` | `/api/v1/episodes/{episode_id}/results` | optional | Fetch analysis results. |
-| `GET` | `/api/v1/episodes/{episode_id}/meta` | optional | Fetch episode metadata. |
-| `GET` | `/api/v1/episodes/{episode_id}/chunks/{chunk}` | optional | Fetch one dataset chunk. |
-| `POST` | `/api/v1/episodes/{episode_id}/inbox-gc` | optional | Drop a partially uploaded inbox session. |
-| `PUT` | `/api/v1/coordinator/recording` | coordinator-only | Set the recording destination stamped onto every session. |
+| `GET` | `/api/v1/capabilities` | mandatory | Protocol version and which conditional surfaces are live. |
+| `GET` | `/api/v1/teleop-recordings` | mandatory | List teleop recordings. |
+| `POST` | `/api/v1/teleop-recordings` | mandatory | Create a teleop recording and assign it to a node. |
+| `POST` | `/api/v1/teleop-recordings/{recording_id}/stop` | mandatory | Stop a teleop recording. |
+| `POST` | `/api/v1/inference/sessions/{session_id}/teleop-token` | mandatory | Mint a teleop token for role=node|browser. |
+| `POST` | `/api/v1/teleop-recordings/{recording_id}/teleop-token` | mandatory | Mint a teleop token for role=node|browser. |
+| `PUT` | `/api/v1/coordinator/recording` | mandatory | Set the recording destination stamped onto every session. |
 
 ## Invariants a coordinator must not break
 
@@ -173,6 +174,12 @@ Same rule as [`proto/messages.proto`](../proto/README.md). New optional fields
 and new routes are fine at any time. Removing a route, renaming a field, or
 tightening a type is a protocol version bump.
 
+`interlatent.coordinator/2` is exactly such a bump, taken deliberately:
+[ADR 0039](adr/0039-one-coordinator-one-protocol-tier.md) removed thirteen
+routes and collapsed the tiers. A `/1` client that only called what `/2` still
+carries is unaffected; one that called the inbox or analysis routes has nothing
+left to call.
+
 ## Node assignment payload
 
 `GET /api/v1/nodes/{node_id}/poll` takes `known_session_id`, `known_endpoint`
@@ -210,11 +217,13 @@ Fields the node reads off an inference-session payload:
 | `synchronous` | Sequential rather than overlapping chunking |
 | `recording` | Opaque; forwarded verbatim into gRPC `OpenSession` metadata |
 
-`recording` is the seam that lets a coordinator keep episodes off the hosted
-inbox entirely: it is passed through the node untouched and interpreted by the
-GPU box's recorder, so stamping `{"output_dir": ...}` or `{"s3_uri": ...}` onto
-every session is enough to make the whole inbox tier unnecessary. A coordinator
-that does **not** stamp a destination MUST serve the inbox tier instead.
+`recording` is the seam that decides where a finished episode lands: it is
+passed through the node untouched and interpreted by the GPU box's recorder, so
+stamping `{"output_dir": ...}` or `{"s3_uri": ...}` onto every session is how a
+coordinator chooses a destination. It is also the *only* way — there is no
+upload plane to fall back on. A coordinator that stamps nothing leaves the box
+writing to its own `--output-dir`, which defaults to `~/.interlatent/episodes`;
+`PUT /api/v1/coordinator/recording` is how an operator sets the stamp.
 
 `synchronous` is worth calling out: a policy whose successive plans disagree
 will fight itself under the default overlapping chunking. Sequential chunking is

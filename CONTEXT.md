@@ -3,8 +3,8 @@
 The robot-side stack for running robot policies on GPUs: a **Coordinator**
 assigns sessions and names a **GPU pod** per session, a **Node** drives the robot
 and connects to the pod, and the pod loads policies and serves action chunks over
-the DRTC gRPC protocol. The `interlatent` CLI manages nodes, pods and sessions
-against a coordinator — the hosted dashboard or one you run yourself.
+the DRTC gRPC protocol. The `interlatent` CLI runs the coordinator and manages
+nodes, pods and sessions against it.
 
 ## Language
 
@@ -14,23 +14,27 @@ action chunks. Identified by a **policy URI**.
 _Avoid_: model (overloaded — used for the recorded-dataset "Model layer" too).
 
 **Node**:
-The long-running `interlatent-node` daemon on the robot. It pairs to an account
-with an API key, long-polls its **Coordinator**, and converges to whatever
+The long-running `interlatent-node` daemon on the robot. It pairs to one
+**Coordinator** with an operator key, long-polls it, and converges to whatever
 inference session it is assigned. The DRTC GPU endpoint is provided per-session
-by the coordinator. _Avoid_: saying the node polls "the dashboard" — the
-dashboard is one coordinator, and the node cannot tell which one it has.
+by the coordinator. _Avoid_: saying the node polls "the platform" — it polls
+exactly one coordinator, the one whose address is in its `node.toml`.
 
 **Coordinator**:
 Whatever service assigns the work: it pairs **Nodes**, tracks **GPU pods**,
 brokers **Sessions** and teleop sessions, and answers the long-poll each node
-converges against. The hosted [Interlatent dashboard](https://interlatent.com)
-is one implementation; a self-hosted one runs from the `interlatent` CLI. These
-are two *deployments of one contract* — the **Coordinator protocol**
-(`docs/coordinator-protocol.md`, frozen as `interlatent.coordinator.protocol`)
-— and emphatically **not two modes**: the SDK contains no branch on which one it
-is talking to, because a fork like that is what collapsed the 2026-06 stack
-(ADR 0038, superseding 0023). A coordinator address is required everywhere;
-there is no hosted default.
+converges against. You run it yourself — `interlatent up` starts one and mints
+the `ilop_` operator key everything else authenticates with (printed on first
+start, stored 0600 under `~/.interlatent/` thereafter). It is defined by
+the **Coordinator protocol** (`docs/coordinator-protocol.md`, frozen as
+`interlatent.coordinator.protocol`), and the SDK contains no branch on which
+coordinator it is talking to, because a fork like that is what collapsed the
+2026-06 stack (ADR 0038, superseding 0023). The protocol has a **single route
+tier**: it once graded routes by whether a second, upstream implementation
+served them, and with one implementation left that grading described nothing
+(ADR 0039). A coordinator address is required
+everywhere (`--coordinator`, `INTERLATENT_COORDINATOR`); there is no default, so
+a fleet never quietly phones anywhere you didn't point it.
 It is **never in the data path** — DRTC is direct node↔pod — so a running
 session survives its absence, and stopping a session means *unassigning* it, so
 the node's own teardown runs `CloseSession` (the only trigger for the dataset
@@ -40,37 +44,50 @@ has many.
 
 **Session**:
 A live binding of a node (or a hand-written `connect_drtc()` loop) to a policy URI
-running on a managed **GPU pod**. Created from the dashboard or via
+running on a **GPU pod**. Created with
 `interlatent session start --node … --gpu … --policy …`; stopping it closes the
 DRTC link and triggers any recorded dataset to be built/published.
 
+**Recording destination**:
+Where a **Session**'s finished LeRobot dataset lands: a directory on the **GPU
+pod**'s own disk, or an S3-compatible bucket you hold the credentials for.
+Configured once on the **Coordinator** (`interlatent config --output-dir` /
+`--s3-uri`), stamped onto each session, and forwarded by the **Node** into the
+DRTC `OpenSession` metadata; the pod builds its sink from that metadata, falling
+back to `interlatent-serve`'s own flags, which default to
+`~/.interlatent/episodes` so a session never records into nowhere (ADR 0002, ADR
+0039). Recording needs no account and makes no upstream call — the destination
+is the only thing that decides where bytes go. _Avoid_: "upload" as the general
+term; only the S3 destination uploads, a local directory is written in place.
+
 **GPU pod**:
 A GPU box that loads a policy and serves action chunks over the DRTC gRPC
-protocol. Two flavors, one protocol: **managed** pods a hosted **Coordinator**
-provisions and warm-pools, and **self-hosted** pods — your own hardware running
-`interlatent-serve` from the `interlatent-server` dist (`packages/server/`),
-registered to whichever coordinator you point it at (see
-`docs/self-hosting.md`). Either way the coordinator assigns sessions and the
-node dials the pod directly. List them with `interlatent gpus ls`.
+protocol: your own hardware — a workstation, or a box you rent from RunPod /
+Lambda / Vast — running `interlatent-serve` from the `interlatent-server` dist
+(`packages/server/`), registered to whichever coordinator you point it at and
+reachable at the `--advertise-address` it publishes (see
+`docs/self-hosting.md`). The coordinator assigns sessions and the node dials
+the pod directly. Register one with `interlatent gpu add`, list them with
+`interlatent gpus ls`.
 
 **Preflight**:
 A non-destructive connectivity check (`interlatent-preflight`) that opens a real
-**Session** against a managed **GPU pod**, streams *synthetic* observations, and
+**Session** against a **GPU pod**, streams *synthetic* observations, and
 reports a PASS/WARN/FAIL verdict with the measured network-vs-compute latency. It
-exercises the cloud inference path only — never the robot's cameras, joints, or
+exercises the remote inference path only — never the robot's cameras, joints, or
 motor bus. _Avoid_: calling it a "GPU test" — it validates the *path* to a pod, not
 the GPU.
 
 **Robot kind**:
 The robot family a **Node** drives, set with `--robot <name>` (carried as
-`robot_kind`). It does three jobs off one string: it selects the **adapter**
+`robot_kind`). It does two jobs off one string: it selects the **adapter**
 (registered vendor kinds resolve to their own, everything else to the bundled
-LeRobot one); it is the **S3 bundle key** the platform resolves the pod's URDF +
-meshes + `ik_config.json` under (`urdf/{robot_kind}/{version}/`); and it is the
-**Robot data** key an operator installs with `pip install interlatent[<kind>]`.
-Because all three must agree, the kind MUST equal the string the live node
-reports — an early rig shipped its bundle under `so101_bimanual` while the node
-reported `nori`, leaving an unreachable prefix; `nori` is canonical. _Avoid_:
+LeRobot one), and it is the **Robot data** key — the `interlatent_robots/<kind>/`
+subpackage an operator installs with `pip install interlatent[<kind>]` and the
+node serves its URDF + `kinematic_spec.json` out of.
+Because both must agree, the kind MUST equal the string the live node
+reports — an early rig shipped its robot data under `so101_bimanual` while the
+node reported `nori`, so nothing resolved; `nori` is canonical. _Avoid_:
 conflating with the `--loop module:function` override, which is a generic escape
 hatch, not a kind.
 
@@ -85,7 +102,8 @@ import package and would collide on install. Every kind ships with every install
 (~18 KB each); the per-kind extras carry that robot's **driver** deps, not its
 data. Meshes are **not** part of it — IK needs no geometry — though a `meshes.lock`
 may be added for a kind that later needs STLs (viewer/sim). _Avoid_: calling it a
-"bundle" — that word is the platform's S3 artifact, a path being retired.
+"bundle" — nothing is fetched or unpacked; the files are already on the node,
+installed with the wheel.
 
 **IK config** (`ik_config.json`):
 The hand-authored half of **Robot data**, kept in the repo but not in the wheel:
@@ -102,9 +120,9 @@ walks, exported from URDF + **IK config** by the engine's MuJoCo step. A kind wh
 data is missing it makes the arms do nothing (the browser can't build a solver).
 The **Node** serves this spec to the browser over the relay (from its installed
 **Robot data**), and the browser reads *both* the solver parameters and the mapper
-hints from it — the single and *only* source of browser kinematics: no platform
-backend is involved and there is no fallback, by design. A node that cannot serve
-its spec fails teleop loudly rather than letting the browser solve against a hosted
+hints from it — the single and *only* source of browser kinematics: no service
+serves kinematics and there is no fallback, by design. A node that cannot serve
+its spec fails teleop loudly rather than letting the browser solve against some other
 copy of kinematics it isn't driving. _Avoid_: hand-editing — it is derived, and
 any edit is overwritten on regen.
 
@@ -156,8 +174,8 @@ _Avoid_: implying a Cartesian frame — there is no IK on this path.
 The manual, no-cloud handle on one robot: it resolves a **robot kind** to an **adapter**
 exactly as `interlatent-act` does, opens it, loads the behavior registry, and exposes
 `act()`, `move()`, `pose()`, `behaviors()`, `close()`. It never runs a **policy** and
-needs no API key or network. _Avoid_: conflating with **Node** — the node is the
-dashboard-connected daemon that serves **Sessions**; `Robot` is in-process and offline.
+needs no key or network. _Avoid_: conflating with **Node** — the node is the
+coordinator-connected daemon that serves **Sessions**; `Robot` is in-process and offline.
 The two are *arbitrated, not coexistent*: the constructor raises `RobotBusyError` if a
 node (or another `Robot`) already holds the robot, and `force=True` overrides that at the
 risk of corrupting a live inference session. Note the arbitration is **best-effort** — a
@@ -189,7 +207,7 @@ demonstration, and mid-policy takeover (live **intervention**: engaging teleop
 while a policy session runs preempts the policy and records
 `control_source="intervention"`; the node shadow-steps the client so handback
 is ≈1 control tick — ADR 0034 in the platform repo). `make_teleop_channel`
-builds a `QuicTeleopChannel` against the hosted WebTransport/QUIC relay and
+builds a `QuicTeleopChannel` against the WebTransport/QUIC relay and
 decodes `TeleopFrame`s; the **command bus** applies engaged `mode="targets"`
 frames (absolute joint vectors the *browser* already IK-solved) through the
 **SafetyGate** before driving the robot. _Avoid_: implying the node computes
@@ -197,12 +215,13 @@ targets — the teleop *engine* (pose mapping, IK) runs in the browser producer;
 the node is a receiver + safety only, plus the **Kinematic spec** it serves the
 browser. See [docs/adr/0012](docs/adr/0012-teleop-receiver-stub-open-core-boundary.md)
 and [docs/adr/0021](docs/adr/0021-quic-teleop-child-process.md). QUIC is the only
-transport; the WebSocket/hosted-IK path was removed.
+transport; the WebSocket/remote-IK path was removed.
 
 **SafetyGate**:
 The node's single safety authority for human-driven motion: a workspace +
 velocity + deadman + staleness clamp applied to every teleop target. The
-**last hop before the motors**, so it runs on the robot, never on the platform.
+**last hop before the motors**, so it runs on the robot, never on the GPU pod or
+the coordinator.
 Needs a static **robot profile** (limits / velocity cap / rest pose).
 
 **Delta clamp**:
@@ -345,15 +364,13 @@ link. See [docs/adr/0018](docs/adr/0018-dimos-adapter-external-bus-peer.md).
   many **Sessions** over its life.
 - A **Session** pins one **policy URI** on one **GPU pod** for its lifetime.
 - The **Coordinator** assigns sessions and returns the DRTC endpoint to the
-  node/client per-session. When that coordinator is the hosted dashboard it also
-  provisions the pod; a self-hosted one brokers pods you registered yourself.
+  node/client per-session, brokering the **GPU pods** you registered with it.
 
 ## Flagged ambiguities
 
 - "warmup" historically meant both *pre-warm* (loading a policy before a session,
-  a cloud-side latency optimization) and *correct compilation*. On the robot side
-  neither is a concern — the client simply waits for the first action chunk; pod
-  warm-pooling is handled by the dashboard.
+  a pod-side latency optimization) and *correct compilation*. On the robot side
+  neither is a concern — the client simply waits for the first action chunk.
 
 - **Sequential chunking has two homes.** It is a *per-policy* fact (MolmoAct2 needs
   it, SmolVLA doesn't), and a **Session** pins one policy — so the session payload's

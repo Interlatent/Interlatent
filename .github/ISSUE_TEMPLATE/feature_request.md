@@ -6,6 +6,6 @@ labels: enhancement
 
 **What do you want to do?**
 
-**Which area?** (robot support / dashboard CLI / dataset collection / docs)
+**Which area?** (robot support / CLI / coordinator / dataset collection / docs)
 
 **Anything you've tried or links to relevant hardware/model docs?**

@@ -2,15 +2,15 @@
 
 Two subcommands:
 
-    interlatent-node pair --name <NAME> [--api-key ilat_...]
-        Registers this machine as a Node under the user's account.
-        Writes ~/.interlatent/node.toml with the node id + minted
-        token. Run once per machine.
+    interlatent-node pair --coordinator <URL> --name <NAME> [--api-key ilop_...]
+        Registers this machine as a Node with your coordinator (the one
+        `interlatent up` runs). Writes ~/.interlatent/node.toml with the
+        coordinator address, node id + minted token. Run once per machine.
 
     interlatent-node run --robot <NAME> [--port <PATH>] [...]
         Boots the daemon. Heartbeats every 10s, long-polls for
         assignment changes, and converges to whatever
-        InferenceSession the dashboard has assigned. Run under
+        InferenceSession the coordinator has assigned. Run under
         systemd / tmux on the Pi.
 
 The daemon itself lives in `daemon.py`; this file is just argparse
@@ -41,29 +41,16 @@ DEFAULT_CONFIG_PATH = Path(
 _LOG = logging.getLogger("interlatent.node")
 
 
-def _bypass_headers(bypass_key: str) -> dict[str, str]:
-    """Header(s) that let a request through a protected preview/test domain.
-
-    Vercel preview deployments sit behind Deployment Protection: an
-    un-bypassed request gets an auth challenge page instead of the API.
-    The `x-vercel-protection-bypass` header carries the automation bypass
-    secret configured for that project. Empty key -> no headers (prod).
-    """
-    key = (bypass_key or "").strip()
-    if not key:
-        return {}
-    return {"x-vercel-protection-bypass": key}
-
-
 # ---------------------------------------------------------------------------
 # Config file
 # ---------------------------------------------------------------------------
 #
 # Format is intentionally trivial TOML so we don't drag in `tomli_w`. Keys:
-#   node_id   = "..."
-#   token     = "ilnode_..."
-#   api_base  = "https://interlatent.com"
-#   name      = "..."
+#   node_id     = "..."
+#   token       = "ilnode_..."
+#   coordinator = "http://10.0.0.5:8900"
+#   api_base    = "..."   # compat alias for `coordinator`, written too
+#   name        = "..."
 #
 # We hand-format / hand-parse so the SDK stays free of optional deps.
 
@@ -110,33 +97,25 @@ def _read_config(path: Path) -> dict[str, str]:
 
 def cmd_pair(args: argparse.Namespace) -> int:
     api_key = args.api_key or os.environ.get("INTERLATENT_API_KEY", "")
-    # Inference is cloud-only: the node pairs against the Interlatent
-    # dashboard, which resolves the caller from the ilat_ API key. Without a
-    # key there is nothing to authenticate against.
+    # The node pairs against your coordinator, which resolves the caller from
+    # the operator key (ilop_...) it minted. Without a key there is nothing to
+    # authenticate against.
     if not api_key:
         print(
-            "error: an Interlatent API key is required to pair. Pass "
-            "--api-key or set INTERLATENT_API_KEY (get one from the "
-            "dashboard).",
+            "error: an operator API key is required to pair. Pass "
+            "--api-key or set INTERLATENT_API_KEY (`interlatent up` mints "
+            "one and writes it to disk).",
             file=sys.stderr,
         )
         return 2
 
-    # DRTC endpoint — normally inherited per session from whichever
-    # compute box is attached to the env in the dashboard, so we do
-    # NOT prompt at pair time. --drtc-url and INTERLATENT_DRTC_URL
-    # remain available for legacy / operator-managed fleets that want
-    # a fixed endpoint baked into the node config.
+    # DRTC endpoint — normally inherited per session from whichever GPU
+    # box the coordinator assigns, so we do NOT prompt at pair time.
+    # --drtc-url and INTERLATENT_DRTC_URL remain available for fleets
+    # that want a fixed endpoint baked into the node config.
     drtc_url = (
         (args.drtc_url or "").strip()
         or os.environ.get("INTERLATENT_DRTC_URL", "").strip()
-    )
-
-    # Bypass secret for pairing against a protected preview/test domain
-    # (e.g. a Vercel branch deployment). Empty on prod.
-    bypass_key = (
-        (args.bypass_key or "").strip()
-        or os.environ.get("INTERLATENT_BYPASS_KEY", "").strip()
     )
 
     coordinator = resolve(args.api_base, purpose="node")
@@ -147,7 +126,6 @@ def cmd_pair(args: argparse.Namespace) -> int:
             headers={
                 "x-api-key": api_key,
                 "content-type": "application/json",
-                **_bypass_headers(bypass_key),
             },
             data=json.dumps({"name": args.name}),
             timeout=30,
@@ -175,15 +153,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
         "api_base": coordinator,
         "name": payload["name"],
     }
-    # Persist the user API key: the node token authenticates heartbeat/poll,
-    # but DRTC inference auth needs the ilat_ key.
+    # Persist the operator API key: the node token authenticates heartbeat/poll,
+    # but DRTC inference auth needs the ilop_ key.
     cfg_data["api_key"] = api_key
     if drtc_url:
         cfg_data["drtc_url"] = drtc_url
-    # Persist the bypass secret so the daemon's heartbeat/poll to the same
-    # protected test domain also gets through without re-passing --bypass-key.
-    if bypass_key:
-        cfg_data["bypass_key"] = bypass_key
     _write_config(cfg_path, cfg_data)
 
     print(f"✓ Paired '{payload['name']}' as node_id={payload['id']}")
@@ -192,8 +166,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         print(f"✓ DRTC endpoint (fixed): {drtc_url}")
     else:
         print(
-            "DRTC endpoint will be set per session from whichever "
-            "compute box you attach through the cli/dashboard."
+            "DRTC endpoint will be set per session from whichever GPU "
+            "box you assign with `interlatent session start`."
         )
     print(
         "  Run `interlatent-node run --robot <name> --port <path>` to "
@@ -238,7 +212,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.quiet_clamp:
         logging.getLogger(_CLAMP_LOGGER_NAME).setLevel(logging.ERROR)
 
-    # DRTC inference auth needs the ilat_ user key, not the node token.
+    # DRTC inference auth needs the ilop_ operator key, not the node token.
     # Resolve from CLI > env > config saved at pair time.
     drtc_api_key = (
         args.api_key
@@ -247,7 +221,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     if not drtc_api_key:
         _LOG.warning(
-            "No Interlatent API key available for DRTC inference. The node "
+            "No operator API key available for DRTC inference. The node "
             "token alone is rejected by the DRTC server. Pass --api-key, set "
             "INTERLATENT_API_KEY, or re-run `interlatent-node pair` to save it."
         )
@@ -257,8 +231,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # DRTC endpoint resolution at run time: CLI flag > env var > pair-time
     # config. The daemon refuses to launch a session if none of these is
-    # set — there is no hosted default. Re-running pair with --drtc-url
-    # is the persistent fix.
+    # set and the coordinator's session payload carries no route — there
+    # is no default endpoint. Re-running pair with --drtc-url is the
+    # persistent fix.
     drtc_url = (
         (args.drtc_url or "").strip()
         or os.environ.get("INTERLATENT_DRTC_URL", "").strip()
@@ -283,13 +258,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         "INTERLATENT_IMAGE_RESIZE",
     )
 
-    # Bypass secret for a protected test domain: CLI > env > pair-time config.
-    bypass_key = (
-        (args.bypass_key or "").strip()
-        or os.environ.get("INTERLATENT_BYPASS_KEY", "").strip()
-        or cfg.get("bypass_key", "").strip()
-    )
-
     daemon = NodeDaemon(
         NodeDaemonConfig(
             node_id=cfg["node_id"],
@@ -300,7 +268,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                 config=cfg.get("coordinator") or cfg.get("api_base"),
                 purpose="node",
             ),
-            bypass_key=bypass_key or None,
             robot_kind=args.robot,
             robot_port=args.port,
             robot_extra=dict(args.robot_arg or []),
@@ -337,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="interlatent-node",
         description="Run a Pi-side daemon that executes inference sessions "
-        "assigned from the Interlatent dashboard.",
+        "assigned by your coordinator.",
     )
     p.add_argument(
         "--config",
@@ -347,38 +314,32 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_pair = sub.add_parser("pair", help="Register this machine as a Node.")
-    p_pair.add_argument("--name", required=True, help="Display name shown in the dashboard.")
+    p_pair.add_argument(
+        "--name", required=True,
+        help="Display name for this node, shown by `interlatent nodes ls`.",
+    )
     p_pair.add_argument(
         "--api-key",
         default=None,
-        help="Interlatent user API key (or set INTERLATENT_API_KEY).",
+        help="Operator API key, ilop_... (or set INTERLATENT_API_KEY). "
+             "`interlatent up` mints one.",
     )
     p_pair.add_argument(
         "--coordinator",
         "--api-base",
         dest="api_base",
         default=None,
-        help="Coordinator base URL, e.g. http://10.0.0.5:8900 or "
-             "https://interlatent.com. Env: INTERLATENT_COORDINATOR.",
+        help="Coordinator base URL, e.g. http://10.0.0.5:8900. No default. "
+             "Env: INTERLATENT_COORDINATOR.",
     )
     p_pair.add_argument(
         "--drtc-url",
         default=None,
         help="DRTC inference endpoint to persist (e.g. "
-        "203.0.113.7:50051 for a Runpod box's public IP:port, "
-        "or https://<workspace>--interlatent-drtc-inference-web.modal.run "
-        "for a Modal deployment). Optional: when omitted, the endpoint is "
-        "inherited per session from the compute box the dashboard attaches "
-        "to the environment.",
-    )
-    p_pair.add_argument(
-        "--bypass-key",
-        default=None,
-        help="Protection-bypass secret for pairing against a protected "
-        "preview/test domain (e.g. a Vercel branch deployment). Sent as the "
-        "x-vercel-protection-bypass header and saved to the node config so "
-        "the daemon reuses it. Falls back to INTERLATENT_BYPASS_KEY. Leave "
-        "unset for production.",
+        "203.0.113.7:50051 for a GPU box's public IP:port, or an "
+        "https:// URL when the box sits behind a gRPC-Web proxy). "
+        "Optional: when omitted, the endpoint is inherited per session "
+        "from the GPU box your coordinator assigns.",
     )
     p_pair.set_defaults(func=cmd_pair)
 
@@ -419,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--api-key",
         default=None,
-        help="Interlatent user API key (ilat_...) for DRTC inference auth. "
+        help="Operator API key (ilop_...) for DRTC inference auth. "
         "Falls back to INTERLATENT_API_KEY, then the key saved at pair time.",
     )
     p_run.add_argument(
@@ -477,13 +438,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "-v", "--verbose", action="store_true",
         help="Shortcut for --log-level debug.",
-    )
-    p_run.add_argument(
-        "--bypass-key",
-        default=None,
-        help="Protection-bypass secret for heartbeat/poll against a protected "
-        "test domain. Overrides INTERLATENT_BYPASS_KEY and the value saved at "
-        "pair time.",
     )
     p_run.set_defaults(func=cmd_run)
 

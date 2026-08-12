@@ -10,10 +10,6 @@ Spoken by:
 | Robot-side client | `packages/sdk` (`interlatent`) | `src/interlatent/inference/protocol/` |
 | Policy server | `packages/server` (`interlatent-server`) | `src/interlatent_server/protocol/` |
 
-Interlatent's hosted GPU boxes run the same protocol; until the hosted image builds
-from `packages/server` ([ADR 0023](../docs/adr/0023-self-hosted-policy-server-returns.md)),
-the closed `interlatent-engine` carries its own copy that must not drift from this one.
-
 The wire package name is `interlatent.inference.v1` and does **not** track the
 Python package names — it is the compatibility surface for every deployed robot
 and GPU box.
@@ -61,8 +57,8 @@ the two packages' generated descriptors disagree.
 ## Compatibility rules
 
 - **Additive changes only** — new fields with new numbers. Never renumber, remove,
-  or repurpose an existing field: old robots and the hosted cloud speak this
-  contract.
+  or repurpose an existing field: robots and GPU boxes already in the field speak
+  this contract.
 - Unknown metadata keys in `OpenSession` must be ignored by servers.
 - Comments are free to change (they do not affect the serialized descriptor), but
   keep them true — `control_source`'s four-value contract (`policy` / `teleop` /

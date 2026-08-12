@@ -1,6 +1,10 @@
 """Dataset publish sinks: metadata selection, the recorder gate, and the
 local merge-on-stop accumulation behaviour.
 
+There are exactly two sinks — a local directory and an S3 bucket — and
+neither authenticates against anything of ours, so the gate below turns
+purely on whether a destination exists (ADR 0039).
+
 The merge tests need lerobot (+ Pillow) installed and ``importorskip`` out
 otherwise — mirroring how the rest of the suite stays GPU/robot-free. The
 metadata-selection and recorder-gate tests need neither.
@@ -15,7 +19,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from interlatent_server.server.sinks import (  # noqa: E402
-    BackendInboxSink,
     LocalDirSink,
     S3Sink,
     sink_from_metadata,
@@ -35,7 +38,6 @@ def test_sink_from_metadata_none_when_unset():
 def test_sink_from_metadata_local_dir():
     sink = sink_from_metadata({"output_dir": "/data/run"})
     assert isinstance(sink, LocalDirSink)
-    assert sink.requires_api_key() is False
     assert sink.normalize_for_merge() is True
 
 
@@ -51,17 +53,11 @@ def test_sink_from_metadata_s3():
     assert sink.bucket == "bucket"
     assert sink.prefix == "some/prefix"
     assert sink.endpoint_url == "http://localhost:9000"
-    assert sink.requires_api_key() is False
-
-
-def test_backend_inbox_sink_requires_key_and_no_merge():
-    sink = BackendInboxSink()
-    assert sink.requires_api_key() is True
-    assert sink.normalize_for_merge() is False
+    assert sink.normalize_for_merge() is True
 
 
 # ----------------------------------------------------------------------
-# recorder gate: local/S3 sinks record without an API key; inbox doesn't
+# recorder gate: recording needs a destination, and nothing else
 # ----------------------------------------------------------------------
 
 
@@ -76,25 +72,27 @@ def test_recorder_gate(tmp_path):
     # `...server.sinks`; importing transport above then re-executes it, and a
     # class bound at collection time is no longer the live one. Nothing in the
     # server does isinstance on a sink — they are duck-typed through
-    # `requires_api_key()` / `publish()` — so this is a test-only hazard.
+    # `normalize_for_merge()` / `publish()` — so this is a test-only hazard.
     from interlatent_server.server.sinks import LocalDirSink as _LocalDirSink
 
     svc = InferenceServicer(recorder_base_dir=tmp_path)
     req = pb.OpenSessionRequest(policy_uri="lerobot/x")
 
-    # Local sink requested via metadata, no x-api-key (context=None) -> records.
+    # Destination named in session metadata -> records. There is no gRPC
+    # context to pass: no credential is consulted anywhere on this path.
     rec = svc._maybe_build_recorder(
         session_id="s1",
         request=req,
         metadata={"record": "1", "output_dir": str(tmp_path / "ds")},
-        context=None,
     )
     assert rec is not None
     assert isinstance(rec.config.sink, _LocalDirSink)
 
-    # Hosted inbox (no sink configured), no x-api-key -> recording disabled.
+    # No destination at all -> recording disabled rather than capturing an
+    # episode with nowhere to publish it. `interlatent-serve` can't reach
+    # this state (--output-dir has a default); a hand-built servicer can.
     rec2 = svc._maybe_build_recorder(
-        session_id="s2", request=req, metadata={"record": "1"}, context=None
+        session_id="s2", request=req, metadata={"record": "1"},
     )
     assert rec2 is None
 
@@ -103,7 +101,7 @@ def test_recorder_gate(tmp_path):
         recorder_base_dir=tmp_path, dataset_sink=_LocalDirSink(str(tmp_path / "def"))
     )
     rec3 = svc_default._maybe_build_recorder(
-        session_id="s3", request=req, metadata={"record": "1"}, context=None
+        session_id="s3", request=req, metadata={"record": "1"},
     )
     assert rec3 is not None
     assert isinstance(rec3.config.sink, _LocalDirSink)
@@ -205,13 +203,20 @@ def test_localdir_mismatch_writes_sibling_not_dropped(tmp_path):
 
 def test_a_local_sink_needs_no_coordinator_at_all(monkeypatch, tmp_path):
     """The point of the whole exercise: a box publishing to a local directory
-    never calls a control plane, so demanding an address it will not use would
-    make a fully detached box refuse to record."""
+    never calls a control plane, so a fully detached box with no coordinator
+    address configured anywhere must still record.
+
+    The recorder no longer carries a coordinator address at all — there is
+    nothing left for it to call — so what this pins is that building one
+    with the environment stripped bare still succeeds.
+    """
     pytest.importorskip("grpc")
     monkeypatch.delenv("INTERLATENT_COORDINATOR", raising=False)
     monkeypatch.delenv("INTERLATENT_API_BASE", raising=False)
+    monkeypatch.delenv("INTERLATENT_API_KEY", raising=False)
 
     import interlatent_server.protocol.messages_pb2 as pb
+    from interlatent_server.server.sinks import LocalDirSink as _LocalDirSink
     from interlatent_server.server.transport import InferenceServicer
 
     svc = InferenceServicer(recorder_base_dir=tmp_path)
@@ -219,7 +224,7 @@ def test_a_local_sink_needs_no_coordinator_at_all(monkeypatch, tmp_path):
         session_id="s1",
         request=pb.OpenSessionRequest(policy_uri="lerobot/x"),
         metadata={"record": "1", "output_dir": str(tmp_path / "ds")},
-        context=None,
     )
     assert rec is not None
-    assert rec.config.api_base == ""
+    assert isinstance(rec.config.sink, _LocalDirSink)
+    assert not hasattr(rec.config, "api_base")

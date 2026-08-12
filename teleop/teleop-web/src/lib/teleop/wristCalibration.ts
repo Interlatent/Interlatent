@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/wristCalibration.ts @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 /**
  * Wrist-pivot calibration — port of vr-teleop-kit's in-VR ritual
  * (relay/web/client.js).

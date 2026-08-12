@@ -66,7 +66,6 @@ ENV_API_BASE = "INTERLATENT_QUIC_PROC_API_BASE"
 ENV_API_KEY = "INTERLATENT_QUIC_PROC_API_KEY"
 ENV_SESSION_ID = "INTERLATENT_QUIC_PROC_SESSION_ID"
 ENV_TOKEN_PATH = "INTERLATENT_QUIC_PROC_TOKEN_PATH"
-ENV_BYPASS_KEY = "INTERLATENT_QUIC_PROC_BYPASS_KEY"
 
 
 def encode_data(payload: bytes) -> bytes:
@@ -138,7 +137,6 @@ __all__ = [
     "ENV_API_KEY",
     "ENV_SESSION_ID",
     "ENV_TOKEN_PATH",
-    "ENV_BYPASS_KEY",
     "encode_data",
     "encode_ctrl",
     "encode_video",

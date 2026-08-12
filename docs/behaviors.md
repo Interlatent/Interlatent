@@ -3,7 +3,7 @@
 Named, deterministic behaviors — `home`, `hello`, or your own — drive a robot through
 canned moves and trajectories from Python or the CLI. They run offline on the robot
 side, through the same adapter action path the policy loop uses (so the native
-adapters' delta clamp still applies). No API key, no GPU, no policy.
+adapters' delta clamp still applies). No coordinator, no GPU, no policy.
 
 ```python
 import interlatent as il
@@ -139,7 +139,7 @@ declarative behavior claims the name — a TOML behavior always wins the name.
 
 ## The CLI
 
-All three subcommands are offline (no API key):
+All three subcommands run offline, like the Python path:
 
 ```bash
 interlatent behavior ls --robot so101 [--json]                  # list behaviors + type/duration

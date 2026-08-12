@@ -9,7 +9,7 @@ this contract (the contract is duplicated across the wire boundary by design
 Three modes exist on the wire; the node executes ``targets`` (`control.py`):
 
 - ``mode="keys"``    — legacy: ``held_keys`` was a set of currently-held key
-                       strings the removed dashboard keyboard overlay sent;
+                       strings a removed keyboard overlay sent;
                        kept on the wire for back-compat decoding only.
 - ``mode="pose"``    — ``ee_pos``/``ee_quat`` is an absolute 6-DoF end-effector
                        TARGET in the arm-base frame and ``pinch`` a gripper

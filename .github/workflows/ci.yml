@@ -257,7 +257,7 @@ jobs:
         # the whole module and this job would go green having tested
         # nothing. Name the two assertions that must have executed.
         run: |
-          for t in test_the_video_is_actually_h264 test_the_episode_reaches_the_backend; do
+          for t in test_the_video_is_actually_h264 test_the_episode_reaches_the_destination; do
             grep -q "$t PASSED" /tmp/real.txt || {
               echo "::error title=$t did not run::the real-lerobot job must execute it"
               exit 1
@@ -266,9 +266,8 @@ jobs:
 
   teleop-web:
     # The WebXR VR teleop producer (teleop/teleop-web/) — ~14k lines that
-    # landed with no build gate at all. It is a deliberate fork of the
-    # dashboard's teleop engine (see its README), so nothing upstream compiles
-    # it either; a broken headset build would only surface in a headset.
+    # landed with no build gate at all. Nothing else compiles it, so without
+    # this job a broken headset build would only surface in a headset.
     name: teleop-web (typecheck + test + build)
     runs-on: ubuntu-latest
     timeout-minutes: 15

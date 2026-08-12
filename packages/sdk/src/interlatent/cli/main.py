@@ -1,22 +1,23 @@
-"""`interlatent` CLI: a thin command-line client for the Interlatent dashboard.
+"""`interlatent` CLI: run a coordinator, and drive it from a terminal.
 
-Inference is provisioned and run in the cloud through the Interlatent
-dashboard. This CLI is a small utility view of that dashboard — it resolves
-the caller from an Interlatent API key (``ilat_…``) and lets you, from a
-terminal:
+``interlatent up`` starts the coordinator on this machine; every other command
+is a client of it. It resolves the caller from the operator key that
+coordinator minted (``ilop_…``) and lets you:
 
-    interlatent gpus ls                 # GPU boxes available to your account
-    interlatent nodes ls                # robot nodes paired to your account
+    interlatent up                      # start a coordinator on this machine
+    interlatent gpus ls                 # GPU boxes registered with it
+    interlatent nodes ls                # robot nodes paired to it
     interlatent env create --slug ...   # create an environment to collect into
     interlatent session ls              # active inference sessions
-    interlatent session start ...       # assign a node+pod+policy session
+    interlatent session start ...       # assign a node+box+policy session
     interlatent session stop <id>       # cancel a session
 
-Auth: pass ``--api-key`` or set ``INTERLATENT_API_KEY``. The base URL defaults
-to https://interlatent.com (override with ``--api-base`` / ``INTERLATENT_API_BASE``).
+Auth: pass ``--api-key`` or set ``INTERLATENT_API_KEY``; with neither, the key
+``interlatent up`` wrote to disk is used. There is no default coordinator
+address — name yours with ``--coordinator`` or ``INTERLATENT_COORDINATOR``.
 
-The robot-side daemon (``interlatent-node``) polls the dashboard directly and
-needs no coordinator — this CLI never sits in the inference data path.
+The robot-side daemon (``interlatent-node``) polls the coordinator directly —
+this CLI never sits in the inference data path.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ def _default_api_base() -> str:
 
 
 def _make_client(args: argparse.Namespace) -> HTTPClient:
-    """Build an authenticated dashboard client or exit with a clear error."""
+    """Build an authenticated coordinator client or exit with a clear error."""
     api_key = getattr(args, "api_key", None) or os.environ.get("INTERLATENT_API_KEY", "")
     if not api_key:
         # A locally-run coordinator already minted one; use it rather than
@@ -64,7 +65,7 @@ def _make_client(args: argparse.Namespace) -> HTTPClient:
 def _rows(payload: Any, key: str) -> list[dict]:
     """Normalize a list response.
 
-    The dashboard may return either a bare JSON array or an object wrapping
+    The coordinator may return either a bare JSON array or an object wrapping
     the array under ``key`` (e.g. ``{"pods": [...]}``). Accept both.
     """
     if isinstance(payload, dict):
@@ -200,7 +201,7 @@ def cmd_env(args: argparse.Namespace) -> int:
     if args.env_cmd == "create":
         # POST /api/v1/environments -> the created environment config.
         # `session start` requires the env to already exist; this is how you
-        # create one from the terminal (the dashboard is the other way).
+        # create one.
         body: dict[str, Any] = {
             "slug": args.slug,
             "display_name": args.display_name or args.slug,
@@ -221,7 +222,7 @@ def cmd_env(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------
-# behavior (offline — no API key, no cloud)
+# behavior (offline — no API key, no coordinator)
 # ----------------------------------------------------------------------
 
 
@@ -367,7 +368,8 @@ def cmd_gpu(args: argparse.Namespace) -> int:
 def cmd_config(args: argparse.Namespace) -> int:
     """Set the recording destination stamped onto every session.
 
-    Coordinator-only: the hosted dashboard 404s this, and says so by name.
+    A coordinator that does not implement the route 404s, and this says so
+    by name rather than printing a bare HTTP error.
     """
     client = _make_client(args)
     recording: dict = {}
@@ -394,8 +396,9 @@ def cmd_config(args: argparse.Namespace) -> int:
             )
     except NotFoundError:
         print(
-            "error: this coordinator does not manage recording destinations "
-            "(the hosted dashboard configures them per-environment instead).",
+            "error: this coordinator does not manage recording destinations; "
+            "set one on the GPU box instead (serve_gpu's --output-dir, or "
+            "DRTC_OUTPUT_DIR in its environment).",
             file=sys.stderr,
         )
         return 2
@@ -410,10 +413,11 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def _add_auth_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--api-key", default=None,
-                   help="Interlatent API key (ilat_…). Falls back to INTERLATENT_API_KEY.")
+                   help="Operator key from `interlatent up` (ilop_…). Falls "
+                        "back to INTERLATENT_API_KEY, then to the key on disk.")
     p.add_argument("--coordinator", "--api-base", dest="api_base", default=None,
-                   help="Coordinator base URL, e.g. http://10.0.0.5:8900 or "
-                        "https://interlatent.com. Env: INTERLATENT_COORDINATOR.")
+                   help="Coordinator base URL, e.g. http://10.0.0.5:8900. "
+                        "Env: INTERLATENT_COORDINATOR.")
     p.add_argument("--json", action="store_true", help="Emit raw JSON instead of a table.")
 
 
@@ -422,8 +426,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="interlatent",
         description="Session manager for Interlatent robot fleets. Run a "
         "coordinator of your own (`up`), register GPU boxes and nodes "
-        "against it, and start/stop inference sessions — or point the "
-        "same commands at the hosted dashboard with --coordinator.",
+        "against it, and start/stop inference sessions — or point the same "
+        "commands at a coordinator running elsewhere with --coordinator.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -493,13 +497,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth_flags(g_rm)
     p_gpu.set_defaults(func=cmd_gpu)
 
-    p_gpus = sub.add_parser("gpus", help="List GPU boxes available to your account.")
+    p_gpus = sub.add_parser("gpus", help="List GPU boxes registered with the coordinator.")
     gpus_sub = p_gpus.add_subparsers(dest="gpus_cmd", required=True)
     p_gpus_ls = gpus_sub.add_parser("ls", help="List GPUs.")
     _add_auth_flags(p_gpus_ls)
     p_gpus.set_defaults(func=cmd_gpus)
 
-    p_nodes = sub.add_parser("nodes", help="List robot nodes paired to your account.")
+    p_nodes = sub.add_parser("nodes", help="List robot nodes paired with the coordinator.")
     nodes_sub = p_nodes.add_subparsers(dest="nodes_cmd", required=True)
     p_nodes_ls = nodes_sub.add_parser("ls", help="List nodes.")
     _add_auth_flags(p_nodes_ls)
@@ -531,7 +535,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # behavior — offline named moves/trajectories (no API key).
     p_beh = sub.add_parser(
-        "behavior", help="List/validate/run named behaviors offline (no cloud, no API key)."
+        "behavior",
+        help="List/validate/run named behaviors offline (no coordinator, no API key).",
     )
     beh_sub = p_beh.add_subparsers(dest="behavior_cmd", required=True)
 

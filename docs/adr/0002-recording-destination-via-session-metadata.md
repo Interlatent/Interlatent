@@ -27,11 +27,12 @@ the server) is the only way to get it there.
 - **S3 credentials transit coordinator → node → server gRPC metadata.** Acceptable only because
   of the single-owner trust model and a co-owned LAN/tailnet (same boundary as ADR-0001). This
   would be unacceptable in a multi-tenant deployment and must be revisited before any
-  shared/hosted coordinator. The hosted path does **not** use this — it keeps the presigned-URL
-  inbox (`BackendInboxSink`) and never ships credentials to the server.
+  coordinator that brokers for operators who do not own the boxes it talks to.
 - **A local `output_dir` is on the GPU server's filesystem**, since recording is server-side.
   Co-located dev boxes share one disk; a remote GPU box writes locally to itself — use `s3_uri`
   to land data elsewhere.
-- **Sink resolution precedence** is fixed at: session metadata → `interlatent-serve` flags →
-  `BackendInboxSink`. The `OpenSession` metadata gains a stable `recording` contract
+- **Sink resolution precedence** is fixed at: session metadata → `interlatent-serve` flags.
+  There is no third step; `--output-dir` carries a default of `~/.interlatent/episodes`
+  (ADR-0039), so the second step always resolves and a box is never left without a
+  destination. The `OpenSession` metadata gains a stable `recording` contract
   (`output_dir` | `s3_uri`,`s3_endpoint_url`,`s3_access_key`,`s3_secret_key`,`s3_region`).

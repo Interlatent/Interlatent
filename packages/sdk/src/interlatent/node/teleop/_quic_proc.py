@@ -155,7 +155,6 @@ class _Cfg:
     api_key: str
     session_id: str
     token_path: str
-    bypass_key: Optional[str]
 
 
 def _load_cfg() -> _Cfg:
@@ -173,7 +172,6 @@ def _load_cfg() -> _Cfg:
         api_key=required(_quic_ipc.ENV_API_KEY),
         session_id=required(_quic_ipc.ENV_SESSION_ID),
         token_path=required(_quic_ipc.ENV_TOKEN_PATH),
-        bypass_key=os.environ.get(_quic_ipc.ENV_BYPASS_KEY) or None,
     )
 
 
@@ -298,7 +296,6 @@ def _mint(cfg: _Cfg) -> "tuple[str, str]":
         api_base=cfg.api_base,
         token_path=cfg.token_path,
         api_key=cfg.api_key,
-        bypass_key=cfg.bypass_key,
         role="node",
     )
     wt = data.get("webtransport_url")

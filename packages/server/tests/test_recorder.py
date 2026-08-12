@@ -9,8 +9,13 @@ walk in ``test_import_surface.py``.
 Everything below runs with no GPU, no lerobot, and no network: the drain
 loop is a real asyncio task over a real temp dir, the LeRobot build is a
 stub (``LeRobotRebuilder`` is a seam the recorder holds by name), and the
-backend HTTP calls go through a fake ``httpx.AsyncClient`` that records
-what was sent.
+destination is a ``_RecordingSink`` that keeps what it was handed.
+
+Publishing is entirely a sink concern now (ADR 0039 deleted the hosted
+upload inbox and the three HTTP methods that drove it), so the recorder's
+whole contract with the outside world is one ``publish()`` call carrying a
+finished dataset — which is what the ``upload()`` tests below assert
+against.
 
 What is deliberately asserted, because getting it wrong is silent data loss:
 
@@ -19,11 +24,12 @@ What is deliberately asserted, because getting it wrong is silent data loss:
   ticks the node then deletes.
 - a replayed tick is deduped and acked **True** (ADR 0024, platform repo), because a
   reconnect re-sends ticks whose ack was lost.
-- ``control_source`` in {teleop, intervention} drives ``has_teleop`` on
-  upload-complete — the Episode badge the dashboard shows and the DAgger
-  label (ADR 0034) training weights on.
+- ``control_source`` in {teleop, intervention} counts as human-driven — the
+  DAgger label (ADR 0034) training weights on.
 - the encode rate comes from the **measured** control timestamps, not the
   requested ``config.fps``; using config.fps makes playback run fast.
+- a dataset that is built but cannot be published is **parked, not
+  deleted** — whether the sink raised or there was no sink at all.
 """
 from __future__ import annotations
 
@@ -51,6 +57,37 @@ from interlatent_server.server.recorder import (  # noqa: E402
 # ----------------------------------------------------------------------
 
 
+class _RecordingSink:
+    """A destination that keeps what it was handed instead of shipping it.
+
+    Stands in for ``LocalDirSink`` / ``S3Sink``. ``publish`` snapshots the
+    dataset's file list eagerly: the recorder rmtree's the working dir the
+    moment publish returns, so anything read afterwards is gone.
+    """
+
+    def __init__(self, *, error: Exception | None = None, normalize: bool = True):
+        self.error = error
+        self.normalize = normalize
+        self.published: list[dict] = []
+
+    def normalize_for_merge(self) -> bool:
+        return self.normalize
+
+    async def publish(self, *, episode_id, dataset_root, config, recorder=None):
+        root = Path(dataset_root)
+        self.published.append({
+            "episode_id": episode_id,
+            "root": root,
+            "files": sorted(
+                p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()
+            ),
+            "config": config,
+        })
+        if self.error is not None:
+            raise self.error
+
+
 def _config(**over) -> RecorderConfig:
     base = dict(
         episode_id="ep-1",
@@ -60,8 +97,7 @@ def _config(**over) -> RecorderConfig:
         fps=30,
         policy_uri="lerobot/smolvla_base",
         layer="inference:lerobot/smolvla_base",
-        api_key="ilat_test",
-        api_base="https://interlatent.test",
+        sink=_RecordingSink(),
     )
     base.update(over)
     return RecorderConfig(**base)
@@ -69,6 +105,10 @@ def _config(**over) -> RecorderConfig:
 
 def _rec(tmp_path: Path, **cfg_over) -> SessionRecorder:
     return SessionRecorder(tmp_path / "work", _config(**cfg_over))
+
+
+def _sink(rec: SessionRecorder) -> _RecordingSink:
+    return rec.config.sink
 
 
 async def _staged(rec: SessionRecorder, n: int, timeout: float = 5.0) -> None:
@@ -115,22 +155,6 @@ def _tick(rec: SessionRecorder, step: int, *, ts: int | None = None, **over) -> 
 )
 def test_short_cam_strips_only_the_image_prefix(key: str, expected: str) -> None:
     assert rec_mod._short_cam(key) == expected
-
-
-@pytest.mark.parametrize(
-    "given,expected",
-    [
-        # Bare origin — what serve_gpu and the whole node SDK pass.
-        ("https://interlatent.com", "https://interlatent.com/api/v1"),
-        ("https://interlatent.com/", "https://interlatent.com/api/v1"),
-        # Already-rooted — what older recorder config passed. Must not double.
-        ("https://interlatent.com/api/v1", "https://interlatent.com/api/v1"),
-        ("https://interlatent.com/api/v1/", "https://interlatent.com/api/v1"),
-    ],
-)
-def test_api_v1_root_accepts_both_conventions(given: str, expected: str) -> None:
-    """A bare origin used to POST to /episodes and get 405 back."""
-    assert rec_mod._api_v1_root(given) == expected
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", " False "])
@@ -390,14 +414,12 @@ def test_finalize_is_idempotent_and_survives_a_failing_write(
 def test_discard_drops_everything_and_blocks_a_later_upload(tmp_path: Path) -> None:
     """The idle-GC discards a capture whose session the user moved past.
     Exactly one of upload/discard may ever run."""
-    uploaded = {"n": 0}
 
     async def main() -> SessionRecorder:
         rec = _rec(tmp_path)
         rec.start()
         _tick(rec, 0)
         _tick(rec, 1)
-        rec._post_episodes_create = lambda *a, **k: uploaded.update(n=1)  # type: ignore[assignment]
         dropped = await rec.discard()
         assert dropped == 2
         assert not rec.working_dir.exists()
@@ -405,8 +427,8 @@ def test_discard_drops_everything_and_blocks_a_later_upload(tmp_path: Path) -> N
         await rec.upload()  # must be a no-op after discard
         return rec
 
-    asyncio.run(main())
-    assert uploaded["n"] == 0
+    rec = asyncio.run(main())
+    assert _sink(rec).published == []
 
 
 # ----------------------------------------------------------------------
@@ -475,63 +497,6 @@ def test_step_source_walks_frames_and_skips_non_frames(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-class _FakeResponse:
-    def __init__(self, status_code: int = 200, body: dict | None = None) -> None:
-        self.status_code = status_code
-        self._body = body or {}
-        self.text = json.dumps(self._body)
-
-    def json(self) -> dict:
-        return self._body
-
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-
-class _FakeHttp:
-    """Stands in for httpx.AsyncClient, recording every call.
-
-    ``presign`` decides which keys get a presigned URL back, so the
-    "backend forgot a file" path is reachable.
-    """
-
-    def __init__(self, *, create_status: int = 200, presign: bool = True) -> None:
-        self.posts: list[tuple[str, dict, dict]] = []
-        self.puts: list[tuple[str, bytes]] = []
-        self.create_status = create_status
-        self.presign = presign
-
-    def client_factory(self, **_kw):
-        outer = self
-
-        class _Client:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def post(self, url, json=None, headers=None):
-                outer.posts.append((url, json or {}, headers or {}))
-                if url.endswith("/upload-urls"):
-                    keys = [f["key"] for f in (json or {}).get("files", [])]
-                    urls = (
-                        {k: f"https://s3.test/{k}" for k in keys}
-                        if outer.presign else {}
-                    )
-                    return _FakeResponse(200, {"presigned_urls": urls})
-                if url.endswith("/episodes"):
-                    return _FakeResponse(outer.create_status)
-                return _FakeResponse(200)
-
-            async def put(self, url, content=None):
-                outer.puts.append((url, content))
-                return _FakeResponse(200)
-
-        return _Client()
-
-
 class _StubRebuilder:
     """Stands in for LeRobotRebuilder: writes a plausible v3 tree."""
 
@@ -560,18 +525,14 @@ class _StubRebuilder:
         return self.root, list(source.episode_ids())
 
 
-def _install_stubs(monkeypatch, http: _FakeHttp) -> None:
-    import httpx
-
-    monkeypatch.setattr(httpx, "AsyncClient", http.client_factory)
+def _install_stubs(monkeypatch) -> None:
     monkeypatch.setattr(rec_mod, "LeRobotRebuilder", _StubRebuilder)
 
 
-def test_upload_of_an_empty_session_skips_the_backend_entirely(
+def test_upload_of_an_empty_session_never_reaches_the_sink(
     monkeypatch, tmp_path: Path
 ) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
 
     async def main() -> SessionRecorder:
         rec = _rec(tmp_path)
@@ -580,13 +541,14 @@ def test_upload_of_an_empty_session_skips_the_backend_entirely(
         return rec
 
     rec = asyncio.run(main())
-    assert http.posts == []
+    assert _sink(rec).published == []
     assert not rec.working_dir.exists()
 
 
-def test_upload_posts_creates_puts_and_completes(monkeypatch, tmp_path: Path) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+def test_upload_hands_the_built_dataset_to_the_sink(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install_stubs(monkeypatch)
 
     async def main() -> SessionRecorder:
         rec = _rec(tmp_path, task_id="task-42", model_id="m-9")
@@ -599,33 +561,16 @@ def test_upload_posts_creates_puts_and_completes(monkeypatch, tmp_path: Path) ->
 
     rec = asyncio.run(main())
 
-    urls = [u for u, _b, _h in http.posts]
-    root = "https://interlatent.test/api/v1"
-    assert urls == [
-        f"{root}/episodes",
-        f"{root}/episodes/ep-1/upload-urls",
-        f"{root}/episodes/ep-1/upload-complete",
-    ]
+    # Exactly one publish, of the whole dataset, under the session's id.
+    published = _sink(rec).published
+    assert len(published) == 1
+    assert published[0]["episode_id"] == "ep-1"
+    assert published[0]["files"] == ["data/chunk-000.parquet", "meta/info.json"]
 
-    create_body = http.posts[0][1]
-    assert create_body["episode_id"] == "ep-1"
-    assert create_body["environment"] == "pick-cube"
-    assert create_body["task_id"] == "task-42"
-    assert create_body["model_id"] == "m-9"
-    assert create_body["model_framework"] == "drtc"
-    assert create_body["tags"]["policy_uri"] == "lerobot/smolvla_base"
-    assert http.posts[0][2]["x-api-key"] == "ilat_test"
-
-    # Every dataset file is PUT, namespaced under a single _inbox session.
-    assert len(http.puts) == 2
-    prefixes = {u.split("/_inbox/")[1].split("/")[0] for u, _c in http.puts}
-    assert len(prefixes) == 1
-    assert {u.rsplit("/", 1)[-1] for u, _c in http.puts} == {
-        "info.json", "chunk-000.parquet",
-    }
-
-    # Human-driven steps were reported to the backend as the episode badge.
-    assert http.posts[2][1] == {"manifest": None, "has_teleop": True}
+    # The sink is handed the session's provenance along with the bytes.
+    cfg = published[0]["config"]
+    assert (cfg.env_slug, cfg.task_id, cfg.model_id) == ("pick-cube", "task-42", "m-9")
+    assert cfg.policy_uri == "lerobot/smolvla_base"
 
     # The rebuilder was handed the MEASURED rate (4 ticks 100ms apart -> 10),
     # not the requested 30, and the h264 codec (gVisor stalls on libsvtav1).
@@ -636,66 +581,34 @@ def test_upload_posts_creates_puts_and_completes(monkeypatch, tmp_path: Path) ->
     assert not rec.working_dir.exists()
 
 
-def test_upload_reports_has_teleop_false_for_a_pure_policy_rollout(
+def test_upload_lands_the_dataset_on_disk_through_a_real_local_sink(
     monkeypatch, tmp_path: Path
 ) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    """The stub sink above proves the recorder's half of the contract; this
+    proves the two halves fit. A first publish into an empty destination is
+    a move, so it needs no lerobot — which is exactly the path a fresh box
+    with the default ``--output-dir`` takes on its first session."""
+    from interlatent_server.server.sinks import LocalDirSink
 
-    async def main() -> None:
-        rec = _rec(tmp_path)
-        rec.start()
-        for i in range(2):
-            _tick(rec, i, control_source="policy")
-        await rec.upload()
-
-    asyncio.run(main())
-    assert http.posts[-1][1]["has_teleop"] is False
-
-
-def test_upload_tolerates_a_409_on_episode_create(monkeypatch, tmp_path: Path) -> None:
-    """The idle-GC may already have created the row; a 409 is not an error."""
-    http = _FakeHttp(create_status=409)
-    _install_stubs(monkeypatch, http)
-
-    async def main() -> None:
-        rec = _rec(tmp_path)
-        rec.start()
-        _tick(rec, 0)
-        _tick(rec, 1)
-        await rec.upload()
-
-    asyncio.run(main())
-    assert [u for u, _b, _h in http.posts][-1].endswith("/upload-complete")
-    assert http.puts
-
-
-def test_upload_does_not_complete_when_a_presigned_url_is_missing(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """A missing URL means that file never reached S3 — completing anyway
-    would enqueue a merge against an incomplete inbox session."""
-    http = _FakeHttp(presign=False)
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
+    dest = tmp_path / "episodes"
 
     async def main() -> SessionRecorder:
-        rec = _rec(tmp_path)
+        rec = _rec(tmp_path, sink=LocalDirSink(dest))
         rec.start()
-        _tick(rec, 0)
-        _tick(rec, 1)
+        for i in range(3):
+            _tick(rec, i, ts=i * 100_000_000)
         await rec.upload()
         return rec
 
     rec = asyncio.run(main())
-    assert http.puts == []
-    assert not any(u.endswith("/upload-complete") for u, _b, _h in http.posts)
-    # The working dir is still reaped so a failed upload can't wedge the disk.
+    assert (dest / "meta" / "info.json").exists()
+    assert (dest / "data" / "chunk-000.parquet").read_bytes() == b"PAR1"
     assert not rec.working_dir.exists()
 
 
 def test_upload_aborts_when_the_rebuild_fails(monkeypatch, tmp_path: Path) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
 
     class _Boom(_StubRebuilder):
         def build_from_source(self, source):
@@ -712,15 +625,14 @@ def test_upload_aborts_when_the_rebuild_fails(monkeypatch, tmp_path: Path) -> No
         return rec
 
     rec = asyncio.run(main())
-    assert http.posts == []
+    assert _sink(rec).published == []
     assert not rec.working_dir.exists()
 
 
 def test_upload_aborts_when_the_rebuild_produced_no_episodes(
     monkeypatch, tmp_path: Path
 ) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
 
     class _Empty(_StubRebuilder):
         def build_from_source(self, source):
@@ -729,15 +641,16 @@ def test_upload_aborts_when_the_rebuild_produced_no_episodes(
 
     monkeypatch.setattr(rec_mod, "LeRobotRebuilder", _Empty)
 
-    async def main() -> None:
+    async def main() -> SessionRecorder:
         rec = _rec(tmp_path)
         rec.start()
         _tick(rec, 0)
         _tick(rec, 1)
         await rec.upload()
+        return rec
 
-    asyncio.run(main())
-    assert http.posts == []
+    rec = asyncio.run(main())
+    assert _sink(rec).published == []
 
 
 # ----------------------------------------------------------------------
@@ -851,23 +764,26 @@ def test_a_live_add_step_failure_reverts_to_staging_without_losing_steps(
 def test_upload_uses_the_live_dataset_and_skips_the_rebuild(
     live, monkeypatch, tmp_path: Path
 ) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
     _StubRebuilder.last = None
 
-    async def main() -> None:
+    async def main() -> SessionRecorder:
         rec = _rec(tmp_path, live_encode=True)
         rec.start()
         for i in range(4):
             _tick(rec, i, ts=i * 100_000_000)
         await rec.upload()
+        return rec
 
-    asyncio.run(main())
+    rec = asyncio.run(main())
     # Sealed at the measured rate, and no rebuilder was ever constructed.
     assert _StubLive.last.finalize_calls == [pytest.approx(10.0)]
     assert _StubRebuilder.last is None
-    assert [u for u, _b, _h in http.posts][-1].endswith("/upload-complete")
-    assert http.puts  # the live dataset's files were uploaded
+    # ...and it is the LIVE dataset that was published.
+    published = _sink(rec).published
+    assert len(published) == 1
+    assert published[0]["root"] == _StubLive.last.root
+    assert published[0]["files"] == ["info.json"]
 
 
 @pytest.mark.parametrize(
@@ -880,25 +796,26 @@ def test_upload_uses_the_live_dataset_and_skips_the_rebuild(
 def test_a_failed_live_finalize_falls_back_to_the_staging_rebuild(
     live, monkeypatch, tmp_path: Path, err: Exception
 ) -> None:
-    http = _FakeHttp()
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
     _StubRebuilder.last = None
 
-    async def main() -> None:
+    async def main() -> SessionRecorder:
         rec = _rec(tmp_path, live_encode=True)
         rec.start()
         for i in range(3):
             _tick(rec, i, ts=i * 100_000_000)
         _StubLive.last.finalize_error = err
         await rec.upload()
+        return rec
 
-    asyncio.run(main())
+    rec = asyncio.run(main())
     assert _StubLive.last.aborted == 1
     # The rebuild lane ran instead, off the staged rows — byte-equivalent to
     # the pre-ADR-0016 behaviour.
     assert _StubRebuilder.last is not None
     assert [r.step for r in _StubRebuilder.last.built_rows] == [0, 1, 2]
-    assert [u for u, _b, _h in http.posts][-1].endswith("/upload-complete")
+    # ...and the episode still reached the destination.
+    assert [p["root"] for p in _sink(rec).published] == [_StubRebuilder.last.root]
 
 
 def test_discard_aborts_the_live_builder(live, tmp_path: Path) -> None:
@@ -935,15 +852,18 @@ def test_publish_failure_keeps_the_dataset_instead_of_deleting_it(
 
     The dataset is fully built; only shipping it failed. Before the fix the
     ``finally: self._cleanup_working_dir()`` rmtree'd it and the episode was
-    gone for good.
+    gone for good. With local and S3 destinations a publish failure is
+    routine — a wrong bucket, an expired key — so the quarantine has to
+    cover whatever sink is configured, not one blessed code path.
     """
     parked = tmp_path / "parked"
     monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
-    http = _FakeHttp(create_status=500)
-    _install_stubs(monkeypatch, http)
+    _install_stubs(monkeypatch)
 
     async def main() -> SessionRecorder:
-        rec = _rec(tmp_path)
+        rec = _rec(tmp_path, sink=_RecordingSink(
+            error=RuntimeError("bucket does not exist")
+        ))
         rec.start()
         for i in range(3):
             _tick(rec, i, ts=i * 100_000_000)
@@ -959,6 +879,29 @@ def test_publish_failure_keeps_the_dataset_instead_of_deleting_it(
     assert kept.is_dir()
     assert (kept / "meta" / "info.json").exists()
     assert (kept / "data" / "chunk-000.parquet").read_bytes() == b"PAR1"
+
+
+def test_a_recorder_with_no_destination_parks_the_dataset(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """There is no remote fallback behind ``sink=None`` any more (ADR 0039),
+    and the recorder must not pretend otherwise. Nowhere to publish is a
+    reason to keep the built episode, never a reason to delete it."""
+    parked = tmp_path / "parked"
+    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
+    _install_stubs(monkeypatch)
+
+    async def main() -> SessionRecorder:
+        rec = _rec(tmp_path, sink=None)
+        rec.start()
+        for i in range(3):
+            _tick(rec, i, ts=i * 100_000_000)
+        await rec.upload()
+        return rec
+
+    rec = asyncio.run(main())
+    assert not rec.working_dir.exists()
+    assert (parked / "ep-1" / "meta" / "info.json").exists()
 
 
 def test_quarantine_disambiguates_a_repeated_episode_id(
@@ -988,60 +931,23 @@ def test_quarantine_is_a_noop_without_a_dataset(
     assert not parked.exists()
 
 
-def test_a_failing_custom_sink_quarantines_too(monkeypatch, tmp_path: Path) -> None:
-    """Not just the hosted inbox. With local and S3 destinations, a publish
-    failure becomes routine — a wrong bucket, an expired key — so the
-    quarantine has to cover whatever sink is configured, not one code path."""
-    parked = tmp_path / "parked"
-    monkeypatch.setenv("INTERLATENT_FAILED_PUBLISH_DIR", str(parked))
-    _install_stubs(monkeypatch, _FakeHttp())
-
-    class _ExplodingSink:
-        def requires_api_key(self):
-            return False
-
-        def normalize_for_merge(self):
-            return True
-
-        async def publish(self, **_kw):
-            raise RuntimeError("bucket does not exist")
-
-    async def main() -> SessionRecorder:
-        rec = _rec(tmp_path, sink=_ExplodingSink())
-        rec.start()
-        for i in range(3):
-            _tick(rec, i, ts=i * 100_000_000)
-        await rec.upload()
-        return rec
-
-    rec = asyncio.run(main())
-    assert not rec.working_dir.exists()
-    assert (parked / "ep-1" / "meta" / "info.json").exists()
-
-
-def test_the_sink_drives_merge_normalization(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("normalize", [True, False])
+def test_the_sink_drives_merge_normalization(
+    monkeypatch, tmp_path: Path, normalize: bool
+) -> None:
     """A merge-on-stop sink aggregates sessions into one dataset, and
     lerobot's aggregate_datasets rejects mismatched `features` — so the
-    control_source column must not depend on whether a human intervened."""
-    _install_stubs(monkeypatch, _FakeHttp())
-
-    class _MergingSink:
-        def requires_api_key(self):
-            return False
-
-        def normalize_for_merge(self):
-            return True
-
-        async def publish(self, **_kw):
-            return None
+    control_source column must not depend on whether a human intervened.
+    A sink that does not merge pays nothing for that."""
+    _install_stubs(monkeypatch)
 
     async def main() -> None:
-        rec = _rec(tmp_path, sink=_MergingSink())
+        rec = _rec(tmp_path, sink=_RecordingSink(normalize=normalize))
         rec.start()
         for i in range(3):
             _tick(rec, i, ts=i * 100_000_000)
         await rec.upload()
 
     asyncio.run(main())
-    assert _StubRebuilder.last.force_control_source is True
+    assert _StubRebuilder.last.force_control_source is normalize
     assert _StubRebuilder.last.measured_fps is not None

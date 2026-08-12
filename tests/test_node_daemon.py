@@ -2,7 +2,7 @@
 
 The daemon is what makes a robot reachable: it heartbeats, long-polls for
 its assignment, and converges the local control loop onto whatever the
-dashboard says it should be running. It had no tests beyond
+coordinator says it should be running. It had no tests beyond
 ``test_node_route.py``'s route-precedence checks — so the convergence table
 in its own module docstring, the ADR 0023 spool gate, and the whole
 OpenSession metadata assembly were unverified.
@@ -100,16 +100,9 @@ class _FakeHttp:
 # ----------------------------------------------------------------------
 
 
-def test_client_carries_the_node_token_and_optional_bypass_secret() -> None:
+def test_client_carries_the_node_token() -> None:
     plain = _daemon()
     assert plain._http.headers["x-api-key"] == "node-token"
-    assert "x-vercel-protection-bypass" not in plain._http.headers
-
-    # A protected Vercel preview challenges un-bypassed requests, so a node
-    # paired against one has to carry the secret on every call.
-    bypassed = _daemon(bypass_key="  secret  ")
-    assert bypassed._http.headers["x-vercel-protection-bypass"] == "secret"
-    assert "x-vercel-protection-bypass" not in _daemon(bypass_key="   ")._http.headers
 
 
 def test_reachable_addresses_runs_on_any_host() -> None:
@@ -292,8 +285,8 @@ def test_report_hardware_posts_the_attached_devices() -> None:
 
 
 def test_report_hardware_never_raises() -> None:
-    """A failed report just leaves the dashboard panel empty; it must not
-    stop the daemon from coming up."""
+    """A failed report just leaves the coordinator without hardware details;
+    it must not stop the daemon from coming up."""
     d = _daemon()
     d._http = _FakeHttp([ConnectionError("down")])
     asyncio.run(d._report_hardware())  # no raise

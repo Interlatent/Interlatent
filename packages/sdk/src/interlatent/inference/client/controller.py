@@ -1,7 +1,7 @@
 """DRTC client controller.
 
-Owns the lifecycle of a single inference session against the
-Modal-hosted server. Composes the parts:
+Owns the lifecycle of a single inference session against a DRTC policy
+server (a GPU box running ``interlatent-serve``). Composes the parts:
 
     [robot loop] -- step()/observe() --> [controller]
                                               |
@@ -18,9 +18,9 @@ Modal-hosted server. Composes the parts:
 Usage (sketch):
 
     # ``model_id`` here is the DRTC protocol field — the SDK passes the
-    # backend env slug through it (the wire contract with Modal is out
-    # of scope for the SDK model_id retirement).
-    cfg = DRTCConfig(server_address="https://...modal.run", model_id="smolvla-x")
+    # environment slug through it (the wire contract with the GPU server
+    # is out of scope for the SDK model_id retirement).
+    cfg = DRTCConfig(server_address="203.0.113.7:50051", model_id="smolvla-x")
     client = DRTCClient(cfg)
     client.open()
     while running:
@@ -176,10 +176,10 @@ class DRTCConfig:
     server_address: str                   # "host:port" for plain gRPC, or full URL for gRPC-Web
     # DRTC wire protocol field — kept as ``model_id`` for backward
     # compatibility with the protobuf schema. The SDK passes the
-    # backend environment slug through here. Out of scope for the
+    # environment slug through here. Out of scope for the
     # SDK model_id retirement.
     model_id: str
-    api_key: str = ""                     # Interlatent API key (ilat_...); sent as Bearer auth
+    api_key: str = ""                     # operator API key (ilop_...); sent as Bearer auth
     policy_uri: str = ""
     policy_backend: str = ""              # server backend name; "" -> "echo"
     chunk_size: int = 50                  # SmolVLA's native chunk; bigger = more jitter headroom
@@ -188,7 +188,7 @@ class DRTCConfig:
     control_period_s: float = 1 / 30       # default 30Hz
     cooldown_steps: int = 16
     payload_codec: str = "raw_f32"
-    use_grpc_web: bool = False             # set True when talking to Modal asgi
+    use_grpc_web: bool = False             # set True when the box sits behind an https/ASGI gRPC-Web proxy
     metadata: dict[str, str] = field(default_factory=dict)
     stats_interval_s: float = 5.0          # period of the DRTC telemetry log line; 0 disables
     rec_batch_max_ticks: int = 16          # coalesce up to N queued ticks per RecordTicks RPC

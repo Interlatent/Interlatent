@@ -1,10 +1,10 @@
 # interlatent-teleop-web
 
 A standalone, open-source **WebXR VR teleop producer** for Interlatent robot
-sessions. Open it in the Meta Quest Browser, paste your `ilat_…` API key, and
-enter VR: the headset's controllers drive the robot's end effector through the
-hosted WebTransport/QUIC relay — grip is the clutch/deadman, trigger is the
-gripper.
+sessions. Open it in the Meta Quest Browser, point it at your coordinator,
+paste that coordinator's `ilop_…` operator key, and enter VR: the headset's
+controllers drive the robot's end effector through the WebTransport/QUIC
+relay — grip is the clutch/deadman, trigger is the gripper.
 
 Two ways in:
 
@@ -40,14 +40,14 @@ offer to install it as an app (PWA). Dev builds skip the service worker.
 
 ### CORS
 
-Dev origins are not on the backend's global CORS allowlist, so a direct call
-from `http://localhost:3100` can fail the preflight with `400 Disallowed CORS
-origin`. `npm run dev` therefore proxies `/api` to the backend server-side
-(`vite.config.ts`), and the client routes the default API base through that
-proxy automatically. Override the proxy target with
+Dev origins are not on the coordinator's global CORS allowlist, so a direct
+call from `http://localhost:3100` can fail the preflight with `400 Disallowed
+CORS origin`. `npm run dev` therefore proxies `/api` to the coordinator
+server-side (`vite.config.ts`), and the client routes the default API base
+through that proxy automatically. Override the proxy target with
 `TELEOP_API_TARGET=http://localhost:8000 npm run dev`.
 
-The built app has no proxy and needs none: the backend's teleop CORS policy
+The built app has no proxy and needs none: the coordinator's teleop CORS policy
 (`INTERLATENT_TELEOP_CORS_ORIGINS`, default `["*"]`) admits any origin on
 exactly the routes this app calls — the pickers, the two token mints, and
 recording create/stop. So you can serve `dist/` from any HTTPS host without
@@ -65,22 +65,33 @@ sets `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list.
 Everything is in the in-app Settings panel (gear icon), persisted to
 localStorage:
 
-- **API base URL** (`interlatent.apiBase`) — default `https://interlatent.com`
-- **API key** (`interlatent.apiKey`) — your Interlatent `ilat_…` key, sent as
-  the `x-api-key` header on every request
+- **API base URL** (`interlatent.coordinator`) — your coordinator's origin,
+  e.g. `http://10.0.0.2:8900`. Required; there is no default, so the app never
+  talks to a control plane you did not name.
+- **API key** (`interlatent.apiKey`) — the `ilop_…` operator key that
+  coordinator printed, sent as the `x-api-key` header on every request
 
-## Provenance / drift
+## Layout
 
-The teleop engine here is **copied, by decision, from the Interlatent
-dashboard** (`site/src/lib/teleop/*` and
-`site/src/components/teleop/VRTeleopOverlay.tsx` in the Interlatent-Main
-repo) rather than extracted into a shared package — the dashboard deploy
-and this app have different release cadences and the code is dependency-free
-by design. Every copied file carries a header naming its source path and
-commit. **Fixes must land in both copies**; when touching one, port the change
-to the other.
+The teleop engine — `src/lib/teleop/*` (IK solver, clutch pose mapping, the
+QUIC pose socket, the XR scene) and `src/components/VRTeleopOverlay.tsx` — is
+dependency-free by design: plain WebXR, plain WebTransport, no framework glue,
+so it can be lifted into another app as files rather than as a package.
 
-Local pieces: `src/lib/client.ts` (typed fetch client replacing the dashboard's
-react-query `api.ts`), `src/App.tsx` (session picker + settings shell),
+Around it: `src/lib/client.ts` (typed fetch client over the coordinator API),
+`src/App.tsx` (session picker + settings shell),
 `src/components/StartRecordingPanel.tsx` (the create form), and the PWA
 scaffolding.
+
+## The engine files
+
+`VRTeleopOverlay.tsx`, `xrScene.ts`, `quicPoseSocket.ts`, `quat.ts`,
+`webtransport.ts`, `dlsSolver.ts`, `wristCalibration.ts`,
+`clutchPoseMapper.ts`, `teleopProfiler.ts` and `kinematics.ts` are the WebXR
+teleop engine: pose capture, clutch mapping, IK, and the datagram transport to
+the relay. They have no counterpart elsewhere and no sync obligation — this
+repo is where they live, and a change here is the change.
+
+They are the only part of the app with real algorithmic content, so they carry
+the test suite (`src/lib/teleop/__tests__/`) and are what the `teleop-web` CI
+job typechecks and builds.

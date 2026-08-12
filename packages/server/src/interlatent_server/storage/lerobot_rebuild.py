@@ -649,9 +649,9 @@ class LeRobotRebuilder:
     def _inject_episode_uuids(self, root: Path, episode_uuids: list[str]) -> None:
         """Append an ``interlatent.episode_uuid`` column to ``meta/episodes/...``.
 
-        LeRobot keys episodes by integer ``episode_index``; the dashboard
-        keys by source-supplied UUID. Carrying both lets the backend
-        merge worker (and any downstream analysis pipeline) keep the
+        LeRobot keys episodes by integer ``episode_index``; the coordinator
+        keys by source-supplied UUID. Carrying both lets a downstream
+        merge worker or analysis pipeline keep the
         join.
         """
         try:

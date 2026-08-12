@@ -4,14 +4,14 @@ Status: accepted (2026-07-18)
 
 ## Context
 
-The SDK carried two collection paths. The hosted one — the node streams
+The SDK carried two collection paths. The streaming one — the node streams
 per-tick JPEG `RecordTick`s to a server-side recorder that builds and
-uploads the LeRobot dataset — is how every real session (inference or
+publishes the LeRobot dataset — is how every real session (inference or
 teleop) records. The client-side one — `watch()`/`tick()` staging to
 local SQLite + JPEGs, an on-device `LeRobotRebuilder` build at
 `upload()` — belonged to local-policy sessions, which were deprecated
-product-side, yet the code and the public docs ("local-first",
-"zero account") still advertised it.
+product-side, yet the code and the public docs still advertised it as
+"local-first".
 
 The mismatch became untenable when the target node hardware became
 Jetson Orin Nano / RPi-class devices with multi-camera high-resolution
@@ -28,7 +28,7 @@ Remove the client-side collection surface in SDK **2.0.0**:
 
 - `Interlatent.watch / collect / tick / add_frame / checkpoint /
   upload / register_cameras / sb3_callback` become `RuntimeError` stubs
-  for one release (clear pointer to hosted collection), then disappear.
+  for one release (clear pointer to streaming collection), then disappear.
 - The staging internals are deleted (`_media`, `_db`, `_storage`,
   `_schema`, `_watcher`, `_step_source`, `_dataset`, `_metrics`,
   `storage/lerobot_rebuild`), along with the `interlatent-sync-rollout`
@@ -42,12 +42,11 @@ Remove the client-side collection surface in SDK **2.0.0**:
 
 ## Consequences
 
-- **Recording requires an account/hosted session.** The open-core
-  boundary moves: what stays Apache-2.0 is the client, node, CLI, and
-  wire protocol — not a standalone offline collector. Docs
-  (README, ARCHITECTURE, concepts, going-to-cloud) were rewritten
-  accordingly; existing local datasets enter via the dashboard's
-  HF import.
+- **Recording requires a running session.** Recording is a property of a
+  session now, not of a local staging directory. The open-core boundary
+  moves with it: what stays Apache-2.0 is the client, node, CLI, and wire
+  protocol — not a standalone offline collector. Docs (README,
+  ARCHITECTURE, concepts, self-hosting) were rewritten accordingly.
 - Old integrations fail loudly with a pointer, not silently: the verbs
   raise, and `Interlatent(db_path=...)` warns and ignores.
 - The SDK's wheel no longer ships `interlatent.storage`; the engine

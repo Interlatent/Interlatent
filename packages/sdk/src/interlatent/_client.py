@@ -6,10 +6,7 @@ from typing import NoReturn
 
 from ._coordinator import resolve
 from ._http import HTTPClient
-from ._resources import (
-    EnvironmentsResource,
-    EpisodesResource,
-)
+from ._resources import EnvironmentsResource
 
 # Collection is streaming-first and server-side (ADR 0022): a robot node
 # streams JPEG RecordTicks to a hosted recorder (the DRTC GPU box, or the
@@ -36,16 +33,16 @@ def _get_sdk_version() -> str:
 
 
 class Interlatent:
-    """SDK client for the hosted Interlatent API.
+    """SDK client for the coordinator's HTTP API.
 
     Example:
         client = Interlatent(api_key="...")
-        eps = client.environments.episodes("ant-v5")
+        envs = client.environments.list()
 
     Episode *collection* is not done through this class anymore — a robot
-    node streams ticks to a hosted recorder (see the node daemon /
+    node streams ticks to a recorder (see the node daemon /
     ``connect_drtc``); this client is the HTTP surface (environments,
-    episodes, routing).
+    routing).
     """
 
     def __init__(
@@ -75,7 +72,6 @@ class Interlatent:
 
         # Resource groups
         self.environments = EnvironmentsResource(self._http)
-        self.episodes = EpisodesResource(self._http)
 
         self._env_name: str = "Unknown"
         self._env_slug: str | None = None  # backend env slug for routing

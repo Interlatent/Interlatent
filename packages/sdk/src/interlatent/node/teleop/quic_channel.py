@@ -275,14 +275,12 @@ class QuicTeleopChannel(LatestFrameStore):
         api_base: str,
         api_key: str,
         token_path: Optional[str] = None,
-        bypass_key: Optional[str] = None,
         robot_kind: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._session_id = session_id
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
-        self._bypass_key = bypass_key
         self._robot_kind = robot_kind
         self._token_path = (
             token_path or f"/api/v1/inference/sessions/{session_id}/teleop-token"
@@ -443,8 +441,6 @@ class QuicTeleopChannel(LatestFrameStore):
             _quic_ipc.ENV_SESSION_ID: self._session_id,
             _quic_ipc.ENV_TOKEN_PATH: self._token_path,
         }
-        if self._bypass_key:
-            env[_quic_ipc.ENV_BYPASS_KEY] = self._bypass_key
         # stdin PIPE is the lifetime tether (child exits on EOF); stderr is
         # inherited so child logs land in the node's logs.
         self._proc = subprocess.Popen(

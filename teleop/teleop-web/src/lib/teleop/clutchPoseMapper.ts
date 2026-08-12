@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/clutchPoseMapper.ts @ f7e4bfb6 (2026-07-30). Upstream is the dashboard copy; sync fixes both ways.
 /**
  * Clutch-relative pose mapping: WebXR controller pose -> EE target in the
  * arm-base frame.

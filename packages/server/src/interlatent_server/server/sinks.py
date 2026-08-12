@@ -4,17 +4,17 @@ The recorder builds a complete LeRobot v3 dataset on local SSD at
 ``CloseSession`` (see :mod:`.recorder`). A :class:`DatasetSink` decides
 where that finished dataset goes:
 
-- :class:`BackendInboxSink` — the hosted path: ``POST /episodes`` →
-  presigned ``PUT`` → ``upload-complete``. Requires an ``x-api-key``; the
-  merge into the environment's canonical dataset happens server-side on
-  the Interlatent backend. This is the default and is unchanged from the
-  original ``recorder.py`` behaviour.
 - :class:`LocalDirSink` — **merge-on-stop** into one flat canonical
   LeRobot dataset on the GPU server's filesystem, via lerobot's
-  ``aggregate_datasets``. No account needed.
+  ``aggregate_datasets``.
 - :class:`S3Sink` — the same merge-on-stop, run against a local mirror of
   the canonical dataset, then re-uploaded to an S3-compatible bucket
-  (boto3 + endpoint-url). No account needed.
+  (boto3 + endpoint-url).
+
+Those two are the whole list. The hosted upload inbox that used to sit
+behind a third sink is gone with the control plane that served it
+(ADR 0039), and with it the last reason publishing ever needed an
+account: neither sink here authenticates against anything of ours.
 
 The destination + credentials arrive per-session in ``OpenSession``
 metadata (configured on the coordinator) or from ``interlatent-serve``
@@ -31,23 +31,10 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
-from interlatent_server.coordinator import api_v1
-
 if TYPE_CHECKING:
     from .recorder import RecorderConfig
 
 log = logging.getLogger(__name__)
-
-# Upload defaults — match the SDK's behaviour (kept identical to the
-# values that previously lived in recorder.py).
-_UPLOAD_BATCH_SIZE = 100
-_PUT_TIMEOUT = 300.0
-_HTTP_TIMEOUT = 60.0
-
-
-#: One normalizer, shared with recorder.py and auth.py. This module used to
-#: carry a private fourth copy.
-_api_v1_root = api_v1
 
 
 # ----------------------------------------------------------------------
@@ -57,10 +44,6 @@ _api_v1_root = api_v1
 
 class DatasetSink(Protocol):
     """Where a finished LeRobot dataset is published at session close."""
-
-    def requires_api_key(self) -> bool:
-        """True iff publishing needs the gRPC ``x-api-key`` (backend inbox)."""
-        ...
 
     def normalize_for_merge(self) -> bool:
         """True iff the recorder must emit a stable, mergeable schema.
@@ -182,9 +165,6 @@ class LocalDirSink:
     def __init__(self, dest: Path | str) -> None:
         self.dest = Path(dest).expanduser()
 
-    def requires_api_key(self) -> bool:
-        return False
-
     def normalize_for_merge(self) -> bool:
         return True
 
@@ -231,9 +211,6 @@ class S3Sink:
         self.region = region
         base = Path(mirror_base) if mirror_base else Path.home() / ".interlatent" / "s3-cache"
         self._mirror = base / bucket / (self.prefix or "_root")
-
-    def requires_api_key(self) -> bool:
-        return False
 
     def normalize_for_merge(self) -> bool:
         return True
@@ -317,41 +294,6 @@ class S3Sink:
             client.upload_file(str(f), self.bucket, self._key(rel))
 
 
-class BackendInboxSink:
-    """The hosted path: register the episode, presigned-PUT it, complete.
-
-    Deliberately a *delegation* rather than an implementation. The three inbox
-    calls live on :class:`~.recorder.SessionRecorder` and are maintained there
-    — since this module was last written they gained 409 tolerance and the
-    ``has_teleop`` badge. A second copy here is exactly the kind of duplicate
-    that drifts silently, and did.
-    """
-
-    def requires_api_key(self) -> bool:
-        return True
-
-    def normalize_for_merge(self) -> bool:
-        # The backend merges into the environment's canonical dataset itself,
-        # so the per-session schema does not have to be stable here.
-        return False
-
-    async def publish(
-        self,
-        *,
-        episode_id: str,
-        dataset_root: Path,
-        config: "RecorderConfig",
-        recorder: Any = None,
-    ) -> None:
-        if recorder is None:
-            raise RuntimeError(
-                "BackendInboxSink needs the recorder it is publishing for"
-            )
-        await recorder._post_episodes_create(episode_id)
-        await recorder._upload_dataset_dir(episode_id, Path(dataset_root))
-        await recorder._post_upload_complete(episode_id)
-
-
 # ----------------------------------------------------------------------
 # Selection from OpenSession metadata / serve flags
 # ----------------------------------------------------------------------
@@ -363,7 +305,8 @@ def sink_from_metadata(metadata: dict[str, str]) -> Optional[DatasetSink]:
     Recognized keys (set by the coordinator, see ADR-0002):
     ``output_dir`` | ``s3_uri`` (+ ``s3_endpoint_url``, ``s3_access_key``,
     ``s3_secret_key``, ``s3_region``). Returns None when neither is present
-    so the caller can fall back to a serve-level default or the inbox.
+    so the caller can fall back to the serve-level default — the second and
+    last step of ADR-0002's precedence now that the inbox tier is gone.
     """
     output_dir = (metadata.get("output_dir") or "").strip()
     s3_uri = (metadata.get("s3_uri") or "").strip()
@@ -382,7 +325,6 @@ def sink_from_metadata(metadata: dict[str, str]) -> Optional[DatasetSink]:
 
 __all__ = [
     "DatasetSink",
-    "BackendInboxSink",
     "LocalDirSink",
     "S3Sink",
     "merge_local_dataset",

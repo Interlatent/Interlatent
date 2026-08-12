@@ -4,7 +4,7 @@
 
 ## How was it tested?
 
-<!-- e.g. ran examples/05_collect_dataset.py, drove an SO-101 against a cloud pod, ... -->
+<!-- e.g. ran examples/03_run_on_so101.py, drove an SO-101 against a GPU box, ... -->
 
 ## Checklist
 

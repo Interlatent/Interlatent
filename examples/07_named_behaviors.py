@@ -1,8 +1,8 @@
-"""Run named, deterministic behaviors — no cloud, no GPU, no policy, no API key.
+"""Run named, deterministic behaviors — no GPU box, no policy, no API key.
 
 Behaviors are named moves and trajectories (``home``, ``hello``, your own from TOML)
 that run entirely on the robot side through the ordinary adapter action path. This is
-the manual counterpart to the cloud policy path in ``03_run_on_so101.py``.
+the manual counterpart to the remote-policy path in ``03_run_on_so101.py``.
 
 Like that example, this runs **without hardware**: if no ``--port`` is given it drives
 an in-memory fake SO-101 adapter and prints the sampled action stream the executor

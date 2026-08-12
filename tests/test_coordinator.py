@@ -415,7 +415,7 @@ def test_unknown_route_is_a_clean_404(http):
 
 def test_no_admin_surface_exists(http):
     """ADR 0038: one surface. The old /admin/* is what forked every operator
-    flow into a dashboard spelling and a coordinator spelling."""
+    flow into two spellings, one per client."""
     base, _ = http
     for path in ("/admin/gpus", "/admin/nodes", "/admin/sessions",
                  "/admin/destination"):

@@ -26,7 +26,6 @@ __all__ = [
     "CoordinatorNotConfigured",
     "ENV_VAR",
     "LEGACY_ENV_VAR",
-    "HOSTED_COORDINATOR",
     "normalize",
     "resolve",
 ]
@@ -36,11 +35,6 @@ ENV_VAR = "INTERLATENT_COORDINATOR"
 
 #: What it used to be called. Read for one minor, with a warning.
 LEGACY_ENV_VAR = "INTERLATENT_API_BASE"
-
-#: The address the hosted dashboard serves the protocol at. Kept as a *named
-#: constant for humans* — error messages suggest it, and it is what most
-#: operators will pass — but nothing resolves to it implicitly.
-HOSTED_COORDINATOR = "https://interlatent.com"
 
 
 class CoordinatorNotConfigured(RuntimeError):
@@ -62,7 +56,7 @@ _REMEDIES = {
     "serve": (
         "interlatent-serve needs a coordinator to register with. Pass "
         "--coordinator <url>, or set {env}. Run one with `interlatent up` on "
-        "your control-plane host, or point at a hosted dashboard."
+        "your control-plane host."
     ),
     "cli": (
         "This command needs a coordinator. Pass --coordinator <url>, set "

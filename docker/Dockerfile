@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.7
 # interlatent-server — self-hosted DRTC policy server GPU image.
 #
-# Runs `interlatent-serve`: registers this machine with the Interlatent
-# dashboard as a self-hosted compute box (your API key, your hardware),
-# then serves policies to robot nodes over native gRPC. Portable across
-# GPU providers (RunPod, Lambda Labs, Vast.ai, Prime Intellect, bare
-# metal).
+# Runs `interlatent-serve`: registers this machine as a compute box with
+# the coordinator you run (`interlatent up`), then serves policies to
+# robot nodes over native gRPC. Your key, your coordinator, your
+# hardware. Portable across GPU providers (RunPod, Lambda Labs, Vast.ai,
+# Prime Intellect, bare metal).
 #
 # Build (from the repo root):
 #   docker build -f docker/Dockerfile -t interlatent-server:latest .
@@ -18,7 +18,8 @@
 # Run (single GPU, expose 50051):
 #   docker run --rm --gpus all -p 50051:50051 \
 #     -v interlatent-cache:/root/.cache \
-#     -e INTERLATENT_API_KEY=ilat_xxx \
+#     -e INTERLATENT_API_KEY=ilop_xxx \
+#     -e INTERLATENT_COORDINATOR=http://<host-running-interlatent-up>:8900 \
 #     -e INTERLATENT_ADVERTISE_ADDRESS=<IP-your-robots-can-reach> \
 #     -e HF_TOKEN=hf_xxx \
 #     interlatent-server:latest
@@ -30,8 +31,8 @@
 # --- base ---------------------------------------------------------------
 # NVIDIA CUDA runtime on Ubuntu 24.04: lerobot 0.5.x needs Python >= 3.12
 # and no pytorch/pytorch tag ships it, so we install torch cu128 wheels
-# ourselves on the system py3.12. See the hosted image's Dockerfile
-# history for the full rationale.
+# ourselves on the system py3.12. See docs/self-hosting.md for the full
+# rationale.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \

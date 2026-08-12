@@ -1,21 +1,20 @@
 """Interlatent API-key validation for the DRTC server.
 
 Imported by the production launcher (:mod:`interlatent_server.serve_gpu`)
-to guard the public-facing gRPC endpoint. On a self-hosted box the guard
-is ON by default with the *owner-scoped* check
-(:func:`build_box_key_validator`): a presented ``x-api-key`` passes only
-if the backend confirms it belongs to this box's owner. The weaker
-"any valid Interlatent key" check (:func:`build_api_key_validator`)
-survives for tests and custom frontings.
+to guard the public-facing gRPC endpoint. The guard is ON by default with
+the *owner-scoped* check (:func:`build_box_key_validator`): a presented
+``x-api-key`` passes only if this box's coordinator confirms the key may
+drive this box. The weaker "any valid Interlatent key" check
+(:func:`build_api_key_validator`) survives for tests and custom
+frontings.
 
-Each RPC checks the ``x-api-key`` metadata, validates against the
-Interlatent backend, and caches the result in-process.
+Each RPC checks the ``x-api-key`` metadata, validates it against the
+coordinator the box registered with, and caches the result in-process.
 
-The Interlatent backend treats API keys as ``X-Api-Key`` HTTP headers
-(see ``site/app/deps.py``). The owner check probes
+Keys travel as ``X-Api-Key`` HTTP headers. The owner check probes
 ``GET /api/v1/compute/boxes/{box_id}/authz`` (200 iff the key may drive
-this box); the any-key check probes ``/environments`` because it uses
-``require_auth`` (accepts API keys). Bodies are discarded either way.
+this box); the any-key check probes ``/environments``, which any
+authenticated key can read. Bodies are discarded either way.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ _auth_executor_lock = threading.Lock()
 
 
 def _auth_probe_executor() -> ThreadPoolExecutor:
-    """The pool the blocking backend probe runs on.
+    """The pool the blocking coordinator probe runs on.
 
     Deliberately *not* the loop's default executor. On a GPU box that
     pool is the recording executor, pinned to the reserved cores (see
@@ -61,7 +60,7 @@ def _auth_probe_executor() -> ThreadPoolExecutor:
 
 
 def validate_api_key(token: str, *, api_base: str) -> bool:
-    """One-shot validation. Returns True iff the backend accepts the key."""
+    """One-shot validation. True iff the coordinator accepts the key."""
     if not token:
         return False
     import httpx
@@ -83,7 +82,7 @@ class CachedValidator:
 
     Cache lives for the process lifetime — the DRTC server is a long-
     running asyncio process, so warm cache hits are the steady state.
-    The 60-second TTL means an active client pays one backend
+    The 60-second TTL means an active client pays one coordinator
     roundtrip per minute regardless of inference rate.
 
     Callable, so it satisfies the historical ``Callable[[str], bool]``
@@ -170,9 +169,9 @@ def build_api_key_validator(
 def validate_key_for_box(
     token: str, *, box_id: str, api_base: str
 ) -> bool:
-    """One-shot owner check: True iff the backend confirms `token` may
-    drive box `box_id` (i.e. it is the box owner's key, or the system
-    key). 403/401/404 and network failures are all False."""
+    """One-shot owner check: True iff the coordinator confirms `token`
+    may drive box `box_id`. 403/401/404 and network failures are all
+    False."""
     if not token:
         return False
     import httpx
@@ -196,7 +195,7 @@ def build_box_key_validator(
     ttl_s: float = DEFAULT_TTL_S,
 ) -> CachedValidator:
     """Owner-scoped `check(token)`, same cache as
-    :func:`build_api_key_validator`. The steady state is one backend
+    :func:`build_api_key_validator`. The steady state is one coordinator
     roundtrip per presented key per minute."""
     return CachedValidator(
         lambda token: validate_key_for_box(token, box_id=box_id, api_base=api_base),
@@ -228,7 +227,7 @@ def wrap_servicer_with_auth(servicer, *, check_token: Callable[[str], bool]):
 
     # A CachedValidator knows how to keep its blocking probe off the
     # loop. Anything else is assumed to block too — a plain callable
-    # here is almost always a backend roundtrip — so it gets the same
+    # here is almost always a coordinator roundtrip — so it gets the same
     # treatment rather than being trusted to be cheap.
     _check_async = getattr(check_token, "check_async", None)
     if _check_async is None:

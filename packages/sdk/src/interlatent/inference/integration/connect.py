@@ -1,7 +1,8 @@
-"""One-call connection to Interlatent's hosted DRTC server.
+"""One-call connection to a DRTC policy server.
 
-Users do not deploy anything. They just call ``connect_drtc(...)``
-with their Interlatent API key and the policy they want to run.
+Point it at the GPU box you run (``interlatent-serve``) with the key your
+coordinator issued and the policy you want to run; ``connect_drtc(...)``
+does the rest.
 
 Example:
 
@@ -22,9 +23,9 @@ Example:
     finally:
         client.close()
 
-The server address defaults to Interlatent's hosted Modal app. Pass
-``server_address=`` to override (useful for staging deploys or local
-gRPC servers used during SDK development).
+There is no default server address: pass ``server_address=`` (or set
+``INTERLATENT_DRTC_URL``) with your box's advertised gRPC address. A node
+started by a coordinator is handed that address per session instead.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from typing import Optional
 
 from ..client import DRTCClient, DRTCConfig
 
-# Production URL for Interlatent's hosted DRTC server. Replace with
 # There is no default GPU endpoint. A DRTC address is either handed to you
 # per-session by a coordinator, or you name one yourself with
 # ``server_address=`` / ``INTERLATENT_DRTC_URL``. The old default pointed at
@@ -63,32 +63,34 @@ def connect_drtc(
     # Server-side episode recording (DRTC node path). When ``record=True``
     # the GPU container persists every Infer observation + the returned
     # action chunk's leading row, builds a LeRobot dataset on close, and
-    # uploads it through the same inbox protocol the legacy SDK upload
-    # path uses. The Pi never stages bytes locally.
+    # writes it to the destination that box was configured with — its
+    # ``--output-dir`` or the S3 target on the session. The Pi never stages
+    # bytes locally.
     record: bool = False,
     episode_id: Optional[str] = None,
     env_id: Optional[str] = None,
     task_id: Optional[str] = None,
 ) -> DRTCClient:
-    """Open a DRTC session against Interlatent's hosted server.
+    """Open a DRTC session against your GPU box.
 
     Returns an already-opened ``DRTCClient`` ready for ``step()``.
 
     Auth:
         Sends ``api_key`` (or the ``INTERLATENT_API_KEY`` env var) as
-        a Bearer token. The server validates against the Interlatent
-        backend on first contact and caches the result per-container.
+        a Bearer token. The box validates it against the coordinator it
+        registered with on first contact and caches the result
+        per-container.
 
     Args mirror ``DRTCConfig``; ``fps`` is converted to
     ``control_period_s`` for convenience.
 
     Recording:
         Pass ``record=True`` together with ``episode_id`` (typically
-        the dashboard's ``InferenceSession.id``) to have the GPU
-        container record + upload the episode. ``task`` and ``fps``
-        are reused as the LeRobot dataset's task string and frame
-        rate. The Pi remains stateless for storage — nothing is
-        staged locally.
+        the coordinator's session id) to have the GPU container record
+        the episode and write it to that box's configured destination.
+        ``task`` and ``fps`` are reused as the LeRobot dataset's task
+        string and frame rate. The Pi remains stateless for storage —
+        nothing is staged locally.
     """
     key = api_key or os.environ.get("INTERLATENT_API_KEY", "")
     url = server_address or os.environ.get("INTERLATENT_DRTC_URL") or ""
@@ -135,8 +137,8 @@ def connect_drtc(
         md.setdefault("synchronous", "1")
 
     # The DRTC wire protocol still names this field ``model_id`` (out of
-    # scope for the SDK model_id retirement — that contract is owned by
-    # Modal). We pass the env slug through it so the server can identify
+    # scope for the SDK model_id retirement — renaming it is a wire-protocol
+    # change). We pass the env slug through it so the server can identify
     # which env this DRTC session belongs to.
     cfg = DRTCConfig(
         server_address=url,
@@ -150,8 +152,8 @@ def connect_drtc(
         cooldown_steps=cooldown_steps,
         control_period_s=1.0 / fps if fps > 0 else 1.0 / 30,
         payload_codec=payload_codec,
-        # `use_grpc_web` is inferred from URL scheme — local plain-gRPC
-        # uses host:port; the hosted Modal endpoint is an https URL.
+        # `use_grpc_web` is inferred from URL scheme — plain gRPC is
+        # host:port; an endpoint behind an HTTP proxy is an http(s) URL.
         use_grpc_web=url.startswith(("http://", "https://")),
         stats_interval_s=stats_interval_s,
         synchronous=synchronous,

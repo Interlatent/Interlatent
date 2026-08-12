@@ -14,16 +14,16 @@
 ## Context
 
 A robot kind's teleop data — the URDF, its collision meshes, the hand-authored
-`ik_config.json`, and the generated `kinematic_spec.json` — lived only in the
-platform's admin-curated S3 library at `urdf/{robot_kind}/{version}/`. That is
-fine for the hosted pod, which resolves a bundle at session time, but it means:
+`ik_config.json`, and the generated `kinematic_spec.json` — lived only in an
+admin-curated S3 library at `urdf/{robot_kind}/{version}/`. That is fine for the
+retarget stage, which resolves a bundle at session time, but it means:
 
 - **Onboarding a robot is a private, high-friction ritual.** A contributor needs
   S3 write credentials, an arm64 MuJoCo environment, a hand-authored `ik_config`,
   and a manual `aws s3 cp` — none of it visible or reviewable in a PR. There is no
   "add a URDF and open a PR" path.
 - **An operator with the open-source SDK cannot teleop their own robot.** The data
-  they need is behind our S3 and an `ilat_` key.
+  they need is behind a private S3 bucket and a key they have no way to get.
 
 [0012](0012-teleop-receiver-stub-open-core-boundary.md) deliberately drew the
 open-core line so that "the SDK no longer ships kinematics, IK, or retargeting."

@@ -46,7 +46,7 @@ The trigger is the Jetson Orin Nano fleet at the ADR 0022 design
 ceiling (3 × 720p × 30 fps): the Orin Nano has **no NVENC and no NVJPG
 fixed-function block**, so CPU turbojpeg encode (~6–8 ms per 720p
 frame) eats most of a 33 ms tick budget across three cameras. The
-Orin's GPU is otherwise idle on a node (inference is hosted), and
+Orin's GPU is otherwise idle on a node (inference runs on the GPU box), and
 nvJPEG runs JPEG encode on CUDA SMs.
 
 ## Decision

@@ -5,8 +5,8 @@ GPU provider (RunPod, Lambda Labs, Vast.ai, Prime Intellect, bare metal) without
 touching the host Python environment.
 
 It runs [`interlatent-serve`](../docs/self-hosting.md): the box registers itself with
-the Interlatent dashboard using **your** API key, then serves policies to your robot
-nodes over native gRPC.
+**your** coordinator using the operator key that coordinator issued, then serves
+policies to your robot nodes over native gRPC.
 
 `linux/amd64` only — there is no CUDA on arm64 hosts.
 
@@ -28,9 +28,9 @@ runtime deps for the popular families:
 | MolmoAct2 | `allenai/MolmoAct-*` | lerobot `molmoact2` extra |
 | Out-of-tree (OpenVLA, custom heads) | any plugin registered at import time | install via `EXTRA_PIP_PACKAGES` |
 
-Pick the policy per session from the dashboard (or `connect_drtc(policy_uri=...)` on
-the manual path). The server lazy-loads it on the first `OpenSession`, or warm-loads it
-up front when `DRTC_WARMUP_POLICY` is set.
+Pick the policy per session (`interlatent session start --policy …`, or
+`connect_drtc(policy_uri=...)` on the manual path). The server lazy-loads it on the
+first `OpenSession`, or warm-loads it up front when `DRTC_WARMUP_POLICY` is set.
 
 **GPU sizing:** ~24 GB VRAM covers SmolVLA / ACT / Diffusion; Pi0- and
 MolmoAct2-class VLAs want more.
@@ -82,28 +82,30 @@ disagree. See [`proto/README.md`](../proto/README.md).
 docker run -d --name interlatent-server --gpus all \
   -p 50051:50051 \
   -v interlatent-cache:/root/.cache \
-  -e INTERLATENT_API_KEY=ilat_xxx \
+  -e INTERLATENT_COORDINATOR=http://10.0.0.2:8900 \
+  -e INTERLATENT_API_KEY=ilop_xxx \
   -e INTERLATENT_ADVERTISE_ADDRESS=<IP-your-robots-can-reach> \
   -e DRTC_WARMUP_POLICY=lerobot/smolvla_base \
   -e HF_TOKEN=hf_xxx \
   interlatent-server:latest
 ```
 
-Watch the logs for `DRTC server listening on 0.0.0.0:50051`, then attach the box to an
-environment on the Compute page.
+Watch the logs for `DRTC server listening on 0.0.0.0:50051`, confirm the box with
+`interlatent gpus ls`, then run a session against it:
+`interlatent session start --node <node> --gpu <box> --policy lerobot/smolvla_base`.
 
 ### Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
-| `INTERLATENT_API_KEY` | *(unset)* | Your `ilat_` key. **Set it** — the entrypoint registers the box with the dashboard and turns on owner-checked RPC auth. Without it the container serves locally and unregistered. |
+| `INTERLATENT_API_KEY` | *(unset)* | Your `ilop_` operator key. **Set it** — the entrypoint registers the box with your coordinator and turns on the authorization check on every RPC. Without it the container serves locally and unregistered. |
+| `INTERLATENT_COORDINATOR` | *(unset)* | Coordinator base URL, e.g. `http://10.0.0.2:8900`. Required to register; there is no default. |
 | `INTERLATENT_ADVERTISE_ADDRESS` | *(unset)* | `host[:port]` your robot nodes can reach this machine at. Required to register — handed to nodes verbatim. |
 | `INTERLATENT_PORT` | `50051` | Port the gRPC server listens on. |
-| `INTERLATENT_API_BASE` | `https://interlatent.com` | Backend base URL. |
-| `INTERLATENT_BOX_NAME` | hostname | Display name on the Compute page. |
+| `INTERLATENT_BOX_NAME` | hostname | Display name in `interlatent gpus ls`. |
 | `INTERLATENT_BOX_ID` | minted once | Stable box UUID; persisted at `~/.interlatent/box-id`. |
-| `INTERLATENT_INSECURE` | *(unset)* | `1` disables the owner check on the gRPC port. Air-gapped networks only. |
-| `DRTC_WARMUP_POLICY` | *(unset)* | HF repo / local path to load + compile at startup. Used only when the box has no env attached in the dashboard — an attached env's warmup target always wins. |
+| `INTERLATENT_INSECURE` | *(unset)* | `1` disables the authorization check on the gRPC port. Air-gapped networks only. |
+| `DRTC_WARMUP_POLICY` | *(unset)* | HF repo / local path to load + compile at startup. Used only while the box has no environment attached — an attached env's warmup target always wins. |
 | `DRTC_WARMUP_IMAGE_KEYS` | *(unset)* | Comma-separated camera names (`cam_high,cam_left_wrist`) to pre-warm `DRTC_WARMUP_POLICY` with. **Required for MolmoAct2**, which can't build its feature dict without them. Must match the node's `--camera` names — the runtime cache is keyed on `(backend, policy_uri)`, so a mismatched warm is inherited by the first real session rather than discarded. |
 | `HF_TOKEN` | *(unset)* | HF token for private policies — read by `huggingface_hub` directly. |
 
@@ -116,7 +118,7 @@ docker run --rm --gpus all -p 50052:50052 interlatent-server:latest --port 50052
 Note the image's `HEALTHCHECK` and `EXPOSE` hardcode `50051`; on a different port the
 healthcheck reports unhealthy even though the server is fine.
 
-Teleop needs no box-side config: control runs browser → hosted QUIC relay → node, and
+Teleop needs no box-side config: control runs browser → QUIC relay → node, and
 never touches the GPU box.
 
 ### Persistent cache
@@ -145,11 +147,11 @@ export INTERLATENT_DRTC_URL=<box-public-ip>:50051   # host:port, NO scheme
 interlatent-node run --robot so101 --port /dev/ttyACM0 ...
 ```
 
-With `INTERLATENT_API_KEY` set, every RPC's `x-api-key` is validated against the backend
-and must belong to the account that registered the box (cached 60 s). With
-`INTERLATENT_INSECURE=1`, or with no API key at all, the port is **open**: anyone who can
-reach it can consume your GPU and record into your inbox. Firewall it to your nodes'
-egress IPs.
+With `INTERLATENT_API_KEY` set, every RPC's `x-api-key` is validated against your
+coordinator and must be one it vouches for — the operator key or a node token it issued
+(cached 60 s). With `INTERLATENT_INSECURE=1`, or with no key at all, the port is **open**:
+anyone who can reach it can consume your GPU and write episodes into your recording
+destination. Firewall it to your nodes' egress IPs.
 
 ## Provider notes
 
@@ -164,11 +166,11 @@ egress IPs.
    container port appended, and nodes then dial a port nothing listens on —
    `UNAVAILABLE: Connection refused`, while the box logs look perfectly healthy.
 4. **Volume Mount** → `/root/.cache` (≥ 50 GB for SmolVLA).
-5. **Environment**: `INTERLATENT_API_KEY`, `INTERLATENT_ADVERTISE_ADDRESS`, optionally
-   `DRTC_WARMUP_POLICY` and `HF_TOKEN`.
-6. Launch, then attach the box to an environment on the Compute page.
+5. **Environment**: `INTERLATENT_COORDINATOR`, `INTERLATENT_API_KEY`,
+   `INTERLATENT_ADVERTISE_ADDRESS`, optionally `DRTC_WARMUP_POLICY` and `HF_TOKEN`.
+6. Launch, then check it in with `interlatent gpus ls` and start a session against it.
 
 ### Bare metal / LAN
 
 Set `INTERLATENT_ADVERTISE_ADDRESS` to the LAN or VPN address your robots use. No public
-IP is needed — the box only ever dials *out* to the backend.
+IP is needed — the box only ever dials *out* to the coordinator.

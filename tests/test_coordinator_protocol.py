@@ -71,19 +71,15 @@ def test_doc_table_is_not_accidentally_empty_or_truncated() -> None:
 
 
 def test_every_route_carries_a_known_tier() -> None:
-    known = {
-        proto.TIER_MANDATORY,
-        proto.TIER_OPTIONAL,
-        proto.TIER_COORDINATOR_ONLY,
-    }
-    assert {r.tier for r in proto.ROUTES} <= known
+    assert {r.tier for r in proto.ROUTES} == {proto.TIER_MANDATORY}
 
 
-def test_tiers_partition_the_route_table() -> None:
-    assert (
-        len(proto.MANDATORY) + len(proto.OPTIONAL) + len(proto.COORDINATOR_ONLY)
-        == len(proto.ROUTES)
-    )
+def test_the_one_tier_is_the_whole_table() -> None:
+    """ADR 0039 collapsed three tiers into one. A route that falls out of
+    ``MANDATORY`` now has a typo'd tier, not an optional one."""
+    assert proto.MANDATORY == proto.ROUTES
+    assert proto.by_tier("optional") == ()
+    assert proto.by_tier("coordinator-only") == ()
 
 
 def test_no_duplicate_method_and_path() -> None:
@@ -144,29 +140,50 @@ def test_load_bearing_routes_are_mandatory(method: str, path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        # Teleop is disabled for the session on 404 (node/teleop/factory.py
-        # treats 401/403/404 as definitive), so it must not be mandatory.
-        "/inference/sessions/{session_id}/teleop-token",
-        # A coordinator that stamps a recording destination onto every session
-        # needs no inbox at all.
+        # The inbox plane. Recording goes to the box's own sink now; a
+        # coordinator stamps the destination onto the session instead.
         "/episodes",
-        # Hosted analysis has no self-hosted counterpart.
+        "/episodes/{episode_id}/upload-urls",
+        "/episodes/{episode_id}/upload-complete",
+        "/episodes/{episode_id}/inbox-gc",
+        # Analysis and dataset reads: product surface, never protocol, and
+        # nothing shipping ever served them.
         "/environments/{env_id}/analyze",
+        "/environments/{env_id}/process",
+        "/environments/{env_id}/processing-status",
+        "/environments/{env_id}/episodes",
+        "/episodes/{episode_id}",
+        "/episodes/{episode_id}/results",
     ],
 )
-def test_degradable_surfaces_are_optional(path: str) -> None:
-    tiers = {r.tier for r in proto.ROUTES if r.path == path}
-    assert tiers == {proto.TIER_OPTIONAL}, f"{path} should be optional, got {tiers}"
+def test_the_deleted_surfaces_stay_deleted(path: str) -> None:
+    """ADR 0039 deleted these rather than leave them advertised. Re-adding one
+    means re-adding an implementation of it, not just a row."""
+    assert not [r for r in proto.ROUTES if r.path == path], (
+        f"{path} came back; see ADR 0039"
+    )
 
 
-def test_recording_destination_is_coordinator_only() -> None:
-    """The hosted dashboard 404s this one; the CLI must be able to say so by
-    name rather than reporting a bare 404."""
-    assert [r.path for r in proto.COORDINATOR_ONLY] == ["/coordinator/recording"]
+def test_the_recording_destination_is_in_the_contract() -> None:
+    """The operator verb that replaced the inbox. It is the coordinator's own
+    administration surface and belongs to neither the node nor the box plane,
+    but with one implementation left it is served like everything else."""
+    match = [r for r in proto.MANDATORY if r.path == "/coordinator/recording"]
+    assert [r.method for r in match] == ["PUT"]
+
+
+def test_the_warmup_target_survived() -> None:
+    """Kept deliberately (ADR 0039): it reads as upstream code, but it is how a
+    box pre-compiles the policy `session start --policy X` is about to give it,
+    and how it learns the environment's camera keys."""
+    assert [
+        r for r in proto.MANDATORY
+        if r.path == "/compute/boxes/{box_id}/warmup-target"
+    ]
 
 
 def test_protocol_version_is_the_documented_one() -> None:
-    assert proto.PROTOCOL_VERSION == "interlatent.coordinator/1"
+    assert proto.PROTOCOL_VERSION == "interlatent.coordinator/2"
     assert f"`{proto.PROTOCOL_VERSION}`" in DOC.read_text()
 
 

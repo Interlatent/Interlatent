@@ -9,7 +9,7 @@ superseded, never rewritten.
 | # | Decision |
 |---|---|
 | [0011](0011-vendor-robot-subpackage-via-robot-kind.md) | Vendor robot support as a subpackage selected by robot kind |
-| [0012](0012-teleop-receiver-stub-open-core-boundary.md) | Teleop: a thin client receiver stub, engine on the platform |
+| [0012](0012-teleop-receiver-stub-open-core-boundary.md) | Teleop: a thin client receiver stub, engine off the node |
 | [0013](0013-manual-action-interface-below-schedule.md) | Manual action interface: a final actuator below the schedule |
 | [0014](0014-yam-via-i2rt-direct-joint-space.md) | YAM arms via the i2rt driver directly, joint-space only |
 | [0015](0015-nori-liveness-tied-keepalive.md) | Nori keep-alive pump is liveness-tied, never unconditional |

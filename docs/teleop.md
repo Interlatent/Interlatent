@@ -7,14 +7,14 @@ loaded**, where the human drives end-to-end and every episode is captured as
 training data — the usual path from a pretrained base policy to full
 automation.
 
-> **Live intervention:** engaging teleop *during* a hosted inference session
+> **Live intervention:** engaging teleop *during* an inference session
 > takes over from the running policy mid-rollout — the human-driven steps
 > record as `control_source="intervention"` (the DAgger correction label), and
 > releasing the deadman hands control back to the policy within about one
 > control tick. Everything below applies the same way; the only difference is
 > that a policy is running underneath.
 
-The split is **engine on the platform, thin receiver on the robot** (see
+The split is **producer in the browser, thin receiver on the robot** (see
 [ADR 0012](adr/0012-teleop-receiver-stub-open-core-boundary.md)): everything
 that *computes* a joint target — VR pose retargeting, IK — runs off-robot, and
 the node keeps only a receiver plus the last-hop safety clamp:
@@ -35,13 +35,15 @@ policy, passes through (see
 [the action interface](action-interface.md#safety)). Wiring details:
 [QUIC transport & process model](#quic-transport--process-model).
 
-The producer is browser-native and lives in the dashboard — there is nothing
-to install on the operator's machine beyond a headset's browser.
+The producer is the browser-native teleop web app in
+[`teleop/teleop-web/`](../teleop/teleop-web) — build it once and serve `dist/`;
+there is nothing to install on the operator's machine beyond a headset's
+browser.
 
 ## Driving a recording
 
 1. **Run the node.** Teleop needs no flags: `interlatent-node` opens the teleop
-   channel automatically whenever the dashboard assigns it a session. The node
+   channel automatically whenever its coordinator assigns it a session. The node
    must have `aioquic` installed (the `interlatent[teleop-quic]` extra), and
    the robot kind needs a
    [`RobotProfile`](../packages/sdk/src/interlatent/node/teleop/robot_profile.py)
@@ -49,10 +51,10 @@ to install on the operator's machine beyond a headset's browser.
    [Adding a teleop-capable robot](#adding-a-teleop-capable-robot). Without a
    profile, teleop is disabled for the session (the node reports
    `teleop_configured=false`).
-2. **Start a teleop recording** — from the dashboard, or from the teleop web
-   app itself (pick a node + environment and hit *Start recording*; it needs no
-   GPU or policy choice, and enters VR on its own once the recording goes
-   live). Either way the node picks it up through its normal assignment poll.
+2. **Start a teleop recording** from the teleop web app: pick a node +
+   environment and hit *Start recording*. It needs no GPU or policy choice, and
+   enters VR on its own once the recording goes live; the node picks it up
+   through its normal assignment poll.
 3. **Enter VR:** open the session page in the headset's browser (Meta Quest)
    and *Enter VR*. The **grip/squeeze button is a clutch**: the robot follows
    your hand only while it is held, anchored where the robot's end-effector
@@ -130,16 +132,17 @@ reach limits, scales, mounting frame (`webxr_to_base_R`), gripper range.
 
 **3. Compile `kinematic_spec.json`.** The spec is the compact serial-chain
 descriptor the in-browser solver walks — **generated, never hand-edited**.
-Produce it with the MuJoCo-backed exporter (an engine-side maintainer tool that
-lives in the platform repo, not this SDK):
+Produce it with the MuJoCo-backed exporter (a maintainer-side tool that is not
+part of this SDK):
 
 ```bash
 python -m interlatent.inference.server.retarget.kinematic_spec <bundle-dir>
 ```
 
 Regenerate it after **any** URDF or `ik_config.json` change, or the browser
-solver and the hosted solver silently disagree. A bundle missing the spec fails
-in-browser IK loudly rather than solving against kinematics it isn't driving.
+solver and the robot's real joint tree silently disagree. A bundle missing the
+spec fails in-browser IK loudly rather than solving against kinematics it isn't
+driving.
 
 **4. Verify.** `packaging/verify_urdf.py` compiles the URDF exactly as the
 engine does, confirms `ik_config.json` resolves (`ee_body` + every joint), and
@@ -164,12 +167,12 @@ Finally, register the kind's `RobotProfile` in
 
 A **teleop recording** is a full VR-teleop session with no policy loaded — the
 human drives end-to-end and the episode is captured for training. Start one
-from the dashboard or from the teleop web app; the node picks it up through the
-same assignment poll as an inference session and runs its normal loop with the
-policy disabled. Engaged ticks record `control_source="teleop"`; disengaged
-ticks hold pose and record `control_source="hold"` (keeping the episode
-continuous). Stopping the recording uploads it through the standard dataset
-path — it lands in the same per-environment LeRobot dataset as policy rollouts.
+from the teleop web app; the node picks it up through the same assignment poll
+as an inference session and runs its normal loop with the policy disabled.
+Engaged ticks record `control_source="teleop"`; disengaged ticks hold pose and
+record `control_source="hold"` (keeping the episode continuous). Stopping the
+recording publishes it through the standard dataset path — it lands in the same
+per-environment LeRobot dataset as policy rollouts.
 
 ## Recording-uplink pacing
 
@@ -237,9 +240,9 @@ browser ⇄ (QUIC/WebTransport) ⇄ relay ⇄ (QUIC) ⇄ child proc ⇄ (loopbac
   [ADR 0020](adr/0020-aioquic-uni-stream-discard.md)).
 - **`request_spec` handshake:** on connect the browser sends a `request_spec`
   datagram; the node answers on a uni stream with its installed kinematic_spec
-  (the browser builds its IK solver from *this node's* robot data, no platform
-  round-trip). If the node has no local data for its `robot_kind`, QUIC teleop
-  does not start and the node logs it loudly.
+  (the browser builds its IK solver from *this node's* robot data, with no
+  round-trip to anything else). If the node has no local data for its
+  `robot_kind`, QUIC teleop does not start and the node logs it loudly.
 
 Two knobs here are **dev-only**, not in the tables below:
 
@@ -299,7 +302,7 @@ See “Recording-uplink pacing” above for the failure modes.
 
 During policy sessions the node also ships observation frames to the
 DRTC box each inference call. `--image-resize <px>` /
-`INTERLATENT_IMAGE_RESIZE` (also a dashboard setting) resizes frames to
+`INTERLATENT_IMAGE_RESIZE` resizes frames to
 that square edge before encode; leave it unset to send native camera
 resolution. Resizing to the policy's input size cuts this stream the
 same quadratic way `PREVIEW_MAX_DIM` cuts the preview.
@@ -325,4 +328,5 @@ a running policy mid-rollout, `"hold"` for disengaged/no-motion ticks,
 `"policy"` for policy-driven steps in inference sessions. Downstream training
 uses this to distinguish human demonstration and correction from policy
 behavior — intervention frames are the DAgger corrections and are upweighted.
-Episodes with any human-driven steps are flagged in the dashboard.
+Filtering an episode on this field is how you find the human-driven steps in a
+mixed rollout.

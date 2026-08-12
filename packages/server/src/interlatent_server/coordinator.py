@@ -20,7 +20,6 @@ __all__ = [
     "CoordinatorNotConfigured",
     "ENV_VAR",
     "LEGACY_ENV_VAR",
-    "HOSTED_COORDINATOR",
     "API_PREFIX",
     "normalize",
     "resolve",
@@ -29,9 +28,6 @@ __all__ = [
 
 ENV_VAR = "INTERLATENT_COORDINATOR"
 LEGACY_ENV_VAR = "INTERLATENT_API_BASE"
-#: Where the hosted dashboard serves the protocol. Named for humans and
-#: suggested in errors; never resolved to implicitly.
-HOSTED_COORDINATOR = "https://interlatent.com"
 API_PREFIX = "/api/v1"
 
 
@@ -42,8 +38,7 @@ class CoordinatorNotConfigured(RuntimeError):
 _REMEDY = (
     "interlatent-serve needs a coordinator to register with. Pass "
     "--coordinator <url>, or set INTERLATENT_COORDINATOR. Run one with "
-    "`interlatent up` on your control-plane host, or point at a hosted "
-    "dashboard."
+    "`interlatent up` on your control-plane host."
 )
 
 

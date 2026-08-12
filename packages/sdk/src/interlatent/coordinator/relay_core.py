@@ -1,5 +1,3 @@
-# Copied from Interlatent-Main teleop-quic-relay/relay_core.py @ d5b7a1c0
-# (2026-07-22). Upstream is the monorepo copy; sync fixes both ways.
 """Transport-agnostic pairing + routing core for the QUIC teleop relay.
 
 The datagram forwarding rule is deliberately dumb: whatever a browser sends is
