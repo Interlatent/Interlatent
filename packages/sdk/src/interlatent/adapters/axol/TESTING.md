@@ -1,10 +1,14 @@
 # Axol adapter — hardware test checklist
 
 Items that can only be verified on the real Axol robot + connected ZED cameras.
-The automated bring-up check (`hardware_check.py`, run onboard the Jetson via
-`python -m interlatent.adapters.axol.hardware_check --camera <name>=<serial> ...`)
-covers the action-write + observation-read subset; this checklist covers the
-rest. The full loop runs via `interlatent-node run --robot axol ...` with
+The automated bring-up check covers the action-write + observation-read subset
+(`--no-move` for observation checks only); this checklist covers the rest.
+
+```bash
+python -m interlatent.adapters.axol.hardware_check --camera <name>=<serial> [...]
+```
+
+The full loop runs via `interlatent-node run --robot axol …` with
 `interlatent[axol]` installed.
 
 ## Joint / action contract
@@ -22,11 +26,12 @@ rest. The full loop runs via `interlatent-node run --robot axol ...` with
 
 - [ ] Gripper command convention is normalized `[0, 1]` (not radians/meters); the
       0/1 bang-bang snap actually opens/closes the gripper.
-- [ ] `motion_control` drops over-`max_step_rad` commands (does not clamp or
-      execute them); the adapter's held-target bookkeeping stays in sync.
+- [ ] An over-`max_step_rad` command is clamped to the per-step limit (the arm
+      advances toward the target, never slams), and the clamped value is what
+      the adapter remembers as "last accepted".
 - [ ] `max_step_rad` field exists on the native `AxolConfig` and is in radians
-      (gate not silently falling back to 0.5).
-- [ ] Grippers are exempt from the `max_step_rad` gate on the real robot.
+      (the clamp not silently falling back to 0.5).
+- [ ] Grippers (index 7 of each arm) are exempt from the clamp on the real robot.
 - [ ] A blocked/stalled `motion_control` (contact) raising after the 1s timeout
       ends the episode safely (acceptable failure mode).
 - [ ] `disconnect` disables motors even when a camera teardown hangs.

@@ -4,9 +4,7 @@ Robot-specific arguments for `--robot axol` (Almond Axol dual-arm robot, driven 
 the native async `almond_axol` SDK). Parsed by [`config.py`](config.py)
 `build_adapter_config`.
 
-Arguments are passed two ways:
-
-- `--robot-arg key=value` — repeatable; one knob each (table below).
+- `--robot-arg key=value` — repeatable (table below).
 - `--camera name=<serial>` — repeatable; opens an onboard ZED **by serial number**.
 
 Unrecognized `--robot-arg` keys are warned about and ignored. `--port` is **not** used by
@@ -29,7 +27,16 @@ Axol (it speaks CAN, not serial). At least one `--camera` is **required**.
 | `stereo` | `false` | bool | Open every camera as a stereo ZED X (expands each into `<name>_left` / `<name>_right` views). |
 | `resolution` | _native SVGA (960×600)_ | ZED resolution name (`SVGA`, `HD1080`, `HD1200`, …) | ZED capture resolution; must be one of the native `ZED_RESOLUTION_DIMS`. |
 | `camera_fps` | _native (60)_ | int | ZED capture frame rate. |
-| `restart_zed_daemon` | `true` | bool | Restart the Jetson `zed_x_daemon` before opening cameras so a GMSL camera plugged in after boot is enumerable (needs passwordless sudo). |
+| `restart_zed_daemon` | `true` | bool | Restart the Jetson `zed_x_daemon` before opening cameras so a GMSL camera plugged in after boot is enumerable (needs passwordless sudo). A failed restart warns and continues. |
+
+One more key is read by the control loop rather than by `build_adapter_config`, so
+`interlatent-node run` logs it as "unrecognized" and still honors it:
+
+| Key | Default | Description |
+|---|---|---|
+| `max_step` | _(unset ⇒ disabled)_ | Loop-level per-tick delta clamp (radians here) on the policy action, applied before the adapter's own `max_step_rad`. |
+
+Axol runs no action smoothing, so `action_filter_hz` has no effect here.
 
 Bool values accept `1/true/yes/on` (case-insensitive); anything else is false.
 

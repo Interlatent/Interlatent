@@ -42,7 +42,6 @@ def _param_names(fn: ast.FunctionDef) -> set:
     args = fn.args
     return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
 
-
 def _nulls_coordinator_task(fn: ast.FunctionDef) -> bool:
     """True if ``fn`` returns ``<its own param>.model_copy(update={...: None})``.
 

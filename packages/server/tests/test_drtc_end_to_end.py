@@ -296,7 +296,7 @@ def test_the_camera_key_is_namespaced_exactly_once(rollout) -> None:
 
 
 def test_human_driven_steps_are_reported_as_the_episode_badge(rollout) -> None:
-    """ADR 0034 over the real wire: intervention ticks must surface as
+    """ADR 0034 (platform repo) over the real wire: intervention ticks must surface as
     has_teleop on upload-complete."""
     backend, _eid, _stats = rollout
     complete = [b for p, b in backend.posts if p.endswith("/upload-complete")]

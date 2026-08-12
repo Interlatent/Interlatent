@@ -4,253 +4,185 @@
 
 ### One open interface to control every robot.
 
-The open-source SDK and protocol for controlling robots. Read joint state and command
-motion the **same way on every supported arm** - whether you're driving it by hand,
-playing a named behavior, running a cloud VLA policy, or recording a dataset. Add a
-robot once (an adapter + a profile) and every capability above it comes for free.
+Rollout policies, teleoperate, and collect data the **same way on every supported robot** via
+Python, the command line, a VR headset, or a learned policy.
 
 [![PyPI](https://img.shields.io/pypi/v/interlatent?color=7C5CFF&label=interlatent)](https://pypi.org/project/interlatent/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
-[![GitHub stars](https://img.shields.io/github/stars/interlatent/interlatent?style=social)](https://github.com/interlatent/interlatent)
 
-[Robot class](#robot-class) · [How it works](#how-the-sdk-works) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Defining a robot](ROBOT.md) · [Docs](docs/)
+[About](#about) · [Install](#install) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Run a policy](#run-an-ai-policy) · [Docs](#docs) · [Contributing](#contributing)
 
 </div>
 
 ---
 
-Robotics tooling is fragmented: every arm ships its own SDK, its own joint conventions, its
-own scripts. Interlatent is **one interface across robots** - a single way to read state and
-command joints, with a shared safety model underneath. Write against it once and you can
-teleoperate, run models, and collect data on any supported arm.
+## About
 
-This README leads with the architecture, because the architecture *is* the pitch. If you
-just want to move an arm, skip to the [Quickstart](#quickstart).
+Every robot arm arrives with its own SDK, its own units, and its own conventions. An SO-101
+takes 6 joints in degrees with the gripper on 0–100; a YAM takes 14 in radians with the
+gripper on 0–1; a Nori takes 12 normalized to ±100. Nothing about the task changed
+between them, but the control code, the teleop rig, the recorder, and the policy glue all
+get written again from scratch.
 
-## Robot Class
+Interlatent removes that rewrite.
 
-Everything in this SDK rests on one idea: **a robot is a single object with four methods
-and the metadata that gives them meaning.**
+Supporting a new robot means one adapter file and one profile of its physical limits
+([ROBOT.md](ROBOT.md#adding-a-new-robot)). Everything below then works on it; you never
+implement teleoperation, recording, or policy support per robot.
 
-```python
-robot.connect()
-obs = robot.get_observation()   # joint positions + camera frames
-robot.send_action(action)       # absolute joint targets
-robot.disconnect()
-robot.action_features           # the ordered joint names; defines what an action means
-robot.joint_specs               # per-joint specs, aligned with action_features
-robot.robot_kind                # the kind string the platform keys config on
-```
+<table>
+<tr>
+<td width="50%" valign="top">
 
-That is the whole contract, and it is the only thing the layers above a robot are allowed to
-know about. Behaviors, VLA policies, teleop, and dataset recording are all written against
-this contract, so adding a robot gives you all of them at once.
+<!-- <img src="assets/control.gif" width="400" alt="One script driving an SO-101 and a YAM side by side"/> -->
 
-Four words carry the rest of the docs:
+<b>Control any arm</b><br/>
+<code>pose()</code>, <code>move()</code>, <code>act()</code> and <code>behaviors()</code> over
+one handle, on every robot that supports manual moves, or the same thing from a terminal
+with <code>interlatent-act</code>. No account, no network, no config file.<br/>
+<a href="#supported-robots">Supported robots &rarr;</a>
 
-| Term | What it means |
-|---|---|
-| **contract** | the interface above. Nothing above a robot knows anything else about it. |
-| **adapter** | the code that implements them for one robot: its motors, cameras, and units. |
-| **profile** | your arm's physical facts: joint names and their order, limits, speed caps, and the home pose. |
-| **kind** | the name you ask for (`--robot yam`, `il.Robot("so101")`). It selects the adapter and the profile. |
+</td>
+<td width="50%" valign="top">
 
-Two rules shape everything above:
+<!-- <img src="assets/behavior.gif" width="400" alt="An SO-101 running the packaged hello wave"/> -->
 
-- **Actions are joint-space.** Absolute joint targets, one per joint. There is no IK and no
-  Cartesian frame anywhere in the robot-side stack.
-- **An action is a waypoint, not a destination.** Sending one never blocks, and the newest
-  one wins. The control loop sends one per tick.
+<b>Named moves</b><br/>
+Write a sequence of joint poses in TOML or as a Python function, then run it by name.
+Every robot ships with <code>home</code>. Behaviors validate with no hardware attached and
+run through the same action path as the policy loop, so the safety clamps still apply.<br/>
+<a href="docs/behaviors.md">Behaviors &rarr;</a>
 
-**Adding a robot is an adapter plus a profile.** [ROBOT.md](ROBOT.md) is the file-by-file
-reference; [Supported robots](#supported-robots) lists the arms that work today.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-## How the SDK works
+<!-- <img src="assets/teleop.gif" width="400" alt="Headset view beside the arm it is driving"/> -->
 
-Four layers, bottom to top. Each only knows about the layer directly beneath it.
+<b>Teleoperate and collect</b><br/>
+Drive an arm from a VR headset in the browser: grip to clutch, trigger for the gripper.
+Take over a running policy mid-episode; every frame is labelled with who was driving, so
+what you record is usable intervention data. Out comes a LeRobot v3.0 dataset.<br/>
+<a href="docs/teleop.md">VR teleop &rarr;</a>
 
-```
-   behaviors        VLA policy (cloud)        teleop            recording
-   act("home")      DRTC action chunks        joint targets     RecordTicks
-        │                    │                     │                  │
-        └────────────────────┴──────────┬──────────┴──────────────────┘
-                                        │
-                              ┌─────────▼─────────┐
-                              │   control loop    │  observe → decide → clamp
-                              │  (once per tick)  │  → send_action → record
-                              └─────────┬─────────┘
-                                        │
-                              ┌─────────▼─────────┐
-                              │  robot interface  │  adapters/base.py
-                              │   robot contract  │
-                              └─────────┬─────────┘
-                    ┌───────────────────┼───────────────────┐
-                    ▼                   ▼                   ▼
-              lerobot adapter      yam adapter         your adapter
-              SO-101               I2RT YAM            --loop module:fn
-```
+</td>
+<td width="50%" valign="top">
 
-**The control loop is the heart.** Once per tick it reads an observation, decides which
-source is driving the robot this tick (the policy, a VR teleoperator recording a
-demonstration, or nothing at all), produces a joint vector, clamps it, calls
-`send_action`, and records the tick. Everything above the robot interface is just a
-different answer to "who is driving."
+<!-- <img src="assets/policy.gif" width="400" alt="An arm completing a task autonomously under a policy"/> -->
 
-**Safety is layered, and always local to the motors** - never across the network:
+<b>Run a policy</b><br/>
+Stream observations to a GPU, your own or a hosted one, and get action chunks back that
+execute at 30 Hz, so a policy taking 100–2000 ms per inference still drives a robot
+smoothly. SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5, MolmoAct2.<br/>
+<a href="docs/robots-and-policies.md">Robots and policies &rarr;</a>
 
-- The **per-adapter delta clamp** (`--robot-arg max_step=…`) caps the per-tick joint jump for
-  *every* action, policy and human alike. It is the last thing to touch an action before the
-  motors.
-- The **`SafetyGate`** adds workspace, velocity, and deadman limits on human-driven motion.
-  Its velocity-limited stepping is also what makes the manual `action()` call
-  block-then-settle rather than slam.
-- Both read their limits from the robot's **`RobotProfile`** (joint names, order, limits,
-  velocity caps, rest pose), which is why a robot without one gets no human-driven motion at
-  all.
+</td>
+</tr>
+</table>
 
-**Running a policy** means talking to a GPU, and big VLA models are too slow for naive
-request/response - the arm would stutter. So the client and the pod speak **DRTC**
-(Distributed Real-Time Chunking): the robot streams observations continuously and never
-blocks, the pod returns *overlapping action chunks*, and the client merges them
-last-writer-wins while estimating network-vs-compute latency so it knows how far ahead to
-schedule. The result is smooth 30 Hz control on top of a multi-second model. Details in
-[docs/concepts.md](docs/concepts.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+Everything that touches the robot is Apache-2.0 and runs with no account. The hosted
+[dashboard](https://interlatent.com) is the optional layer on top: it pairs machines,
+assigns GPUs, brokers VR teleop, and stores datasets.
 
-**The node daemon** (`interlatent-node`) is how a robot stays online: pair it once, and it
-long-polls a **coordinator** and converges to whatever session is assigned to it. It
-resolves the control loop for your `--robot` kind, opens the DRTC client, and runs. The
-coordinator is either the hosted dashboard or one you run yourself with `interlatent up` —
-one protocol, and the node cannot tell which it has.
+## Install
 
-**Collection is streaming-first.** The control loop JPEG-encodes each camera frame per
-tick and streams `RecordTick`s to the GPU box, which builds the LeRobot v3.0 dataset
-server-side and publishes it wherever the session says: a local directory, an S3 bucket
-you own, or the hosted inbox. A node-side disk spool with delete-after-ack keeps the
-uplink lossless — a link drop never silently thins an episode. (The old on-device
-`watch()`/`tick()`/`upload()` build was removed in 2.0.0; existing datasets enter via
-the dashboard's HF import.)
-
-## Quickstart
-
-### 1. Install
+Python 3.11+. The base package works without hardware, and each robot gets its own extra.
 
 ```bash
 pip install interlatent
 ```
 
-> **Per-robot extras.** The base package is robot-agnostic. Driving real hardware needs the
-> extra for your robot - install **one** of:
-> ```bash
-> pip install 'interlatent[lerobot]'   # SO-101 and other LeRobot robots
-> pip install 'interlatent[yam]'       # I2RT YAM (Linux + SocketCAN)
-> ```
-> SO-101's Feetech servos additionally need the Feetech servo SDK; if the serial bus won't
-> open, `pip install feetech-servo-sdk`. `[yam]` currently needs a build constraint under
-> plain pip - i2rt pins `ruckig==0.15.3`, whose sdist-only build fails against
-> scikit-build-core >= 0.10 - so either install it with `uv pip install` (uv honors i2rt's
-> own constraint) or pass one: `echo 'scikit-build-core<0.10' > /tmp/c.txt &&
-> PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'`. See each robot's config doc under
-> [Supported robots](#supported-robots) for full host requirements.
+| Extra | For | Notes |
+|---|---|---|
+| `interlatent[lerobot]` | SO-101 | May also need `pip install feetech-servo-sdk`. |
+| `interlatent[yam]` | I2RT YAM | Linux + SocketCAN. See the build note below. |
+| `interlatent[nori]` | Nori | Runs on the robot's own network or on the Pi. |
+| `interlatent[dimos]` | xArm7 / xArm6 / A1Z | Python 3.11–3.12. Large install; needs a running dimos stack. |
+| `interlatent[axol]` | Almond Axol | Python 3.13+. ZED SDK and `pyzed` installed separately. |
+| `interlatent[turbo]` | Faster camera encoding | Also needs `libturbojpeg` on the host. |
+| `interlatent[teleop-quic]` | Lower-latency VR teleop | Optional; the default path needs nothing extra. |
 
-**Requires Python 3.11+.**
+> `[yam]` needs a build constraint under plain pip. Use `uv pip install`, or:
+>```bash
+>printf 'scikit-build-core<0.10\n' > /tmp/c.txt
+>PIP_CONSTRAINT=/tmp/c.txt pip install 'interlatent[yam]'
+>```
 
-### 2. Drive a robot directly (no cloud, no account)
+## Quickstart
 
-The fastest thing you can do needs no GPU and no policy - just an arm. This is the robot
-interface with nothing on top of it:
+Plug in an arm and move it. This doesn't rely on an account, cloud, or config file.
 
 ```python
 import interlatent as il
 
 with il.Robot("so101", port="/dev/ttyACM0") as robot:
-    print(robot.pose())                     # read joint state: {'shoulder_pan': 0.0, ...}
-    robot.act("home")                       # go to the robot's rest pose, block until reached
-    robot.act("hello")                      # play the packaged SO-101 wave
-    robot.act("hello", speed=0.5)           # the same wave, at half speed
-    robot.move(wrist_roll=30, duration=0.5) # ad-hoc joint move, no behavior needed
+    print(robot.pose())                     # {'shoulder_pan': 0.0, ...}
+    robot.act("home")                       # go to the rest pose, wait until it arrives
+    robot.act("hello", speed=0.5)           # a packaged SO-101 wave, at half speed
+    robot.move(wrist_roll=30, duration=0.5) # move one joint
 ```
 
-**Where do `home` and `hello` come from? You don't set them up.** That's the point, so it's
-worth being precise about what each one is:
+`Robot` gives you `pose()`, `move()`, `act()`, `behaviors()`, and `close()`. Positions/actions are
+currently always **joint angles**.
 
-- **`home` is generated, never authored.** It is built from your robot's
-  `RobotProfile.rest_pose`, so it cannot drift from the hardware: change the profile and
-  `home` changes with it. On SO-101 the rest pose is all six joints at 0°. **Every robot
-  kind with a profile gets `home` for free**, including ones that ship no behavior file at
-  all. It is the one behavior you can always assume exists.
-- **`hello` is a packaged example**, and only for SO-101
-  ([`behaviors/data/so101.toml`](packages/sdk/src/interlatent/behaviors/data/so101.toml) is
-  the only built-in file today). It exists to show what a hand-authored behavior looks like.
-  Ask for it on an arm that doesn't define it and you get an error naming the behavior and
-  listing what that arm *does* have, rather than a surprise movement.
+You can also do the same thing from the terminal:
 
-A behavior is just **data**. `hello` in full is a keyframed wrist wave, and this is the
-entire definition:
-
-```toml
-[hello]
-type = "trajectory"
-interpolation = "min_jerk"
-description = "Raise the arm and wave the wrist."
-keyframes = [
-    { t = 0.0, shoulder_lift = 0.0, elbow_flex = 0.0, wrist_flex = 0.0, wrist_roll = 0.0 },
-    { t = 1.5, shoulder_lift = -30.0, elbow_flex = -40.0 },   # raise the forearm
-    { t = 2.1, wrist_roll = 35.0 },                           # wave
-    { t = 2.7, wrist_roll = -35.0 },
-    { t = 3.3, wrist_roll = 35.0 },
-    { t = 3.9, wrist_roll = -35.0 },
-    { t = 4.5, wrist_roll = 0.0 },                            # straighten the wrist
-    { t = 6.0, shoulder_lift = 0.0, elbow_flex = 0.0 },       # lower the forearm
-]
+```bash
+interlatent-act --robot so101 --port /dev/ttyACM0 --show          # print the pose and joint names
+interlatent-act --robot so101 --port /dev/ttyACM0 shoulder_pan=30 wrist_roll=-15
 ```
 
-Times are seconds, arm joints are degrees, and `min_jerk` smooths between keyframes. The
-amplitudes are deliberately conservative: the wrist swings peak at ~219°/s against a 240°/s
-cap, and the shoulder raise at ~38°/s against a 50°/s cap. Those caps come from the same
-profile that generates `home`.
+`interlatent-act` is the quickest way to check an arm is wired up correctly. Bad or unknown
+joint values are rejected before the robot moves.
 
-Your own behaviors resolve through four layers, each overriding the previous **by name** -
-so you can redefine `home` or `hello` without touching the package:
+### Named moves
 
-1. **Built-in** - generated `home`, plus any packaged `data/<robot>.toml`.
-2. **User file** - `~/.interlatent/behaviors.toml`.
-3. **Explicit file** - `Robot(behaviors=...)` or `--behaviors`.
-4. **Procedural** - Python functions registered with `@il.behavior`.
-
-Nothing moves before it is checked. Declarative behaviors are validated against the profile
-**as they load**: unknown joint names, out-of-limit targets, and velocity-cap violations all
-raise an error naming the behavior, joint, value, and limit. That is why `behavior validate`
-below needs no hardware. Full format reference: [docs/behaviors.md](docs/behaviors.md).
-
-The same commands work from the terminal:
+`act("hello")` runs a **behavior** — a named sequence of joint poses written in TOML. Every
+robot gets `home`.
 
 ```bash
 interlatent behavior ls --robot so101
-interlatent behavior validate my_behaviors.toml --robot so101   # validate, no hardware
-interlatent behavior run hello --robot so101 --port /dev/ttyACM0 --speed 0.5
+interlatent behavior validate my_behaviors.toml --robot so101   # no hardware needed
+interlatent behavior run hello --robot so101 --port /dev/ttyACM0
 ```
 
-No arm handy? [`examples/07_named_behaviors.py`](examples/07_named_behaviors.py) runs the
-whole thing against a fake adapter and prints the action stream.
+Write your own in `~/.interlatent/behaviors.toml`, in a file you pass explicitly, or as a
+Python function decorated with `@il.behavior`. See the format at:
+[docs/behaviors.md](docs/behaviors.md).
 
-### 3. Run a cloud policy on it
+## Supported robots
 
-Sign in at [interlatent.com](https://interlatent.com), create an API key, and export it:
+| Robot | `--robot` | Joints and units | Manual moves | Extra | Setup |
+|---|---|---|:---:|---|---|
+| **SO-101** (reference) | `so101` | 6; degrees, gripper 0–100 | ✅ | `[lerobot]` | [doc](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
+| **I2RT YAM** (two arms) | `yam`, `yam_bimanual` | 14; radians, gripper 0–1 | ✅ | `[yam]` | [doc](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| **I2RT YAM** (one arm) | `yam_left`, `yam_right` | 7; radians, gripper 0–1 | ✅ | `[yam]` | [doc](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
+| **Nori** (beta) | `nori` | 12; normalized ±100 | ✅ | `[nori]` | [doc](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
+| **xArm7 / xArm6 / A1Z** | `dimos`, `--robot-arg kind=…` | 8 / 7 / 7 incl. gripper; radians | ✅ | `[dimos]` | [doc](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
+| **Almond Axol** (beta) | `axol` | 16; radians, gripper 0–1 | ❌ policy only | `[axol]` | [doc](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
+
+Adding a robot takes one adapter file and one profile of its physical limits —
+[ROBOT.md](ROBOT.md#adding-a-new-robot). Everything else (behaviors, teleop, policies,
+recording) then works on it automatically.
+
+## Run an AI policy
+
+Policies run on a GPU machine and stream actions back to the robot at 30 Hz.
+
+To set up a receiver node, which controls the robot:
 
 ```bash
 export INTERLATENT_API_KEY=ilat_...
-```
 
-Pair the machine on your robot once, then run the node daemon:
-
-```bash
-interlatent-node pair --name my-arm --api-key ilat_...
+interlatent-node pair --name my-arm                    # this will setup connection and naming details.
 interlatent-node run  --robot so101 --port /dev/ttyACM0 --camera front=/dev/video0
 ```
-
-Then start a session against it, from the CLI or the dashboard:
+You can run servers off of your own GPUs or on cloud providers such as runpod or modal. Install the server there
+(`pip install 'interlatent-server[lerobot]'`, or use Docker — see
+[docs/self-hosting.md](docs/self-hosting.md)), and start it with `interlatent-serve`. You can then start a session:
 
 ```bash
 interlatent up               # run a coordinator here (or point at a hosted one)
@@ -260,299 +192,102 @@ interlatent session start --node my-arm --gpu a100-0 --policy lerobot/smolvla_ba
 interlatent session stop <session-id>
 ```
 
-The node picks up the assigned session and the arm starts moving. To test the cloud path
-with no robot attached:
+Supported policies: SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5 (via LeRobot), MolmoAct2. Full info: [docs/robots-and-policies.md](docs/robots-and-policies.md).
+
+WAM inference is still WIP.
+
+## VR teleoperation and data collection
+
+[`teleop/teleop-web/`](teleop/teleop-web) is a web app you open in a VR headset: grip to
+clutch, trigger for the gripper. By default, the right controller drives the end effector. You can also take over a
+running policy at any time. Every frame is
+labelled with who was driving, so the recording is usable intervention data.
+
+Build and host it yourself over HTTPS:
 
 ```bash
-interlatent-preflight --environment my-arm --policy lerobot/smolvla_base
+cd teleop/teleop-web && npm install && npm run build   # serve dist/
 ```
 
-That opens a real session against a managed GPU pod, streams synthetic observations, and
-prints a **PASS / WARN / FAIL** verdict with measured network-vs-compute latency. It
-exercises the cloud inference path only, not your cameras, joints, or motor bus.
+Teleop and recording both go through the dashboard, which mints the session token and stores
+the resulting LeRobot v3.0 datasets. Setup: [docs/teleop.md](docs/teleop.md).
 
-### 4. Or drive the loop yourself
+## Safety
 
-If you'd rather own the control loop instead of running the daemon:
+Two limits apply on every tick, both read from the robot's own profile and both enforced on
+the machine holding the motors:
 
-```python
-from interlatent.inference.integration import connect_drtc
+- A **per step delta clamp** caps how far any joint can jump in one tick. This applies to both policies and humans
+  alike. Tune it with `--robot-arg max_step=…`.
+- **Workspace, speed, staleness, and deadman limits** apply to human-driven motion, plus an
+  emergency stop that only a person can clear.
 
-client = connect_drtc(
-    environment="my-arm",
-    policy_uri="lerobot/smolvla_base",
-    api_key="ilat_...",                # or rely on INTERLATENT_API_KEY
-    task="pick up the red cube",
-    fps=30,
-)
-while running:
-    action = client.step(observation_npz_bytes, codec="npz")  # None while the first chunk loads
-    if action is not None:
-        robot.send_action(action)
-client.close()
-```
+## Configuration
 
-An observation is just an `np.savez` blob whose keys mirror LeRobot features
-(`observation.images.<camera>`, `observation.state`, `task`). See
-[`examples/03_run_on_so101.py`](examples/03_run_on_so101.py) for a complete SO-101 loop, or
-[`examples/06_connect_hosted.py`](examples/06_connect_hosted.py) for the minimal connect.
-
-### Configuration
-
-Only `INTERLATENT_API_KEY` is required; the rest are optional tuning knobs.
+`INTERLATENT_API_KEY` is the only required setting, and only for hosted features — the
+Python and CLI paths above need nothing.
 
 | Env var | What it does |
 |---|---|
-| `INTERLATENT_API_KEY` | Your account API key (`ilat_…`). Authenticates the CLI and DRTC inference. **Required.** |
-| `INTERLATENT_DRTC_URL` | Pin the DRTC inference endpoint (operator/dev override; normally provided per-session). |
-| `INTERLATENT_NUM_INFERENCE_STEPS` | Flow-matching denoising steps for VLA policies (e.g. MolmoAct2). Range 3-10; default 5. |
-| `INTERLATENT_IMAGE_RESIZE` | Resize camera frames to this square edge (px) before JPEG-encoding. `256` suits MolmoAct2. |
-| `INTERLATENT_NODE_CONFIG` | Path to the node config TOML (default `~/.interlatent/node.toml`). |
-| `INTERLATENT_CALIB_PRESET` | Force or disable a joint-calibration preset (e.g. `so101_pre777`, or `none`). |
-| `INTERLATENT_JPEG_BACKEND` | Force the frame encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). See [node encoding](docs/node-encoding.md). |
-| `INTERLATENT_PREVIEW_HZ` | Live teleop preview push rate (1-30, default 30). Competes with recording/teleop for uplink — see [node encoding](docs/node-encoding.md). |
+| `INTERLATENT_API_KEY` | Your account key (`ilat_…`), from interlatent.com. |
+| `INTERLATENT_API_BASE` | Dashboard URL (default `https://interlatent.com`). |
+| `INTERLATENT_NODE_CONFIG` | Node config file (default `~/.interlatent/node.toml`). |
+| `INTERLATENT_IMAGE_RESIZE` | Shrink camera frames to this square size. `256` suits MolmoAct2. |
+| `INTERLATENT_JPEG_BACKEND` | Pick the image encoder (`auto`\|`nvjpeg`\|`gpujpeg`\|`turbojpeg`\|`cv2`\|`pil`). |
+| `INTERLATENT_SPOOL_DIR` / `_MAX_MB` | Where recordings buffer, and the cap (default `~/.interlatent/spool`, 6 GiB). |
 
-## Supported robots
+> The JPEG encoding backend is automatically configured based on available hardware, but can be manually set.
 
-`--robot <kind>` on the CLI, `il.Robot("<kind>")` in Python. Each robot's config doc covers
-host requirements, `--robot-arg` knobs, camera declarations, and worked examples.
+## Docs
 
-| Robot | `--robot` | Joints and units | Extra | Config doc |
-|---|---|---|---|---|
-| **SO-101** (reference) | `so101` | 6; degrees, gripper 0-100 | `[lerobot]` (+ `feetech-servo-sdk`) | [config](packages/sdk/src/interlatent/adapters/lerobot/CONFIG.md) |
-| **I2RT YAM** (bimanual) | `yam`, `yam_bimanual` | 14 (left block, then right); radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
-| **I2RT YAM** (single arm) | `yam_left`, `yam_right` | 7; radians, gripper 0-1 | `[yam]` | [config](packages/sdk/src/interlatent/adapters/yam/CONFIG.md) |
-| **Nori** (dual-SO-101 rig, **unstable beta**) | `nori` | 12 (left block, then right); daemon-normalized ±100 | `[nori]` | [config](packages/sdk/src/interlatent/adapters/nori/CONFIG.md) |
-| **Almond Axol** (dual arm, **unstable beta**) | `axol` | 16 (7 + gripper per side); radians, gripper 0-1 | `[axol]` | [config](packages/sdk/src/interlatent/adapters/axol/CONFIG.md) |
-| **UFACTORY xArm7 / xArm6 / Galaxea A1Z** (via a running dimos stack) | `dimos`, `--robot-arg kind=xarm7\|xarm6\|a1z` | 7 or 6; radians, gripper units vary by kind (see config) | `[dimos]` | [config](packages/sdk/src/interlatent/adapters/dimos/CONFIG.md) |
-| Any other LeRobot robot | `<type>` | LeRobot's | `[lerobot]` | policy only, see below |
-| Custom hardware | `--loop module:fn` | yours | - | bring your own I/O loop |
+Runnable examples, ordered by how much hardware they need:
+[`examples/`](examples/README.md).
 
-The SO-101, YAM, Nori, and dimos (`xarm7`/`xarm6`/`a1z`) rows are the kinds that ship a
-**`RobotProfile`** (the full list lives in `_PROFILES` in
-[`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py) —
-dimos kinds resolve there too, just loaded from
-[`adapters/dimos/robots/*.toml`](packages/sdk/src/interlatent/adapters/dimos/robots/)
-rather than being literals in that file); Axol does not yet, so it is policy-only.
-That distinction is the one rule worth internalizing:
-
-> **No profile, no human-driven motion.** Any other LeRobot robot still runs a cloud policy
-> fine. But `action()`, behaviors (including `home`), and teleop **refuse to run** without a
-> profile, rather than move an arm with no safety envelope. This fails closed on purpose.
-
-For the policy side (SmolVLA, Pi0, ACT, MolmoAct2, your fine-tunes), see
-[docs/robots-and-policies.md](docs/robots-and-policies.md).
-
-**Missing your arm?** Adding robots is the contribution we most want, and it should cost you
-one `robot.py` and a profile. [ROBOT.md](ROBOT.md#adding-a-new-robot) is the walkthrough;
-[CONTRIBUTING.md](CONTRIBUTING.md) is the process.
-
-## Using the dashboard
-
-The [Interlatent dashboard](https://interlatent.com) owns the cloud side: the GPU pods, and
-which policy each robot is running. The core objects:
-
-- **Environments** - a robot setup and its task, the unit everything else hangs off. The
-  `environment` slug you pass to `connect_drtc` matches one here.
-- **GPU boxes** - managed, warm cloud GPUs that serve the policy. You don't rent or boot the
-  hardware. (`interlatent gpus ls`)
-- **Nodes** - your paired robots, created by `interlatent-node pair`. The running daemon
-  heartbeats and reports status. (`interlatent nodes ls`)
-- **Sessions** - a policy running on a GPU box, bound to a node. Start one and the node
-  converges to it; stop it and the arm idles. (`interlatent session start | ls | stop`)
-
-Create an environment, configure its policy, start a GPU box, pair and run your node, then
-start a session. The node picks it up and the arm starts moving under the policy.
-
-## Examples
-
-| Example | Hardware needed |
+| Topic | Where |
 |---|---|
-| [`03_run_on_so101.py`](examples/03_run_on_so101.py) - drive an SO-101 against a cloud pod | SO-101 (or none - synthesizes obs) |
-| [`04_manual_action.py`](examples/04_manual_action.py) - one-shot manual joint move | a supported arm |
-| [`06_connect_hosted.py`](examples/06_connect_hosted.py) - the minimal cloud connect | none |
-| [`07_named_behaviors.py`](examples/07_named_behaviors.py) - named behaviors offline | none (fake arm) or a supported arm |
-
-## What's in this repo
-
-Three deliverables, released independently. The whole path from a robot's motors to a
-policy's actions is here — the client, the server it talks to, and the VR producer that
-lets a human take over mid-rollout.
-
-| Path | Ships as | What it is |
-|---|---|---|
-| [`packages/sdk/`](packages/sdk) | `pip install interlatent` | The SDK on this page: the `Robot` contract, adapters, behaviors, the node daemon, and the DRTC client. |
-| [`packages/server/`](packages/server) | `pip install interlatent-server` | The **DRTC policy server** — the same code that runs Interlatent's hosted GPU boxes, so you can run one on your own hardware. See [self-hosting](docs/self-hosting.md). |
-| [`teleop/teleop-web/`](teleop/teleop-web) | static PWA | The **WebXR VR teleop producer**. Open it in a Quest browser to drive a robot's end effector and record corrections. |
-
-Two shared pieces sit above them: [`proto/messages.proto`](proto/README.md) is the single
-source of truth for the DRTC wire protocol (both Python packages mirror it), and
-[`docker/`](docker/README.md) builds the server image.
-
-The SDK and the server both need to be installable on their own — they run on different
-machines, on different hardware, and are versioned separately. Nothing in one imports the
-other; they meet only at the protocol.
-
-## Open source vs. Interlatent Cloud
-
-This SDK is open source and yours to run, but it's built to plug into the
-[dashboard](https://interlatent.com), which orchestrates your boxes, nodes, and sessions.
-The dashboard is the control plane either way — what's optional is whose GPU runs the
-policy.
-
-| Capability | Open source | [Interlatent](https://interlatent.com) |
-|---|:---:|:---:|
-| One interface + safety model across robots | ✅ | ✅ |
-| Drive robots directly (behaviors, manual moves) | ✅ | ✅ |
-| Robot node daemon + DRTC client | ✅ | ✅ |
-| Policy server (DRTC) | ✅ `interlatent-server` on your GPU | ✅ managed warm GPUs, no cold starts |
-| Run a VLA policy on your robot | ✅ bring your own GPU box | ✅ provisioned for you |
-| VR teleoperation + DAgger corrections | ✅ | ✅ |
-| CLI for pods / nodes / sessions | ✅ | ✅ + full dashboard |
-| Hosted, versioned datasets | DIY | ✅ managed, shareable |
-| Auto policy analysis & reports | ❌ | ✅ |
-| GPU autoscaling & warm pools | ❌ | ✅ |
-| Support / SLA | community | ✅ |
-
-A self-hosted box still registers with the dashboard (your API key, your hardware) — see
-[ADR 0023](docs/adr/0023-self-hosted-policy-server-returns.md) for why "hosted control
-plane, BYO compute" rather than a fully standalone mode.
-
-## Documentation
-
-- [Getting started](docs/getting-started.md) - robot → first rollout
-- [Defining a robot](ROBOT.md) - the profile, the adapter, and adding your own arm
-- [Named behaviors](docs/behaviors.md) - drive robots directly (Python + CLI + TOML), no cloud
-- [The action interface](docs/action-interface.md) - the robot contract in depth
-- [Concepts](docs/concepts.md) - DRTC, sessions, chunks, the node
-- [Supported robots & policies](docs/robots-and-policies.md)
-- [Teleoperation](docs/teleop.md) - drive the robot in VR to collect demonstrations, safety, recordings
-- [Node encoding & GPU acceleration](docs/node-encoding.md) - the JPEG backend chain, Jetson GPUJPEG setup, bandwidth budgeting
-- [Going to cloud](docs/going-to-cloud.md)
-- [Self-hosting the policy server](docs/self-hosting.md) - run `interlatent-server` on your own GPU
-- [The DRTC wire protocol](proto/README.md) - the source of truth, and how to change it
-- [The coordinator protocol](docs/coordinator-protocol.md) - the control-plane contract nodes, boxes and the CLI speak
-- [Architecture](ARCHITECTURE.md) - for contributors
+| First rollout, end to end | [docs/getting-started.md](docs/getting-started.md) |
+| Adding a robot | [ROBOT.md](ROBOT.md) |
+| Named behaviors | [docs/behaviors.md](docs/behaviors.md) |
+| Sending actions | [docs/action-interface.md](docs/action-interface.md) |
+| How the pieces fit together | [docs/concepts.md](docs/concepts.md) |
+| Robot and policy support | [docs/robots-and-policies.md](docs/robots-and-policies.md) |
+| VR teleop and recording | [docs/teleop.md](docs/teleop.md) |
+| Camera encoding and bandwidth | [docs/node-encoding.md](docs/node-encoding.md) |
+| Running your own policy server | [docs/self-hosting.md](docs/self-hosting.md) |
+| Using the hosted dashboard | [docs/going-to-cloud.md](docs/going-to-cloud.md) |
+| Wire protocol | [proto/README.md](proto/README.md) |
+| Docs for Agents | [CONTEXT.md](CONTEXT.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/adr/](docs/adr/) |
 
 ## Contributing
 
-We'd love your help - especially **adding robots**, which is how this project gets breadth.
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
-[`good first issue`](https://github.com/interlatent/interlatent/labels/good%20first%20issue) label.
+Adding robot profiles and additional features to this repository helps make it more useful for others. We appreciate any contributions from the community.
 
-This project uses the [Developer Certificate of Origin](https://developercertificate.org/)
-(`git commit -s`). Questions, demos, robot pics: team@interlatent.com.
+To run tests:
+
+```bash
+pip install -e ./packages/sdk pytest pytest-timeout ruff jsonschema
+pytest tests/ packages/sdk/tests/ -v --timeout=120   # both roots; neither is a subset
+pytest tests/ packages/server/tests/ -v --timeout=120  
+ruff check .
+```
+
+Exisiting pytests run with no GPU and no robot, but you should **test your code on real hardware** before pushing.
+
+Server and web tests are separate
+(`pytest packages/server/tests/`; `npm test` in `teleop/teleop-web`) — see
+[TESTING.md](TESTING.md). 
+
+If you change `proto/messages.proto`, regenerate with
+`./proto/gen_proto.sh` and keep changes additive. **Sign off your commits**
+(`git commit -s`) — CI checks [DCO](https://developercertificate.org/). 
+
+Details:
+[CONTRIBUTING.md](CONTRIBUTING.md). 
+
+Security issues should go to team@interlatent.com, never a
+public issue.
 
 ## License
 
-[Apache-2.0](LICENSE) © Interlatent Contributors.
-
-"Interlatent Cloud" and the hosted service at interlatent.com are operated separately from
-this open-source project.
-
-## Future directions
-
-Forward-looking work that isn't scheduled yet. Each item is a direction, not a spec.
-
-### Fold the adapters into the robot class
-
-The [robot contract](#robot-class) is real and it works. The adapter layer *around* it is
-not finished, and we would rather say so here than let you discover it in the source. Today
-an adapter is up to four files (`robot.py`, `config.py`, `cameras.py`, `loop.py`), and two
-of them exist only because we haven't closed the abstraction.
-
-**Where it stands:**
-- **The robot is a clean abstraction.** `base.py` + `robot.py` genuinely is one interface
-  across arms. This part is done, and the work below sits entirely above it.
-- **Cameras are only partly abstracted.** The YAM adapter defines a proper `Camera` Protocol
-  (`connect` / `read() -> RGB` / `disconnect`) with lazily-imported RealSense, ZED, and UVC
-  backends behind it. That is the right shape, but it is *local to that adapter* - others
-  open their cameras inside `robot.py`, so there is no single camera seam across the SDK.
-- **The control loop is factored** (ADR 0022). There is one tick skeleton
-  ([`node/looprunner.py`](packages/sdk/src/interlatent/node/looprunner.py)) and one motion
-  path (`CommandBus.drive()` in
-  [`node/movement.py`](packages/sdk/src/interlatent/node/movement.py) — arbitrate →
-  SafetyGate → delta clamp → `send_action` → flush/smoother bookkeeping). Each `loop.py`
-  is now a thin shim that constructs the robot and its per-session collaborators and hands
-  the tick over; per-robot pre-flight lives in an optional `pre_tick(obs) -> TickVerdict`
-  guard on the robot itself. A new adapter cannot silently miss a safety rung — it has no
-  per-tick code to get wrong.
-
-**Direction:** a new robot should be one `robot.py` plus a `RobotProfile`.
-
-1. **One `Camera` protocol** for the whole SDK (`connect` / `read() -> uint8 HxWx3 RGB` /
-   `disconnect`) that every adapter implements rather than reinvents. YAM's is already the
-   template, so promoting it to a shared module is mostly a move, not a design.
-2. ~~One universal control loop~~ **Done** (ADR 0022): the shared runner + command bus own
-   every tick; adapters declare guard hooks (`pre_tick`, `estop`) discovered off the robot,
-   and inject their coerce/calibration policy — hooks won over capability flags because
-   Nori's "end the episode and free the daemon slot" is a verdict, not a boolean.
-3. **A smaller adapter.** Once cameras are shared too, `config.py` shrinks to a schema and
-   the remaining `loop.py` shim (~80 lines of construction, no per-tick logic) can fold
-   into the registry.
-
-The test for whether we've done this right: **adding an arm should be one file and a
-profile.** Anything more is a seam we haven't closed yet.
-
-**Open design questions (resolve before building):**
-- ~~The unit of variation for the universal loop~~ Answered (ADR 0022): optional guard
-  hooks on the existing `RobotAdapter` Protocol, discovered by `getattr` — Nori needed a
-  verdict (`END_EPISODE` frees the daemon's control-client slot), which no capability flag
-  can express.
-- ~~Per-tick work that isn't "send an action"~~ Answered: the liveness proof rides
-  `get_observation` (first and unconditionally every tick), and everything else a robot
-  must check pre-arbitration is `pre_tick(obs) -> TickVerdict`. No `tick()` on the
-  contract.
-- Cameras behind a network transport rather than a local SDK still have to satisfy
-  `read() -> uint8 HxWx3 RGB`. Does the shared Camera protocol need a staleness/async story,
-  or is latest-wins-plus-decode enough?
-- Does `config.py` survive as a schema the daemon validates against, or does the robot
-  declare its own knobs and the daemon stay generic?
-
-### Robots should consume URDFs directly
-
-Today a robot's kinematic facts - joint names, order, limits, velocity caps, rest
-pose - are hand-transcribed into static `RobotProfile` literals in
-[`robot_profile.py`](packages/sdk/src/interlatent/node/teleop/robot_profile.py). That
-is a transcription step that drifts from the hardware: the YAM profile shipped with a
-conservative placeholder envelope, and the real limits only landed once we pulled the
-joint `<limit>` values out of the i2rt YAM URDF by hand. The URDF is the manufacturer's
-source of truth; the robot should read it rather than restate it.
-
-**Direction:** let a robot derive its profile (and eventually FK/collision data)
-from the robot's URDF, so limits/order/rest-pose come from one authoritative file.
-
-**What we know already:**
-- I2RT ships a real YAM URDF at `i2rt/robot_models/arm/yam/yam.urdf` (joints listed
-  reversed vs i2rt command order; `joint1..joint6` map to our `joint_0..joint_5`).
-  The arm `joint_limits` in our profile are now transcribed from it; `max_velocity`
-  and the gripper range are still hand-chosen (the gripper is combined in separately
-  from the `LINEAR_4310` model, so it is not in `yam.urdf`).
-- The dimos adapter has since built the **build-time** half of this for its own
-  kinds: `packages/sdk/scripts/dimos_profile_gen.py` (position limits) and
-  `dimos_kinematic_spec_gen.py` (the fuller joint chain, for VR teleop) both
-  parse a vendor's URDF directly — reachable because `[dimos]` already
-  installs the vendor's package data locally, no separate fetch needed — and
-  print output reviewed and committed as a literal, same as YAM's. This
-  answers the first open question below (build-time, not connect-time) for
-  the one adapter family where it's been tried, and confirms the second
-  bullet's caveat in practice: `dimos_profile_gen.py` deliberately does NOT
-  emit `max_velocity`, because the URDF's velocity tag disagreed with the
-  vendor's own SDK-level cap by ~2x for A1Z — a URDF alone wasn't enough to
-  pick a number, exactly the concern this section already anticipated.
-
-**Open design questions (resolve before building):**
-- Parse the URDF at build time into a static profile (keeps the current convention,
-  no runtime parse-dep) vs. at `connect()` (always matches the installed driver, adds
-  a `yourdfpy`-style dependency on the import path)? — **resolved this way for dimos
-  kinds** (build-time), for a concrete reason beyond convention: `robot_profile.py`
-  must stay importable without dimos installed (tested), which a connect-time parse
-  would break.
-- Vendor the URDF + meshes into the robot package, or read it from the installed vendor
-  package (e.g. i2rt's `ARM_YAM_XML_PATH`)? Meshes/asset paths complicate vendoring.
-- How does URDF joint order reconcile with `action_features` ordering (the policy
-  binds to order, not names)? The reversed YAM ordering shows this needs an explicit
-  mapping, not a blind import.
-- Keep the static literal as a hand-verified fallback / safety-tightened override, or
-  treat the URDF as canonical? URDF limits are mechanical max - we currently inset
-  velocity below them on purpose, which a naive import would lose.
+[Apache-2.0](LICENSE) © Interlatent Contributors. "Interlatent Cloud" and the hosted service
+at interlatent.com are operated separately from this open-source project.

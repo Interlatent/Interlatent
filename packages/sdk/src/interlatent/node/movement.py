@@ -90,7 +90,7 @@ class MovementSource(str, Enum):
     TELEOP = "teleop"   # a human is driving a policy-less recording session
     #: A human override *of a running policy* (deadman held while
     #: ``policy_enabled``). Split from TELEOP so interventions carry clean
-    #: correction labels for DAgger-style training (ADR 0034).
+    #: correction labels for DAgger-style training (ADR 0034, platform repo).
     INTERVENTION = "intervention"
     HOLD = "hold"       # human disengaged and no policy action to execute
     POLICY = "policy"   # autonomous inference chunk

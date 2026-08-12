@@ -1,12 +1,12 @@
 # `interlatent-server` — GPU image
 
-A self-contained CUDA image of the Interlatent DRTC policy server. Deploy it to any
+A self-contained CUDA image of the Interlatent DRTC policy server, deployable to any
 GPU provider (RunPod, Lambda Labs, Vast.ai, Prime Intellect, bare metal) without
 touching the host Python environment.
 
 It runs [`interlatent-serve`](../docs/self-hosting.md): the box registers itself with
 the Interlatent dashboard using **your** API key, then serves policies to your robot
-nodes over native gRPC. The dashboard stays the control plane; the GPU is yours.
+nodes over native gRPC.
 
 `linux/amd64` only — there is no CUDA on arm64 hosts.
 
@@ -32,8 +32,8 @@ Pick the policy per session from the dashboard (or `connect_drtc(policy_uri=...)
 the manual path). The server lazy-loads it on the first `OpenSession`, or warm-loads it
 up front when `DRTC_WARMUP_POLICY` is set.
 
-**GPU sizing** follows the same rules as Interlatent's managed boxes: ~24 GB VRAM covers
-SmolVLA / ACT / Diffusion; Pi0- and MolmoAct2-class VLAs want more.
+**GPU sizing:** ~24 GB VRAM covers SmolVLA / ACT / Diffusion; Pi0- and
+MolmoAct2-class VLAs want more.
 
 ## Build
 
@@ -43,7 +43,7 @@ The build context must be the repo root, so the `packages/server` COPY resolves:
 docker build -f docker/Dockerfile -t interlatent-server:latest .
 ```
 
-Multi-arch push to a registry:
+Push to a registry (amd64 only):
 
 ```bash
 docker buildx build --platform linux/amd64 \
@@ -72,9 +72,9 @@ docker build -f docker/Dockerfile \
   -t interlatent-server:openvla .
 ```
 
-The stubs for the DRTC protocol are regenerated during the build
-(`docker/gen_proto.sh`) against the image's own protobuf runtime, so generated code and
-runtime can never disagree. See [`proto/README.md`](../proto/README.md).
+The DRTC protocol stubs are regenerated during the build (`docker/gen_proto.sh`)
+against the image's own protobuf runtime, so generated code and runtime can never
+disagree. See [`proto/README.md`](../proto/README.md).
 
 ## Run
 
@@ -113,6 +113,9 @@ Anything after the image name is forwarded to the server, so CLI flags still wor
 docker run --rm --gpus all -p 50052:50052 interlatent-server:latest --port 50052
 ```
 
+Note the image's `HEALTHCHECK` and `EXPOSE` hardcode `50051`; on a different port the
+healthcheck reports unhealthy even though the server is fine.
+
 Teleop needs no box-side config: control runs browser → hosted QUIC relay → node, and
 never touches the GPU box.
 
@@ -130,8 +133,8 @@ A throwaway run loses all three.
 ### Reachability and security
 
 The node is always the connection initiator — observations up, actions down, recording,
-and `CloseSession` all ride the one node-opened gRPC channel. The box therefore needs no
-inbound route back to the node; only the node needs to reach the box.
+and `CloseSession` all ride the one node-opened gRPC channel. The box needs no inbound
+route back to the node.
 
 Publish **only** `:50051`, and set `INTERLATENT_ADVERTISE_ADDRESS` to the address that
 reaches it. On the manual (unregistered) path, point the node at it directly:
@@ -143,10 +146,10 @@ interlatent-node run --robot so101 --port /dev/ttyACM0 ...
 ```
 
 With `INTERLATENT_API_KEY` set, every RPC's `x-api-key` is validated against the backend
-and must belong to the account that registered the box (cached 60 s). Your nodes already
-send it. With `INTERLATENT_INSECURE=1`, or with no API key at all, the port is **open**:
-anyone who can reach it can consume your GPU and record into your inbox. Firewall it to
-your nodes' egress IPs.
+and must belong to the account that registered the box (cached 60 s). With
+`INTERLATENT_INSECURE=1`, or with no API key at all, the port is **open**: anyone who can
+reach it can consume your GPU and record into your inbox. Firewall it to your nodes'
+egress IPs.
 
 ## Provider notes
 

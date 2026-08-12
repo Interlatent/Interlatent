@@ -62,7 +62,7 @@ def run_control_loop(
     helpers' import weight.
 
     ``context_fn(obs, now=...)`` samples the observation into a world-model
-    context ring (ADR 0037). It is called on **every** tick, before
+    context ring (ADR 0037, platform repo). It is called on **every** tick, before
     arbitration, and deliberately not routed through ``capture_fn``: capture
     is gated on ``outcome.should_record``, which is False while the arm holds
     waiting for the next action chunk — exactly the window a world model must

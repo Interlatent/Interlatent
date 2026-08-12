@@ -367,7 +367,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="DRTC inference endpoint to persist (e.g. "
         "203.0.113.7:50051 for a Runpod box's public IP:port, "
         "or https://<workspace>--interlatent-drtc-inference-web.modal.run "
-        "for a Modal deployment). If omitted on a TTY, you'll be prompted.",
+        "for a Modal deployment). Optional: when omitted, the endpoint is "
+        "inherited per session from the compute box the dashboard attaches "
+        "to the environment.",
     )
     p_pair.add_argument(
         "--bypass-key",

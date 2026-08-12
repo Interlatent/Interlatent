@@ -1,5 +1,8 @@
 # Concepts
 
+The mental model. Precise term definitions live in [CONTEXT.md](../CONTEXT.md); the code
+map lives in [ARCHITECTURE.md](../ARCHITECTURE.md).
+
 ## The problem DRTC solves
 
 A VLA policy takes 100–2000 ms per inference. A robot needs an action every 33 ms (30 Hz).
@@ -23,6 +26,9 @@ requests.
 
 The result: smooth 30 Hz control over a model that thinks in seconds — across a LAN, a
 VPN, or the public internet.
+
+Policies too slow to win that race run in sequential mode instead — see *Chunk scheduling*
+in [CONTEXT.md](../CONTEXT.md).
 
 ## Sessions
 
@@ -49,7 +55,7 @@ canonical hosted dataset accumulated across sessions, an episode viewer, and ana
 ## Datasets
 
 Everything records to **LeRobot v3.0 datasets** — parquet frames + MP4 video + JSON
-metadata, the lingua franca of open robot learning. Recording is **streaming-first**:
+metadata. Recording is **streaming-first**:
 your node JPEG-encodes each camera frame per control tick and streams `RecordTick`s to
 the hosted recorder (the session's GPU pod, or a teleop recorder pod), which persists
 every tick and builds the dataset at session close. The finished dataset is published to a **destination**: the hosted inbox, a local
@@ -61,10 +67,10 @@ the box. `interlatent-serve --output-dir` / `--s3-uri` sets a per-box fallback.
 
 The uplink is lossless by design: ticks journal to a disk spool on the node and are
 deleted only after the server acknowledges them, so a link drop or node crash never
-silently thins an episode. (The old client-side path — staging to SQLite and building
-the dataset on-device with `watch()`/`tick()`/`upload()` — was removed in SDK 2.0.0.
-Datasets you already have on disk can enter the platform through the dashboard's
-HF import.)
+silently thins an episode. The old client-side path (`watch()`/`tick()`/`upload()`) was
+removed in SDK 2.0.0 —
+[ADR 0018](adr/0018-collection-verbs-removed-streaming-only.md); datasets already on disk
+enter the platform through the dashboard's HF import.
 
 ## The coordinator
 

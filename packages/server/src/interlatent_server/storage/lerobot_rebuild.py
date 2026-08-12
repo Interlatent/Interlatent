@@ -9,7 +9,7 @@ of this protocol.
 
 Interlatent's closed `interlatent-engine` carries a copy of this
 module at ``interlatent/storage/lerobot_rebuild.py`` for hosted GPU
-boxes. Per ADR 0035 the two must not drift; the copy goes away once
+boxes. Per ADR 0035 (platform repo) the two must not drift; the copy goes away once
 the hosted image builds from this package.
 
 Activations are NOT part of the rebuilt dataset. The SAE / latent

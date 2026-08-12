@@ -1,4 +1,4 @@
-"""DreamZero (world-action model) policy backend. See ADR 0037.
+"""DreamZero (world-action model) policy backend. See ADR 0037 (platform repo).
 
 DreamZero jointly denoises future video and an action chunk. Serving it through
 DRTC means reconciling four mismatches with every policy this server has run

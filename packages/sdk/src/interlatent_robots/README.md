@@ -2,14 +2,14 @@
 
 Each subdirectory is the robot data an operator's node and the browser IK need,
 keyed by the `robot_kind` string the node reports (`--robot <kind>`). It ships in
-the `interlatent` wheel (~18 KB/kind) and is read back through `interlatent.robots`
+the `interlatent` wheel (~15 KB/kind) and is read back through `interlatent.robots`
 — never by path from here.
 
 `interlatent_robots` is a **PEP 420 namespace**: it has no `__init__.py`, and must
 not gain one. The SDK does not own the name, so a kind can be split into its own
 distribution later without changing an import.
 
-Adding a robot is meant to be "drop a URDF in and open a PR":
+Adding a robot:
 
 ```
 packages/sdk/src/interlatent_robots/<kind>/
@@ -43,41 +43,36 @@ incomplete, mis-named, or missing from the tree.
 Regenerate the spec after any `ik_config.json` or URDF change, or the browser solver
 and the pod solver silently disagree.
 
-**Exception: the three dimos-mediated kinds' `kinematic_spec.json` files were
-NOT produced by the official generator** — `a1z`, `xarm7` and `xarm6`. This
-environment has no access to
-`interlatent.inference.server.retarget.kinematic_spec` (the platform repo).
-Each was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
+**Exception: `a1z`, `xarm7` and `xarm6` were NOT produced by the official
+generator** — this environment has no access to
+`interlatent.inference.server.retarget.kinematic_spec` (the platform repo). Each
+was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
 URDF's `<origin>`/`<axis>`/`<limit>` tags directly) plus a `tool0` taken from
-the URDF's own terminal fixed joint — both are genuine URDF properties, and
-`packaging/verify_urdf.py`'s FK-parity check confirms this geometry against a
+the URDF's own terminal fixed joint — both genuine URDF properties, and
+`packaging/verify_urdf.py`'s FK-parity check confirms the geometry against a
 MuJoCo-compiled model to ~1e-16 m.
 
 The solver-tuning fields that aren't URDF properties at all — `damping`,
 `webxr_to_base_R`, `pos_reach_limit`/`rot_reach_limit`, `w_rot` — are copied
 from a nearest-neighbour kind as a starting template and are **unverified
 against that robot's real hardware** in every case. The copy chain is
-`yam` → `a1z` (judged "near identical" in scale/DOF) → `xarm7` → `xarm6`
-(same vendor, wrist family, gripper and units). Nothing in that chain was
-tuned for the arm it ended up on, and FK parity does not exercise any of it.
-Regenerate these kinds' specs with the official tool the next time it's
-available rather than treating these files as authoritative long-term.
+`yam` → `a1z` → `xarm7` → `xarm6`. Nothing in that chain was tuned for the arm
+it ended up on, and FK parity does not exercise any of it. Regenerate these
+kinds' specs with the official tool the next time it's available.
 
 ## Meshes are not used (IK needs no geometry)
 
 Inverse kinematics is a function of the joint tree alone — origins, axes, limits,
 tool0. The collision/visual STLs carry none of that, so the shipped URDF is
-**kinematics-only** (visual/collision stripped) and MuJoCo compiles it with zero mesh
-assets. No `meshes.lock`, nothing fetched, no `~15 MB/rig` anywhere. The browser's
-in-solver proves the point: it runs full IK from `kinematic_spec.json` with no URDF,
-no meshes, no MuJoCo.
+**kinematics-only** and MuJoCo compiles it with zero mesh assets. The browser's
+in-solver runs full IK from `kinematic_spec.json` with no URDF, no meshes, no MuJoCo.
 
 Geometry is off the critical path, not forbidden: `meshes.lock` +
 `interlatent.robots.ensure_meshes()` still exist for a kind that genuinely needs STLs
 later (a 3D preview, sim, collision-aware retargeting). Until such a feature lands,
-leave the lock out. If you want a full (mesh-referencing) URDF for a viewer, it is
-reconstructable — the meshes are upstream (e.g. `TheRobotStudio/SO-ARM100` for SO-101)
-and the calibration lives in the joints kept here.
+leave the lock out. A full mesh-referencing URDF for a viewer is reconstructable — the
+meshes are upstream (e.g. `TheRobotStudio/SO-ARM100` for SO-101) and the calibration
+lives in the joints kept here.
 
 ## Verifying a URDF (needs MuJoCo)
 

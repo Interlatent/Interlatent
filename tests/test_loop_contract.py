@@ -468,7 +468,7 @@ def test_teleop_path_sends_are_clamped(spec, monkeypatch):
 
 @pytest.mark.parametrize("spec", [s for s in LOOPS if s.teleop_capable], ids=_ids)
 def test_intervention_path_sends_are_clamped(spec, monkeypatch):
-    """A human overriding a running policy is INTERVENTION (ADR 0034) — same
+    """A human overriding a running policy is INTERVENTION (ADR 0034, platform repo) — same
     gate, same last-line clamp, distinct label."""
     n = len(_action_keys_for(spec))
     frames = [Frame(joint_targets=[0.1] * n)] * _TICKS

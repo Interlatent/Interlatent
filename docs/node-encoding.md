@@ -9,14 +9,14 @@ is **capability-resolved once per process** and logged at session start:
 node JPEG encoder backend: gpujpeg (cpu fallback: turbojpeg)
 ```
 
-That log line is the source of truth for what your node is actually
-using. The chain, fastest available wins:
+That log line is the truth for what your node is using. The chain,
+fastest available wins:
 
 | Backend | What it is | When it resolves |
 |---|---|---|
 | `nvjpeg` | CUDA toolkit's nvJPEG via ctypes (no pip dep) | x86 box with a CUDA GPU. **Not available on Jetson** — JetPack ships no CUDA nvJPEG. |
-| `gpujpeg` | [CESNET GPUJPEG](https://github.com/CESNET/GPUJPEG), JPEG on CUDA SMs | Any CUDA GPU with an operator-built `libgpujpeg` — **the GPU path on Jetson** (see below). |
-| `turbojpeg` | libjpeg-turbo (SIMD/NEON) | `pip install 'interlatent[turbo]'` + system `libturbojpeg`. Install this on every node. |
+| `gpujpeg` | [CESNET GPUJPEG](https://github.com/CESNET/GPUJPEG), JPEG on CUDA SMs | Any CUDA GPU with an operator-built `libgpujpeg` — **the GPU path on Jetson** (see below). Probed only when nvJPEG is absent. |
+| `turbojpeg` | libjpeg-turbo (SIMD/NEON), several times faster than PIL | `pip install 'interlatent[turbo]'` + system `libturbojpeg`. Install this on every node. |
 | `cv2` | OpenCV `imencode` | OpenCV present. |
 | `pil` | Pillow | Always-works fallback. |
 
@@ -34,9 +34,8 @@ Platform facts that decide the setup (see SDK ADR 0019):
   with the same name — the `nvjpeg` backend cannot work on Jetson.
 - **Orin Nano has no JPEG hardware** (no NVJPG block, no NVENC). Orin
   NX / AGX have NVJPG, but the SDK does not use it yet either way.
-- The only GPU-accelerated JPEG encode on an Orin Nano is therefore
-  **GPUJPEG**, which runs on CUDA cores and must be built once from
-  source.
+- So **GPUJPEG** (CUDA cores, built once from source) is the only
+  GPU-accelerated JPEG encode on an Orin Nano.
 
 One-time install on the Jetson:
 
@@ -62,7 +61,7 @@ sudo cmake --install build && sudo ldconfig
 # compiler — install the versioned toolkit matching your JetPack
 # (e.g. `sudo apt install cuda-toolkit-12-6` on JetPack 6) and retry.
 
-# 3. CPU fallback for small/preview frames (NEON, ~3x faster than cv2)
+# 3. CPU fallback for small/preview frames (NEON)
 pip install 'interlatent[turbo]' && sudo apt install -y libturbojpeg
 ```
 
@@ -80,7 +79,7 @@ python -c "import logging; logging.basicConfig(level=logging.DEBUG); \
 | Env var | What it does |
 |---|---|
 | `INTERLATENT_JPEG_BACKEND` | `auto` (default) \| `nvjpeg` \| `gpujpeg` \| `turbojpeg` \| `cv2` \| `pil`. Starts the chain at the named backend — the kill-switch when an encoder misbehaves in the field. A forced backend that fails to probe warns and falls through. |
-| `INTERLATENT_GPU_JPEG_MIN_PIXELS` | Pixel area (post-resize) below which frames stay on the CPU chain even when a GPU backend resolved. Default `150000`. |
+| `INTERLATENT_GPU_JPEG_MIN_PIXELS` | Pixel area (post-resize) below which frames stay on the CPU chain even when a GPU backend resolved. Default `150000`. (`INTERLATENT_NVJPEG_MIN_PIXELS` is accepted as an alias.) |
 | `INTERLATENT_PREVIEW_HZ` | Live teleop preview rate **ceiling**, clamped [1, 30], default 30. Read once at node start — set it in the environment the node process actually inherits. On the QUIC transport the effective rate backs off (down to 1 Hz) only when frames go **stale in flight** (TTL resets — real congestion) and recovers automatically; the governor's admission drops are free pacing, not a backoff signal. |
 | `INTERLATENT_PREVIEW_ADAPTIVE` | `0` disables the QUIC staleness backoff — the preview runs at the fixed configured rate. Default on. |
 | `INTERLATENT_PREVIEW_MAX_DIM` | Preview long-side downscale before encode, default 320, clamp [64, 1280]. Read per frame — dial it live. Bytes scale ~quadratically with dimension. |
@@ -98,14 +97,18 @@ lives in [teleop.md § Bandwidth knob reference](teleop.md#bandwidth-knob-refere
 Encode cost is a CPU-budget problem; **bandwidth is a separate one**.
 3 cameras × 640×480 @ 30 Hz at q85 offer ~3.5 MB/s to the recording
 uplink regardless of which backend produced the bytes. If your uplink
-can't carry that, the disk spool absorbs the difference losslessly
-(ADR 0023) — but it grows until the session closes (close blocks until
-the spool drains; killing the node instead leaves an orphan spool and a
-truncated episode), and a saturated uplink also degrades the live
-preview and teleop responsiveness. The levers for bandwidth are camera
-resolution (`--camera name=dev,width=…,height=…`), the preview rate
+can't carry that, the disk spool absorbs the difference losslessly — but
+it grows until the session closes (close blocks until the spool drains;
+killing the node instead leaves an orphan spool and a truncated
+episode), and a saturated uplink also degrades the live preview and
+teleop responsiveness.
+
+The levers for bandwidth are camera resolution (on the YAM adapter,
+`--camera name=dev,width=…,height=…,fps=…`; the generic LeRobot camera
+path is fixed at 640×480@30), the preview rate
 (`INTERLATENT_PREVIEW_HZ` — every preview frame competes with the
 recording and teleop traffic), and `INTERLATENT_REC_MAX_KBPS` (keep it
 just under your measured uplink; it is bufferbloat headroom, not a way
 to shrink the data). USB-side bandwidth (camera pixel formats, shared
-USB2 domains) is covered in [ROBOT.md](../ROBOT.md#usb-bandwidth-on-multi-camera-rigs).
+USB2 domains) is covered in
+[ROBOT.md](../ROBOT.md#usb-bandwidth-on-multi-camera-rigs).

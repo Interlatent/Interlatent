@@ -28,7 +28,7 @@ S3 bucket you own, or the hosted episode inbox. See
 ## What you need
 
 - A Linux machine with an NVIDIA GPU (a rented RunPod/Lambda/Vast box works
-  too — the point is it's *yours*), Python ≥ 3.11 or Docker.
+  too), Python ≥ 3.11 or Docker.
 - A coordinator to register with, and a key for it: the `ilop_` operator key
   `interlatent up` prints, or an `ilat_` key from the dashboard.
 - An address your robot nodes can reach the machine at — public IP, LAN IP,
@@ -62,14 +62,13 @@ sudo ./docker/install-bare-metal.sh --systemd \
   --api-key ilat_xxx --advertise-address 203.0.113.7
 ```
 
-It provisions what the image otherwise gives you for free: a Python ≥ 3.12, a
-torch matched to the driver's CUDA (auto-detected from `nvidia-smi`), ffmpeg
-for the dataset writers, lerobot at the same commit `docker/Dockerfile` pins
-(read out of that file, so the two can't drift), and protobuf stubs
-regenerated against the installed runtime. `--systemd` writes a unit that
-restarts on failure and stops with `SIGINT` so the box reports `stopped`
-rather than leaving a ghost `ready` row. `--no-system` skips apt if you don't
-have root. Re-running is safe.
+It provisions what the image otherwise gives you: a Python ≥ 3.12, a torch
+matched to the driver's CUDA (auto-detected from `nvidia-smi`), ffmpeg for
+the dataset writers, lerobot at the commit `docker/Dockerfile` pins (read out
+of that file, so the two can't drift), and protobuf stubs regenerated against
+the installed runtime. `--systemd` writes a unit that restarts on failure and
+stops with `SIGINT`, so the box reports `stopped` rather than leaving a ghost
+`ready` row. `--no-system` skips apt if you don't have root. Re-running is safe.
 
 ## pip
 
@@ -121,8 +120,8 @@ coordinator issued. Your nodes already send it. `--insecure` (or
 `INTERLATENT_INSECURE=1`) disables the check for air-gapped networks — never
 expose an insecure box to the public internet; it is an open GPU.
 
-Also expose **only** the gRPC port. The box needs no inbound access from
-anything but your nodes.
+Expose **only** the gRPC port. The box needs no inbound access from anything
+but your nodes.
 
 ## Limits
 

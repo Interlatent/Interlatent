@@ -211,7 +211,7 @@ def test_recording_state_survives_a_broken_spool(monkeypatch) -> None:
 
 
 def test_safety_state_reports_the_delta_clamp(monkeypatch) -> None:
-    """ADR 0037: the backend refuses a world-model launch when the per-tick
+    """ADR 0037 (platform repo): the backend refuses a world-model launch when the per-tick
     clamp is off, so max_step_set must distinguish unset from set."""
     off = _daemon(robot_extra={})._safety_state()
     assert off["max_step"] is None

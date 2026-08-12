@@ -17,7 +17,7 @@ What is deliberately asserted, because getting it wrong is silent data loss:
 - a refused tick returns **False** — the node keeps it spooled and retries
   (ADR 0023). A recorder that returned True on a full queue would drop
   ticks the node then deletes.
-- a replayed tick is deduped and acked **True** (ADR 0024), because a
+- a replayed tick is deduped and acked **True** (ADR 0024, platform repo), because a
   reconnect re-sends ticks whose ack was lost.
 - ``control_source`` in {teleop, intervention} drives ``has_teleop`` on
   upload-complete — the Episode badge the dashboard shows and the DAgger

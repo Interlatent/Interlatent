@@ -1,7 +1,7 @@
 """Every module in `interlatent_server` must import on a base install.
 
 This is the test that was missing when the serving stack moved out of
-`interlatent-engine` (ADR 0035). The move kept the code byte-identical
+`interlatent-engine` (ADR 0035, platform repo). The move kept the code byte-identical
 but changed its package depth, and two relative imports written for the
 old layout — `...cloud.box_status` and `...storage.lerobot_*`, valid as
 `interlatent.cloud` / `interlatent.storage` — resolved past the top of
