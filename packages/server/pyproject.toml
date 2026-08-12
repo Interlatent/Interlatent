@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interlatent-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hosted Interlatent DRTC policy server — run hosted-grade GPU inference on your own hardware, registered with the Interlatent dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `--s3-uri` / a coordinator destination pointing at an
+# S3-compatible bucket. Not needed for local or hosted-inbox
+# publishing.
+s3 = ["boto3>=1.34"]
+
 # The real policy backend. MolmoAct2 needs lerobot main (post-0.5.1) —
 # see docker/README.md for the pinned git-ref install used by the image.
 #

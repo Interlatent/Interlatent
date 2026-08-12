@@ -109,6 +109,10 @@ export class LatencyTracker {
   }
 }
 
+/** Reconnect backoff, matching the node's own 1→15s ladder. */
+const RECONNECT_INITIAL_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+
 export class QuicPoseSocket {
   readyState = 0; // CONNECTING
   bufferedAmount = 0; // always drained (datagrams are fire-and-forget)
@@ -118,7 +122,15 @@ export class QuicPoseSocket {
   onclose: ((ev: { reason?: string }) => void) | null = null;
   onerror: ((e: unknown) => void) | null = null;
 
-  private link: QuicTeleopLink;
+  private link!: QuicTeleopLink;
+  private certHashes?: Array<{ algorithm: string; value: string }>;
+  private remint:
+    | (() => Promise<{ url: string; token: string;
+                       serverCertificateHashes?: Array<{ algorithm: string; value: string }> }>)
+    | null = null;
+  private closedByUser = false;
+  private backoffMs = RECONNECT_INITIAL_MS;
+  private reconnectTimer: number | null = null;
   /** Single-arm solver, or null when this is a bimanual session. */
   private solver: DlsSolver | null = null;
   /** Per-arm solvers for a bimanual bundle, or null for single-arm. */
@@ -178,37 +190,86 @@ export class QuicPoseSocket {
     url: string,
     token: string,
     spec?: KinematicSpecBundle,
-    opts?: { onSpec?: (spec: KinematicSpecBundle) => void },
+    opts?: {
+      onSpec?: (spec: KinematicSpecBundle) => void;
+      serverCertificateHashes?: Array<{ algorithm: string; value: string }>;
+      /** Re-mint a token (and re-read the relay address) for a reconnect.
+       *  Without it, a reconnect reuses the original token — fine against a
+       *  relay that keeps issuing sessions, wrong if the relay moved. */
+      remint?: () => Promise<{ url: string; token: string;
+                               serverCertificateHashes?: Array<{ algorithm: string; value: string }> }>;
+    },
   ) {
     this.onSpec = opts?.onSpec ?? null;
+    this.certHashes = opts?.serverCertificateHashes;
+    this.remint = opts?.remint ?? null;
     if (spec) this.setSpec(spec);
+    this.dial(url, token);
+  }
+
+  /** Open (or re-open) the transport.
+   *
+   * The node has had a 1→15s reconnect loop since the QUIC path shipped; the
+   * browser had none, so any relay blip ended the VR session permanently and
+   * the operator had to take the headset off. An embedded relay restarts far
+   * more often than a hosted one, which is what forced the issue. */
+  private dial(url: string, token: string): void {
     const full = `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
     this.link = new QuicTeleopLink(full, {
       onMessage: (m) => this.onNodeMessage(m),
       onStream: (buf) => this.onStreamData(buf),
+      serverCertificateHashes: this.certHashes,
       onClose: (reason) => {
-        this.readyState = 3; // CLOSED
         this.stopSpecRequests();
+        if (this.scheduleReconnect()) return;
+        this.readyState = 3; // CLOSED
         this.onclose?.({ reason });
       },
     });
     this.link.ready
       .then(() => {
         this.readyState = OPEN;
+        this.backoffMs = RECONNECT_INITIAL_MS;
         this.onopen?.();
-        // No spec yet → pull it from the node (retried; see startSpecRequests).
-        if (!this.specReceived) this.startSpecRequests();
+        // Re-request on every (re)connect: `specReceived` latches, and a
+        // reconnected browser that skipped this would solve against nothing.
+        this.specReceived = false;
+        this.startSpecRequests();
       })
       .catch((e) => {
-        this.readyState = 3;
         this.stopSpecRequests();
         // `onerror` is optional and the overlay's handler discards its
         // argument, so without this the reason dies here silently.
         // eslint-disable-next-line no-console
         console.error('[teleop:quic] session failed to open:', e);
         this.onerror?.(e);
+        if (this.scheduleReconnect()) return;
+        this.readyState = 3;
         this.onclose?.({ reason: e instanceof Error ? e.message : String(e) });
       });
+  }
+
+  /** Queue a reconnect; false when the socket was closed deliberately. */
+  private scheduleReconnect(): boolean {
+    if (this.closedByUser || !this.remint) return false;
+    this.readyState = 0; // CONNECTING
+    const delay = this.backoffMs;
+    this.backoffMs = Math.min(this.backoffMs * 2, RECONNECT_MAX_MS);
+    this.reconnectTimer = setTimeout(() => {
+      if (this.closedByUser || !this.remint) return;
+      this.remint()
+        .then(({ url, token, serverCertificateHashes }) => {
+          if (this.closedByUser) return;
+          if (serverCertificateHashes) this.certHashes = serverCertificateHashes;
+          this.dial(url, token);
+        })
+        .catch(() => {
+          // Mint failed (coordinator down too?) — keep trying on the same
+          // backoff rather than giving up, mirroring the node.
+          this.scheduleReconnect();
+        });
+    }, delay) as unknown as number;
+    return true;
   }
 
   /** True once a spec has been applied and the solver(s) exist. */
@@ -487,6 +548,13 @@ export class QuicPoseSocket {
   }
 
   close(): void {
+    // Deliberate close: stop the reconnect ladder, or the socket resurrects
+    // itself after the operator has left VR.
+    this.closedByUser = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.readyState = 3;
     this.stopSpecRequests();
     this.link.close();

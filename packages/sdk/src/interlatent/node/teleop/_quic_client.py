@@ -282,9 +282,25 @@ async def connect_webtransport(url: str, token: str):
         is_client=True,
         max_datagram_frame_size=65536,
     )
-    # Dev escape hatch for a self-signed relay cert (serverCertificateHashes is
-    # a browser-only feature; the node verifies normally in production).
-    if os.environ.get("INTERLATENT_TELEOP_INSECURE") == "1":
+    # Pin a specific relay CA/cert. This is the supported way to reach a
+    # self-hosted coordinator's embedded relay, whose certificate is
+    # self-signed because no public CA issues for a LAN address. The node
+    # then trusts exactly that one relay and nothing else — unlike the
+    # insecure flag below, which turns off chain *and* hostname checking
+    # together and would undo the coordinator's whole auth model at the
+    # teleop layer. (serverCertificateHashes is browser-only; a Python
+    # client pins by trust anchor instead.)
+    ca_file = os.environ.get("INTERLATENT_TELEOP_CA_FILE", "").strip()
+    if ca_file:
+        config.load_verify_locations(cafile=ca_file)
+        # A self-signed leaf carries no SANs a hostname check can match when
+        # the node dials an IP that differs from the advertised one.
+        config.server_name = os.environ.get(
+            "INTERLATENT_TELEOP_SERVER_NAME", ""
+        ).strip() or None
+    elif os.environ.get("INTERLATENT_TELEOP_INSECURE") == "1":
+        # Dev escape hatch only — it defeats relay authentication entirely.
+        # Prefer INTERLATENT_TELEOP_CA_FILE.
         config.verify_mode = ssl.CERT_NONE
 
     async with connect(

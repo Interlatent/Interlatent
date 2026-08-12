@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { StartRecordingPanel } from './components/StartRecordingPanel';
 import { VRTeleopOverlay } from './components/VRTeleopOverlay';
 import {
-  DEFAULT_API_BASE,
+  HOSTED_COORDINATOR,
   InferenceSessionOut,
   TeleopRecordingOut,
   getApiBase,
   getApiKey,
+  hasCoordinator,
   listSessions,
   listTeleopRecordings,
   mintRecordingTeleopToken,
@@ -43,7 +44,7 @@ function SettingsPanel({
   /** Present only when settings already exist (gear re-entry). */
   onCancel: (() => void) | null;
 }) {
-  const [apiBase, setApiBase] = useState(getApiBase() || DEFAULT_API_BASE);
+  const [apiBase, setApiBase] = useState(getApiBase());
   const [apiKey, setApiKey] = useState(getApiKey());
 
   return (
@@ -59,7 +60,7 @@ function SettingsPanel({
           type="url"
           value={apiBase}
           onChange={(e) => setApiBase(e.target.value)}
-          placeholder={DEFAULT_API_BASE}
+          placeholder={HOSTED_COORDINATOR}
           className="w-full rounded border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary font-mono focus:outline-none focus:border-border-emphasis"
         />
       </label>
@@ -159,7 +160,12 @@ function ItemRow({
 
 export function App() {
   const [hasKey, setHasKey] = useState(() => getApiKey() !== '');
-  const [showSettings, setShowSettings] = useState(() => getApiKey() === '');
+  // There is no default coordinator, so an unconfigured app has nowhere to
+  // send its first request. Open settings rather than showing an empty list
+  // and a network error the operator cannot act on.
+  const [showSettings, setShowSettings] = useState(
+    () => getApiKey() === '' || !hasCoordinator(),
+  );
   const [tab, setTab] = useState<Tab>('sessions');
   const [sessions, setSessions] = useState<InferenceSessionOut[]>([]);
   const [recordings, setRecordings] = useState<TeleopRecordingOut[]>([]);

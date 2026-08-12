@@ -1,26 +1,38 @@
 # Self-hosting the policy server
 
-Run the Interlatent DRTC policy server on **your own GPU machine**. The
-Interlatent dashboard stays the control plane — your box registers itself
-with your API key, appears on the Compute page as a **self-hosted** box, and
-your robot nodes connect to it exactly like a managed pod. Same server code,
-same wire protocol, same episode recording into your environments.
+Run the Interlatent DRTC policy server on **your own GPU machine**. The box
+registers with a **coordinator** — the hosted dashboard, or one you run
+yourself with `interlatent up` — and your robot nodes connect to it exactly
+like a managed pod. Same server code, same wire protocol.
+
+Nothing here requires an account. A box registered with a self-hosted
+coordinator and publishing to `--output-dir` never contacts interlatent.com.
 
 ```
 robot node ──native gRPC (50051)──▶ your GPU box (interlatent-server)
                                         │ dials out only
                                         ▼
-                            Interlatent dashboard/backend
-                (register · warmup target · status · episode inbox)
+                                  a coordinator
+                    (register · warmup target · status · authz)
+
+          `interlatent up` on your own LAN, or the hosted dashboard —
+             two deployments of one protocol, and the box cannot
+                           tell which it registered with
 ```
+
+Where a finished dataset lands is a separate question, answered by the
+session's destination rather than by the coordinator: a local directory, an
+S3 bucket you own, or the hosted episode inbox. See
+[coordinator-protocol.md](coordinator-protocol.md) for the full contract.
 
 ## What you need
 
 - A Linux machine with an NVIDIA GPU (a rented RunPod/Lambda/Vast box works
   too — the point is it's *yours*), Python ≥ 3.11 or Docker.
-- An Interlatent account and an API key (`ilat_…`) from the dashboard.
+- A coordinator to register with, and a key for it: the `ilop_` operator key
+  `interlatent up` prints, or an `ilat_` key from the dashboard.
 - An address your robot nodes can reach the machine at — public IP, LAN IP,
-  or VPN address. The dashboard hands it to nodes verbatim.
+  or VPN address. The coordinator hands it to nodes verbatim.
 
 ## Docker (recommended)
 
@@ -29,7 +41,8 @@ docker build -f docker/Dockerfile -t interlatent-server:latest .
 
 docker run --rm --gpus all -p 50051:50051 \
   -v interlatent-cache:/root/.cache \
-  -e INTERLATENT_API_KEY=ilat_xxx \
+  -e INTERLATENT_COORDINATOR=http://10.0.0.2:8900 \
+  -e INTERLATENT_API_KEY=ilop_xxx \
   -e INTERLATENT_ADVERTISE_ADDRESS=<IP-your-robots-can-reach> \
   -e HF_TOKEN=hf_xxx \
   interlatent-server:latest
@@ -65,7 +78,8 @@ If you'd rather do it by hand:
 ```bash
 pip install 'interlatent-server[lerobot]'   # CUDA torch; install on the GPU machine
 
-INTERLATENT_API_KEY=ilat_xxx interlatent-serve \
+INTERLATENT_API_KEY=ilop_xxx interlatent-serve \
+  --coordinator http://10.0.0.2:8900 \
   --advertise-address <IP-your-robots-can-reach> --port 50051
 ```
 
@@ -88,17 +102,22 @@ regenerates them.
    needs both, since it can't load without camera keys. Once an env is
    attached its target wins, because it feeds the node's cameras and the
    warm from one source and so can't disagree with itself.
-3. Launch sessions from the dashboard as usual. Recordings stream to the box
-   and upload through backend-issued presigned URLs — **no cloud credentials
-   ever live on your machine**, only your own revocable API key.
-4. Graceful exit (Ctrl-C / `docker stop`) reports `stopped` so the dashboard
+3. Launch sessions from your coordinator (`interlatent session start`, or the
+   dashboard). Recordings stream to the box and land wherever the session's
+   destination points: a local directory, an S3 bucket you own, or the hosted
+   inbox via backend-issued presigned URLs — **no cloud credentials ever live
+   on your machine** in the hosted case, only your own revocable key.
+4. Graceful exit (Ctrl-C / `docker stop`) reports `stopped` so the coordinator
    doesn't show a ghost box.
 
 ## Security
 
-The gRPC port is guarded **by default**: every RPC's `x-api-key` must belong
-to the account that registered the box (checked against the backend, cached
-60 s). Your nodes already send it. `--insecure` (or
+The gRPC port is guarded **by default**: every RPC's `x-api-key` must be one
+the coordinator will vouch for, probed at
+`GET /api/v1/compute/boxes/{box_id}/authz` and cached 60 s. Against the hosted
+dashboard that means the account that registered the box; against
+`interlatent up` it means the `ilop_` operator key or a node token that
+coordinator issued. Your nodes already send it. `--insecure` (or
 `INTERLATENT_INSECURE=1`) disables the check for air-gapped networks — never
 expose an insecure box to the public internet; it is an open GPU.
 
@@ -107,11 +126,13 @@ anything but your nodes.
 
 ## Limits
 
-- The dashboard shows a self-hosted box but cannot stop/restart it — the
-  machine is yours ("managed by its operator"). Remove the box row from the
-  dashboard when you retire the machine.
-- Teleop is unaffected: the browser↔node path goes through the hosted QUIC
-  relay and never touches the GPU box.
+- A coordinator shows a self-hosted box but cannot stop/restart it — the
+  machine is yours ("managed by its operator"). Drop the box row when you
+  retire the machine: `interlatent gpu rm <name>`, or the equivalent on the
+  dashboard.
+- Teleop never touches the GPU box: the browser↔node path goes through a QUIC
+  relay. Against the hosted dashboard that is the hosted relay; a self-hosted
+  coordinator runs its own (`pip install 'interlatent[teleop-relay]'`).
 - GPU sizing follows the same rules as managed boxes — ~24 GB VRAM covers the
   common families (SmolVLA/ACT/Diffusion); Pi0/MolmoAct2-class VLAs want
   more. See [`docker/README.md`](../docker/README.md) for the family/dep

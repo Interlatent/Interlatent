@@ -48,6 +48,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .server.sinks import DatasetSink
 import logging
 import os
 
@@ -415,6 +419,7 @@ async def _serve(
     *,
     warmup_warning: str | None = None,
     guard_rpcs: bool = False,
+    dataset_sink: "DatasetSink | None" = None,
 ) -> None:
     import grpc
 
@@ -482,7 +487,11 @@ async def _serve(
         inf_cores, rec_cores, max(1, n_rec),
     )
 
-    servicer = InferenceServicer(inference_executor=inference_executor, warmup_warning=warmup_warning,)
+    servicer = InferenceServicer(
+        inference_executor=inference_executor,
+        warmup_warning=warmup_warning,
+        dataset_sink=dataset_sink,
+    )
     if guard_rpcs:
         # Self-hosted default: gate every RPC on "does this x-api-key belong
         # to this box's owner?" via the backend's per-box authz probe. A
@@ -549,6 +558,21 @@ async def _serve(
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="interlatent-drtc-server")
+    p.add_argument(
+        "--output-dir", default=os.environ.get("DRTC_OUTPUT_DIR", ""),
+        help="Publish finished datasets into this directory, merge-on-stop "
+             "into one flat LeRobot dataset. No account needed.",
+    )
+    p.add_argument(
+        "--s3-uri", default=os.environ.get("DRTC_S3_URI", ""),
+        help="Publish to s3://bucket/prefix (merge-on-stop against a local "
+             "mirror, then upload). Needs the [s3] extra.",
+    )
+    p.add_argument("--s3-endpoint-url", default=os.environ.get("DRTC_S3_ENDPOINT_URL", ""),
+                   help="For S3-compatible stores (MinIO, Cloudflare R2, ...).")
+    p.add_argument("--s3-access-key", default=os.environ.get("DRTC_S3_ACCESS_KEY", ""))
+    p.add_argument("--s3-secret-key", default=os.environ.get("DRTC_S3_SECRET_KEY", ""))
+    p.add_argument("--s3-region", default=os.environ.get("DRTC_S3_REGION", ""))
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=50051)
     p.add_argument(
@@ -672,11 +696,30 @@ def main() -> None:
             "Keep it off the public internet."
         )
 
+    # A destination configured here is this box's own fallback; a coordinator
+    # that stamps one onto its sessions overrides it per session (ADR 0002).
+    dataset_sink = None
+    if args.output_dir:
+        from .server.sinks import LocalDirSink
+        dataset_sink = LocalDirSink(args.output_dir)
+        log.info("Recording destination: local dir %s", args.output_dir)
+    elif args.s3_uri:
+        from .server.sinks import S3Sink
+        dataset_sink = S3Sink.from_uri(
+            args.s3_uri,
+            endpoint_url=args.s3_endpoint_url or None,
+            access_key=args.s3_access_key or None,
+            secret_key=args.s3_secret_key or None,
+            region=args.s3_region or None,
+        )
+        log.info("Recording destination: %s", args.s3_uri)
+
     asyncio.run(_serve(
         args.host,
         args.port,
         warmup_warning=warmup_warning,
         guard_rpcs=guard_rpcs,
+        dataset_sink=dataset_sink,
     ))
 
 
