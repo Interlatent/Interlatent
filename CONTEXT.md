@@ -1,12 +1,15 @@
-# Interlatent DRTC client — Context
+# Interlatent — Context
 
 The project's vocabulary. Structure is in [ARCHITECTURE.md](ARCHITECTURE.md); the
 mental model is in [docs/concepts.md](docs/concepts.md).
 
-The shape in one paragraph: the [Interlatent dashboard](https://interlatent.com)
-assigns sessions and provisions a **GPU pod** per session, a **Node** drives the
-robot and dials the pod, and the pod loads policies and serves action chunks over
-the DRTC gRPC protocol.
+The shape in one paragraph: one **adapter** per robot family puts every supported
+robot behind the same **action interface**, which is driven either directly and
+offline by a **Robot** handle, or on a **Session**'s behalf by a **Node** — the
+[Interlatent dashboard](https://interlatent.com) assigns the session and provisions
+a **GPU pod**, the node dials the pod, and the pod loads policies and serves action
+chunks over the DRTC gRPC protocol. Both ends of that protocol live in this repo:
+`packages/sdk` is the client, `packages/server` is the pod.
 
 ## Language
 
@@ -123,6 +126,31 @@ All actions are **joint-space** — a vector of joint targets, one per `action_f
 There is no inverse kinematics or Cartesian/end-effector frame in the robot-side stack;
 `action(x, y, z, …)` means joint angles, not a workspace point. To support `action()`,
 an adapter declares per-joint metadata (range, control mode, settle tolerance).
+
+**Behavior**:
+A named, deterministic move — `home`, `hello`, or your own — authored in TOML
+(`~/.interlatent/behaviors.toml`, or a file passed explicitly) or as a Python function
+decorated `@il.behavior`, and resolved through a layered per-robot registry. Every
+**robot kind** ships `home`. Behaviors are **joint-space only** and run *offline*: the
+`TrajectoryExecutor` samples a validated min-jerk trajectory through the adapter's
+ordinary **action interface**, so the **delta clamp** still applies. `speed` time-scales
+a behavior rather than re-planning it. Validate one without hardware attached
+(`interlatent behavior validate`). See [docs/behaviors.md](docs/behaviors.md).
+_Avoid_: calling a behavior an "action" (that is one vector at the action interface) or
+an **action chunk** (that is a **policy** output); a behavior is authored, not inferred.
+_Avoid_: implying a Cartesian frame — there is no IK on this path.
+
+**Robot** (`il.Robot`):
+The manual, no-cloud handle on one robot: it resolves a **robot kind** to an **adapter**
+exactly as `interlatent-act` does, opens it, loads the behavior registry, and exposes
+`act()`, `move()`, `pose()`, `behaviors()`, `close()`. It never runs a **policy** and
+needs no API key or network. _Avoid_: conflating with **Node** — the node is the
+dashboard-connected daemon that serves **Sessions**; `Robot` is in-process and offline.
+The two are *arbitrated, not coexistent*: the constructor raises `RobotBusyError` if a
+node (or another `Robot`) already holds the robot, and `force=True` overrides that at the
+risk of corrupting a live inference session. Note the arbitration is **best-effort** — a
+client-side lockfile plus an OS serial lock, not a guarantee
+(`interlatent.behaviors.arbitration`).
 
 **Chunk scheduling — overlapping (default) vs sequential (`--synchronous`)**:
 How the client paces inference against execution. The **default is overlapping
