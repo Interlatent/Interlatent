@@ -23,24 +23,13 @@ Python, the command line, a VR headset, or a learned policy.
 Every robot arm arrives with its own SDK, its own units, and its own conventions. An SO-101
 takes 6 joints in degrees with the gripper on 0–100; a YAM takes 14 in radians with the
 gripper on 0–1; a Nori takes 12 normalized to ±100. Nothing about the *task* changed
-between them — but the control code, the teleop rig, the recorder, and the policy glue all
+between them, but the control code, the teleop rig, the recorder, and the policy glue all
 get written again from scratch.
 
-Interlatent removes that rewrite. One interface — from Python, the command line, a VR
-headset, or a learned policy — drives every supported robot, and which robot you're on
-becomes a one-word argument:
-
-```python
-import interlatent as il
-
-# Same code on any supported arm — only the kind changes.
-with il.Robot("so101", port="/dev/ttyACM0") as robot:   # "yam" · "nori" · "dimos" · "axol"
-    robot.act("home")
-    print(robot.pose())
-```
+Interlatent removes that rewrite.
 
 Supporting a new robot means one adapter file and one profile of its physical limits
-([ROBOT.md](ROBOT.md#adding-a-new-robot)). Everything below then works on it — you never
+([ROBOT.md](ROBOT.md#adding-a-new-robot)). Everything below then works on it; you never
 implement teleoperation, recording, or policy support per robot.
 
 <table>
@@ -51,7 +40,7 @@ implement teleoperation, recording, or policy support per robot.
 
 <b>Control any arm</b><br/>
 <code>pose()</code>, <code>move()</code>, <code>act()</code> and <code>behaviors()</code> over
-one handle, on every robot that supports manual moves — or the same thing from a terminal
+one handle, on every robot that supports manual moves, or the same thing from a terminal
 with <code>interlatent-act</code>. No account, no network, no config file.<br/>
 <a href="#supported-robots">Supported robots &rarr;</a>
 
@@ -74,7 +63,7 @@ run through the same action path as the policy loop, so the safety clamps still 
 <!-- <img src="assets/teleop.gif" width="400" alt="Headset view beside the arm it is driving"/> -->
 
 <b>Teleoperate and collect</b><br/>
-Drive an arm from a VR headset in the browser — grip to clutch, trigger for the gripper.
+Drive an arm from a VR headset in the browser: grip to clutch, trigger for the gripper.
 Take over a running policy mid-episode; every frame is labelled with who was driving, so
 what you record is usable intervention data. Out comes a LeRobot v3.0 dataset.<br/>
 <a href="docs/teleop.md">VR teleop &rarr;</a>
@@ -85,7 +74,7 @@ what you record is usable intervention data. Out comes a LeRobot v3.0 dataset.<b
 <!-- <img src="assets/policy.gif" width="400" alt="An arm completing a task autonomously under a policy"/> -->
 
 <b>Run a policy</b><br/>
-Stream observations to a GPU — your own or a hosted one — and get action chunks back that
+Stream observations to a GPU, your own or a hosted one, and get action chunks back that
 execute at 30 Hz, so a policy taking 100–2000 ms per inference still drives a robot
 smoothly. SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5, MolmoAct2.<br/>
 <a href="docs/robots-and-policies.md">Robots and policies &rarr;</a>
