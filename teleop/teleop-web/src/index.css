@@ -4,7 +4,7 @@
 
 @layer base {
   :root {
-    /* Accent driven by a CSS var, same contract as the dashboard shell
+    /* Accent driven by a CSS var, same contract as the Interlatent-Main shell
        (site/src/index.css @ f7e4bfb6). Default: status-info blue. */
     --primary-rgb: 88 166 255;
   }

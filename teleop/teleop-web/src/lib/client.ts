@@ -26,14 +26,6 @@
 export const API_BASE_STORAGE_KEY = 'interlatent.coordinator';
 const LEGACY_API_BASE_KEY = 'interlatent.apiBase';
 export const API_KEY_STORAGE_KEY = 'interlatent.apiKey';
-/** Sentinel base that routes `vite dev` traffic through the dev server's
- *  /api proxy — see resolveApiBase(). It is not a default, not a suggestion,
- *  and no longer names a live deployment: it is the address vite.config.ts's
- *  proxy `apiTarget` also defaults to, and the two must stay equal for the
- *  redirect to land anywhere. Override both with TELEOP_API_TARGET (and by
- *  typing that same address into Settings) to proxy to your own coordinator. */
-export const DEV_PROXY_BASE = 'https://interlatent.com';
-
 /** The configured coordinator, or '' when none has been set.
  *
  *  There is no default. This app is a client of the coordinator you run —
@@ -49,7 +41,7 @@ export function getApiBase(): string {
     localStorage.getItem(LEGACY_API_BASE_KEY);
   const base = (stored ?? '').trim();
   if (!base) return '';
-  return resolveApiBase(base.replace(/\/+$/, ''));
+  return base.replace(/\/+$/, '');
 }
 
 /** False until the operator has told us where their coordinator is. */
@@ -57,25 +49,21 @@ export function hasCoordinator(): boolean {
   return getApiBase() !== '' || isDevProxy();
 }
 
+/** True under `vite dev` with no coordinator set: calls go same-origin and
+ *  vite.config.ts proxies `/api` to TELEOP_API_TARGET server-side, so the UI
+ *  must not stop to ask for an address. Blank *is* the mechanism — there is no
+ *  sentinel address to type, and no default target: set TELEOP_API_TARGET to
+ *  say which coordinator dev proxies to.
+ *
+ *  The proxy is what keeps dev working against a coordinator that has narrowed
+ *  `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which would otherwise
+ *  fail the dev origin's preflight with `400 Disallowed CORS origin`. A base
+ *  that *is* set is called directly, and takes the CORS rules as they come. */
 function isDevProxy(): boolean {
   const stored =
     localStorage.getItem(API_BASE_STORAGE_KEY) ??
     localStorage.getItem(LEGACY_API_BASE_KEY);
-  return Boolean(import.meta.env.DEV && stored && stored.trim());
-}
-
-/**
- * Under `vite dev` we return the empty string instead of DEV_PROXY_BASE — a
- * same-origin URL that the dev server's /api proxy (vite.config.ts) forwards to
- * the coordinator, server-side, where CORS does not apply. A base pointing
- * anywhere else is left alone and called directly.
- *
- * The proxy is what keeps dev working against a coordinator that has narrowed
- * `INTERLATENT_TELEOP_CORS_ORIGINS` to an explicit list, which would otherwise
- * fail the dev origin's preflight with `400 Disallowed CORS origin`.
- */
-function resolveApiBase(base: string): string {
-  return import.meta.env.DEV && base === DEV_PROXY_BASE ? '' : base;
+  return Boolean(import.meta.env.DEV && !(stored ?? '').trim());
 }
 
 export function getApiKey(): string {
@@ -198,7 +186,7 @@ export interface TeleopTokenOut {
   server_certificate_hashes?: Array<{ algorithm: string; value: string }> | null;
 }
 
-/** Loose subset of the dashboard's InferenceSessionOut — only what this
+/** Loose subset of Interlatent-Main's InferenceSessionOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped |
  *  provision_failed. */
 export interface InferenceSessionOut {
@@ -211,7 +199,7 @@ export interface InferenceSessionOut {
   [key: string]: unknown;
 }
 
-/** Loose subset of the dashboard's TeleopRecordingOut — only what this
+/** Loose subset of Interlatent-Main's TeleopRecordingOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped | failed. */
 export interface TeleopRecordingOut {
   id: string;
@@ -339,7 +327,7 @@ export function mintRecordingTeleopToken(recordingId: string): Promise<TeleopTok
 // ---------------------------------------------------------------------------
 
 /**
- * Drop-in replacement for the dashboard's react-query `useTeleopToken()`
+ * Drop-in replacement for Interlatent-Main's react-query `useTeleopToken()`
  * mutation hook (site/src/lib/api.ts) with the one call shape the overlay
  * uses: `mint.mutate({ sessionId }, { onSuccess, onError })`. Plain fetch,
  * no react-query. (The app shell always passes an explicit `mintToken`
