@@ -22,7 +22,7 @@ Python, the command line, a VR headset, or a learned policy.
 
 Every robot arm arrives with its own SDK, its own units, and its own conventions. An SO-101
 takes 6 joints in degrees with the gripper on 0–100; a YAM takes 14 in radians with the
-gripper on 0–1; a Nori takes 12 normalized to ±100. Nothing about the *task* changed
+gripper on 0–1; a Nori takes 12 normalized to ±100. Nothing about the task changed
 between them, but the control code, the teleop rig, the recorder, and the policy glue all
 get written again from scratch.
 
