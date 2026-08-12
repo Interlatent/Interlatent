@@ -83,17 +83,15 @@ Around it: `src/lib/client.ts` (typed fetch client over the coordinator API),
 `src/components/StartRecordingPanel.tsx` (the create form), and the PWA
 scaffolding.
 
-## Provenance / drift
+## The engine files
 
-The engine files are a **deliberate fork**, not a package dependency: they were
-copied out of the internal `Interlatent-Main` repo and are maintained as two
-copies on purpose, because a shared package would couple a headset build to a
-web app's release cycle.
+`VRTeleopOverlay.tsx`, `xrScene.ts`, `quicPoseSocket.ts`, `quat.ts`,
+`webtransport.ts`, `dlsSolver.ts`, `wristCalibration.ts`,
+`clutchPoseMapper.ts`, `teleopProfiler.ts` and `kinematics.ts` are the WebXR
+teleop engine: pose capture, clutch mapping, IK, and the datagram transport to
+the relay. They have no counterpart elsewhere and no sync obligation — this
+repo is where they live, and a change here is the change.
 
-Every copied file carries a header naming its source path and commit — e.g.
-`// Copied from Interlatent-Main site/src/lib/teleop/xrScene.ts @ f7e4bfb6`.
-**Fixes must land in both copies**; when you touch one, port the change to the
-other. Ten files carry that header today: `VRTeleopOverlay.tsx`, `xrScene.ts`,
-`quicPoseSocket.ts`, `quat.ts`, `webtransport.ts`, `dlsSolver.ts`,
-`wristCalibration.ts`, `clutchPoseMapper.ts`, `teleopProfiler.ts` and
-`kinematics.ts`.
+They are the only part of the app with real algorithmic content, so they carry
+the test suite (`src/lib/teleop/__tests__/`) and are what the `teleop-web` CI
+job typechecks and builds.

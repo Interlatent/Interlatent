@@ -11,12 +11,10 @@
  *                             read once so an operator need not re-enter it.
  *   interlatent.apiKey      — required for every call
  *
- * The response types below are copied from Interlatent-Main
- * site/src/lib/api.ts @ f7e4bfb6 (2026-07-30) — TeleopIkHints and
- * TeleopTokenOut verbatim (the copied VRTeleopOverlay imports
- * TeleopTokenOut from here); InferenceSessionOut and TeleopRecordingOut
- * are deliberately loose subsets (only the fields this UI reads, plus an
- * index signature) so backend additions never break the app.
+ * The response types below mirror the coordinator's teleop payloads.
+ * InferenceSessionOut and TeleopRecordingOut are deliberately loose subsets
+ * (only the fields this UI reads, plus an index signature) so additions on
+ * the coordinator side never break the app.
  */
 
 // ---------------------------------------------------------------------------
@@ -145,7 +143,7 @@ async function toError(res: Response): Promise<Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Types — copied from site/src/lib/api.ts @ f7e4bfb6 (2026-07-30)
+// Types — the coordinator's teleop response payloads
 // ---------------------------------------------------------------------------
 
 export interface TeleopIkHints {
@@ -186,7 +184,7 @@ export interface TeleopTokenOut {
   server_certificate_hashes?: Array<{ algorithm: string; value: string }> | null;
 }
 
-/** Loose subset of Interlatent-Main's InferenceSessionOut — only what this
+/** Loose subset of the coordinator's InferenceSessionOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped |
  *  provision_failed. */
 export interface InferenceSessionOut {
@@ -199,7 +197,7 @@ export interface InferenceSessionOut {
   [key: string]: unknown;
 }
 
-/** Loose subset of Interlatent-Main's TeleopRecordingOut — only what this
+/** Loose subset of the coordinator's TeleopRecordingOut — only what this
  *  UI reads. Statuses: provisioning | active | stopping | stopped | failed. */
 export interface TeleopRecordingOut {
   id: string;
@@ -327,7 +325,7 @@ export function mintRecordingTeleopToken(recordingId: string): Promise<TeleopTok
 // ---------------------------------------------------------------------------
 
 /**
- * Drop-in replacement for Interlatent-Main's react-query `useTeleopToken()`
+ * Mints a teleop token via the coordinator, replacing the react-query `useTeleopToken()`
  * mutation hook (site/src/lib/api.ts) with the one call shape the overlay
  * uses: `mint.mutate({ sessionId }, { onSuccess, onError })`. Plain fetch,
  * no react-query. (The app shell always passes an explicit `mintToken`

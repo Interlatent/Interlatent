@@ -98,9 +98,9 @@ independently. They meet only at `proto/messages.proto`.
 ### `teleop/teleop-web`
 
 A standalone WebXR PWA: the open-source VR producer for teleoperation. It solves IK in the
-browser and streams absolute joint targets over WebTransport/QUIC to the node. It is
-maintained as a deliberate fork rather than folded into a shared package — see its
-[README](teleop/teleop-web/README.md) for the provenance rule (fixes land in both copies).
+browser and streams absolute joint targets over WebTransport/QUIC to the node. Its engine
+files carry the app's only real algorithmic content and its test suite — see its
+[README](teleop/teleop-web/README.md).
 
 ### `proto/`
 

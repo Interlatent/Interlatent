@@ -1,1 +1,1 @@
-"""Robot-side node daemon: pairs with a dashboard and runs assigned sessions."""
+"""Robot-side node daemon: pairs with a coordinator and runs assigned sessions."""

@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/components/teleop/VRTeleopOverlay.tsx @ f7e4bfb6 (2026-07-30). Upstream is that copy; sync fixes both ways.
 import { useEffect, useRef, useState } from 'react';
 import { TeleopTokenOut, useTeleopToken } from '../lib/client';
 import { ClutchPoseMapper } from '../lib/teleop/clutchPoseMapper';

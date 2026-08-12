@@ -1,8 +1,7 @@
 /** @type {import('tailwindcss').Config} */
-// Theme tokens copied from Interlatent-Main site/tailwind.config.js @ f7e4bfb6
-// (2026-07-30) so the copied VRTeleopOverlay's classes (bg-bg-panel,
-// text-text-primary, status-* …) resolve identically. Trimmed to the tokens
-// the teleop UI uses (blog paper/ink palette, display/serif faces dropped).
+// Theme tokens for the app shell, so VRTeleopOverlay's classes (bg-bg-panel,
+// text-text-primary, status-* …) resolve. Trimmed to the tokens the teleop
+// UI uses (blog paper/ink palette, display/serif faces dropped).
 export default {
   future: {
     hoverOnlyWhenSupported: true,

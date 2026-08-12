@@ -266,9 +266,8 @@ jobs:
 
   teleop-web:
     # The WebXR VR teleop producer (teleop/teleop-web/) — ~14k lines that
-    # landed with no build gate at all. Its engine is a deliberate fork of the
-    # Interlatent-Main copy (see its README), so nothing upstream compiles it
-    # either; a broken headset build would only surface in a headset.
+    # landed with no build gate at all. Nothing else compiles it, so without
+    # this job a broken headset build would only surface in a headset.
     name: teleop-web (typecheck + test + build)
     runs-on: ubuntu-latest
     timeout-minutes: 15

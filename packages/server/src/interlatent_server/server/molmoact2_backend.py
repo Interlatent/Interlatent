@@ -238,7 +238,7 @@ class MolmoAct2Backend(LeRobotBackend):
             leaves ``camera_keys`` empty — SO100/101 do, but e.g.
             BimanualYAM declares ``[top, left, right]``, and taking the
             node's order over it silently permutes the model's inputs;
-          - ``action_dim`` comes from the dashboard session (the robot's
+          - ``action_dim`` comes from the coordinator session (the robot's
             real action width), falling back to the checkpoint's
             ``action_stats`` dimension.
 

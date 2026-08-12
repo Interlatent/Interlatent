@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/quat.ts @ f7e4bfb6 (2026-07-30). Upstream is that copy; sync fixes both ways.
 /**
  * Quaternion + small matrix helpers for the browser-side clutch mapper.
  *

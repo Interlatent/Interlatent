@@ -1,4 +1,3 @@
-// Copied from Interlatent-Main site/src/lib/teleop/xrScene.ts @ f7e4bfb6 (2026-07-30). Upstream is that copy; sync fixes both ways.
 /**
  * In-headset scene for the WebXR teleop overlay — raw WebGL1, no deps.
  *

@@ -2,7 +2,7 @@
 
 The daemon is what makes a robot reachable: it heartbeats, long-polls for
 its assignment, and converges the local control loop onto whatever the
-dashboard says it should be running. It had no tests beyond
+coordinator says it should be running. It had no tests beyond
 ``test_node_route.py``'s route-precedence checks — so the convergence table
 in its own module docstring, the ADR 0023 spool gate, and the whole
 OpenSession metadata assembly were unverified.
@@ -285,8 +285,8 @@ def test_report_hardware_posts_the_attached_devices() -> None:
 
 
 def test_report_hardware_never_raises() -> None:
-    """A failed report just leaves the dashboard panel empty; it must not
-    stop the daemon from coming up."""
+    """A failed report just leaves the coordinator without hardware details;
+    it must not stop the daemon from coming up."""
     d = _daemon()
     d._http = _FakeHttp([ConnectionError("down")])
     asyncio.run(d._report_hardware())  # no raise
