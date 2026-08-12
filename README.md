@@ -12,11 +12,91 @@ Python, the command line, a VR headset, or a learned policy.
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LeRobot](https://img.shields.io/badge/works%20with-%F0%9F%A4%97%20LeRobot-FFD21E)](https://github.com/huggingface/lerobot)
 
-[Install](#install) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Run a policy](#run-an-ai-policy) · [Docs](#docs) · [Contributing](#contributing)
+[About](#about) · [Install](#install) · [Quickstart](#quickstart) · [Robots](#supported-robots) · [Run a policy](#run-an-ai-policy) · [Docs](#docs) · [Contributing](#contributing)
 
 </div>
 
 ---
+
+## About
+
+Every robot arm arrives with its own SDK, its own units, and its own conventions. An SO-101
+takes 6 joints in degrees with the gripper on 0–100; a YAM takes 14 in radians with the
+gripper on 0–1; a Nori takes 12 normalized to ±100. Nothing about the *task* changed
+between them — but the control code, the teleop rig, the recorder, and the policy glue all
+get written again from scratch.
+
+Interlatent removes that rewrite. One interface — from Python, the command line, a VR
+headset, or a learned policy — drives every supported robot, and which robot you're on
+becomes a one-word argument:
+
+```python
+import interlatent as il
+
+# Same code on any supported arm — only the kind changes.
+with il.Robot("so101", port="/dev/ttyACM0") as robot:   # "yam" · "nori" · "dimos" · "axol"
+    robot.act("home")
+    print(robot.pose())
+```
+
+Supporting a new robot means one adapter file and one profile of its physical limits
+([ROBOT.md](ROBOT.md#adding-a-new-robot)). Everything below then works on it — you never
+implement teleoperation, recording, or policy support per robot.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+<!-- <img src="assets/control.gif" width="400" alt="One script driving an SO-101 and a YAM side by side"/> -->
+
+<b>Control any arm</b><br/>
+<code>pose()</code>, <code>move()</code>, <code>act()</code> and <code>behaviors()</code> over
+one handle, on every robot that supports manual moves — or the same thing from a terminal
+with <code>interlatent-act</code>. No account, no network, no config file.<br/>
+<a href="#supported-robots">Supported robots &rarr;</a>
+
+</td>
+<td width="50%" valign="top">
+
+<!-- <img src="assets/behavior.gif" width="400" alt="An SO-101 running the packaged hello wave"/> -->
+
+<b>Named moves</b><br/>
+Write a sequence of joint poses in TOML or as a Python function, then run it by name.
+Every robot ships with <code>home</code>. Behaviors validate with no hardware attached and
+run through the same action path as the policy loop, so the safety clamps still apply.<br/>
+<a href="docs/behaviors.md">Behaviors &rarr;</a>
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+<!-- <img src="assets/teleop.gif" width="400" alt="Headset view beside the arm it is driving"/> -->
+
+<b>Teleoperate and collect</b><br/>
+Drive an arm from a VR headset in the browser — grip to clutch, trigger for the gripper.
+Take over a running policy mid-episode; every frame is labelled with who was driving, so
+what you record is usable intervention data. Out comes a LeRobot v3.0 dataset.<br/>
+<a href="docs/teleop.md">VR teleop &rarr;</a>
+
+</td>
+<td width="50%" valign="top">
+
+<!-- <img src="assets/policy.gif" width="400" alt="An arm completing a task autonomously under a policy"/> -->
+
+<b>Run a policy</b><br/>
+Stream observations to a GPU — your own or a hosted one — and get action chunks back that
+execute at 30 Hz, so a policy taking 100–2000 ms per inference still drives a robot
+smoothly. SmolVLA, ACT, Diffusion Policy, Pi0/Pi0.5, MolmoAct2.<br/>
+<a href="docs/robots-and-policies.md">Robots and policies &rarr;</a>
+
+</td>
+</tr>
+</table>
+
+Everything that touches the robot is Apache-2.0 and runs with no account. The hosted
+[dashboard](https://interlatent.com) is the optional layer on top: it pairs machines,
+assigns GPUs, brokers VR teleop, and stores datasets.
 
 ## Install
 
@@ -186,10 +266,6 @@ Runnable examples, ordered by how much hardware they need:
 | Using the hosted dashboard | [docs/going-to-cloud.md](docs/going-to-cloud.md) |
 | Wire protocol | [proto/README.md](proto/README.md) |
 | Docs for Agents | [CONTEXT.md](CONTEXT.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/adr/](docs/adr/) |
-
-Everything that touches the robot is open source and runs without an account. The
-[dashboard](https://interlatent.com) is the hosted layer on top: it pairs machines, assigns
-GPUs, brokers VR teleop, and stores datasets.
 
 ## Contributing
 
