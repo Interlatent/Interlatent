@@ -4,7 +4,7 @@
 
 ### One open interface to control every robot.
 
-Read joint positions and command motion the **same way on every supported robot** via
+Rollout policies, teleoperate, and collect data the **same way on every supported robot** via
 Python, the command line, a VR headset, or a learned policy.
 
 [![PyPI](https://img.shields.io/pypi/v/interlatent?color=7C5CFF&label=interlatent)](https://pypi.org/project/interlatent/)
@@ -32,7 +32,7 @@ pip install interlatent
 | `interlatent[yam]` | I2RT YAM | Linux + SocketCAN. See the build note below. |
 | `interlatent[nori]` | Nori | Runs on the robot's own network or on the Pi. |
 | `interlatent[dimos]` | xArm7 / xArm6 / A1Z | Python 3.11–3.12. Large install; needs a running dimos stack. |
-| `nterlatent[axol]` | Almond Axol | Python 3.13+. ZED SDK and `pyzed` installed separately. |
+| `interlatent[axol]` | Almond Axol | Python 3.13+. ZED SDK and `pyzed` installed separately. |
 | `interlatent[turbo]` | Faster camera encoding | Also needs `libturbojpeg` on the host. |
 | `interlatent[teleop-quic]` | Lower-latency VR teleop | Optional; the default path needs nothing extra. |
 
