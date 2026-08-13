@@ -83,11 +83,17 @@ load-shedding policy above it):
   *not* involved: it is pure load-shedding (in-flight cap + TTL reset) and no
   longer touches aioquic bookkeeping. A TTL-reset stream stays parked in the GC
   until its RESET is acked, then discards.
-- **Relay** (`teleop-quic-relay/server.py`, the WebTransport relay the
-  browser connects to): `RelayProtocol.note_uni_done()` +
-  `sweep_uni_discards()`, swept at frame cadence on the destination
-  connection and piggybacked on datagram sends. **The fix must exist at
-  both endpoints; either one alone re-creates the decay.**
+- **Relay** (`coordinator/relay.py`, the WebTransport relay the browser
+  connects to): `RelayProtocol.note_uni_done()` + `sweep_uni_discards()`,
+  swept at frame cadence on the destination connection and piggybacked on
+  datagram sends. **The fix must exist at both endpoints; either one alone
+  re-creates the decay.**
+
+  This half used to live in a separate `teleop-quic-relay/` deployment, which
+  is where earlier revisions of this ADR pointed. The relay is not a hosted
+  service any more — it runs inside the coordinator the operator starts, so
+  both endpoints of this invariant now ship in this repo, a few directories
+  apart.
 
 **Observability (the regression tripwire)**: the child's 5 s stats line carries
 `qs=` — the live `len(_quic._streams)` gauge (it rides the log line, not the
