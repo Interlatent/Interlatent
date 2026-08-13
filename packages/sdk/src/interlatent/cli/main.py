@@ -29,13 +29,41 @@ import sys
 from typing import Any
 
 from .._exceptions import APIError, AuthenticationError, NotFoundError
-from .._coordinator import resolve
+from .._coordinator import CoordinatorNotConfigured, resolve
 from .._http import HTTPClient
 
+
+def _local_coordinator() -> str | None:
+    """The coordinator running on *this* machine, if one is.
+
+    ``interlatent up`` spawns a daemon and records its port in
+    ``coordinator.runtime.json``, but it cannot export an env var back into
+    the shell that invoked it. Without this lookup the documented first
+    session — ``interlatent up`` and then ``interlatent gpus ls`` — fails with
+    a "no coordinator" error whose remedy is to run the command you just ran.
+
+    Fed to :func:`resolve` as ``config``, i.e. *below* ``--coordinator`` and
+    ``INTERLATENT_COORDINATOR`` in precedence: pointing this CLI at a remote
+    control plane must keep working on a host that also runs its own.
+
+    A dead pid does not count. A stale runtime file outlives a crashed daemon
+    (and one was sitting on this machine), so trusting it blindly would aim
+    every command at a closed port instead of saying nothing is running.
+    """
+    from ..coordinator import supervisor
+
+    rt = supervisor.read_runtime()
+    if not rt or not supervisor.pid_alive(rt.get("pid", -1)):
+        return None
+    port = rt.get("port")
+    return supervisor.local_base(port) if port else None
+
+
 #: Resolved per-invocation, not at import: the env var must be readable after
-#: this module loads (tests set it, and `interlatent up` exports it).
+#: this module loads (tests set it, and the runtime file appears only once
+#: `interlatent up` has run).
 def _default_api_base() -> str:
-    return resolve(purpose="cli")
+    return resolve(config=_local_coordinator(), purpose="cli")
 
 
 # ----------------------------------------------------------------------
@@ -58,7 +86,11 @@ def _make_client(args: argparse.Namespace) -> HTTPClient:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    base = resolve(getattr(args, "api_base", None), purpose="cli")
+    base = resolve(
+        getattr(args, "api_base", None),
+        config=_local_coordinator(),
+        purpose="cli",
+    )
     return HTTPClient(base_url=base, api_key=api_key)
 
 
@@ -107,10 +139,16 @@ def cmd_gpus(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
+    # Keys as the coordinator actually emits them (see Coordinator.add_gpu /
+    # register_box): there is no `id`, `gpu` or `region` on a box row, so the
+    # columns named for them were blank in every listing, and `url` — the one
+    # field that tells you whether a registration points anywhere real — was
+    # not shown at all. Boxes registered before the fuller schema carry only
+    # name/url/method, hence the blanks the table already tolerates.
     _print_table(
         rows,
-        [("ID", "id"), ("NAME", "name"), ("STATUS", "status"), ("GPU", "gpu"),
-         ("REGION", "region")],
+        [("NAME", "name"), ("URL", "url"), ("STATUS", "status"),
+         ("GPU", "gpu_model"), ("PROVIDER", "provider")],
         empty="(no GPUs available)",
     )
     return 0
@@ -586,6 +624,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except CoordinatorNotConfigured as e:
+        # Carries its own remediation sentence; a traceback would bury it.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except AuthenticationError:
         print("error: authentication failed — check your INTERLATENT_API_KEY.",
               file=sys.stderr)
