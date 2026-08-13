@@ -132,12 +132,18 @@ reach limits, scales, mounting frame (`webxr_to_base_R`), gripper range.
 
 **3. Compile `kinematic_spec.json`.** The spec is the compact serial-chain
 descriptor the in-browser solver walks — **generated, never hand-edited**.
-Produce it with the MuJoCo-backed exporter (a maintainer-side tool that is not
-part of this SDK):
+Produce it with `packaging/kinematic_spec.py`, the MuJoCo-backed exporter (a
+maintainer tool that ships in this repo but not in the wheel — nothing at
+runtime needs MuJoCo, because the node serves the generated JSON verbatim):
 
 ```bash
-python -m interlatent.inference.server.retarget.kinematic_spec <bundle-dir>
+pip install mujoco numpy
+python packaging/kinematic_spec.py packages/sdk/src/interlatent_robots/<kind>
 ```
+
+Pass `--stdout` to print the spec instead of writing it into the bundle —
+useful for diffing a regenerated spec against the committed one before
+replacing it.
 
 Regenerate it after **any** URDF or `ik_config.json` change, or the browser
 solver and the robot's real joint tree silently disagree. A bundle missing the
@@ -145,12 +151,12 @@ spec fails in-browser IK loudly rather than solving against kinematics it isn't
 driving.
 
 **4. Verify.** `packaging/verify_urdf.py` compiles the URDF exactly as the
-engine does, confirms `ik_config.json` resolves (`ee_body` + every joint), and
+exporter does, confirms `ik_config.json` resolves (`ee_body` + every joint), and
 runs FK parity between the compiled model and `kinematic_spec.json` — a spec
-that drifted from the URDF fails loudly:
+that drifted from the URDF fails loudly. It reads the two files independently of
+the exporter, so it catches a spec the exporter never produced:
 
 ```bash
-pip install mujoco numpy
 python packaging/verify_urdf.py packages/sdk/src/interlatent_robots/<kind>
 ```
 
