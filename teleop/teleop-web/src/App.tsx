@@ -15,10 +15,13 @@ import {
   stopTeleopRecording,
 } from './lib/client';
 
-// Statuses a browser producer can actually join.
-const JOINABLE = new Set(['active']);
+// Statuses a browser producer can actually join. Two vocabularies: a hosted
+// deployment provisions and then goes `active`, while the self-hosted
+// coordinator (`interlatent up`) assigns a node synchronously and reports
+// `running` from the first listing.
+const JOINABLE = new Set(['active', 'running']);
 // Recording statuses that still hold the node — i.e. worth offering Stop on.
-const STOPPABLE = new Set(['provisioning', 'active']);
+const STOPPABLE = new Set(['provisioning', 'active', 'running']);
 // How often to re-check a recording we just started, until it goes live. The
 // wait is a compute cold start, so seconds, not milliseconds.
 const PENDING_POLL_MS = 2000;
@@ -29,7 +32,7 @@ type Target =
   | { kind: 'recording'; id: string };
 
 function statusDot(status: string): string {
-  if (status === 'active') return 'bg-status-active';
+  if (status === 'active' || status === 'running') return 'bg-status-active';
   if (status === 'provisioning' || status === 'stopping') return 'bg-status-warning animate-pulse';
   if (status === 'failed' || status === 'provision_failed') return 'bg-status-critical';
   return 'bg-text-quaternary';
@@ -410,7 +413,8 @@ export function App() {
         )}
 
         <p className="mt-8 text-[11px] text-text-quaternary leading-relaxed">
-          Only <span className="font-mono">active</span> sessions are joinable.
+          Only <span className="font-mono">active</span> (self-hosted:{' '}
+          <span className="font-mono">running</span>) sessions are joinable.
           Joining opens the WebXR producer — use the Meta Quest Browser with a
           headset connected; grip = clutch, trigger = gripper.
         </p>

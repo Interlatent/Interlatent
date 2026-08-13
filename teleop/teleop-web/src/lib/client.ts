@@ -98,6 +98,30 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
+/**
+ * GET a collection, tolerating both shapes the coordinators emit.
+ *
+ * Two coordinators answer these routes and they disagree: a hosted deployment
+ * returns a bare JSON array, while the self-hosted coordinator behind
+ * `interlatent up` wraps it under a key — `{"sessions": [...]}`,
+ * `{"recordings": [...]}`, `{"nodes": [...]}`, `{"environments": [...]}`. The
+ * CLI already normalizes both (`_rows` in interlatent/cli/main.py); this is the
+ * same rule for the browser, which otherwise handed React a plain object and
+ * died on `sessions.map is not a function`.
+ *
+ * Anything else degrades to `[]` on purpose: an empty list beside the error the
+ * UI already surfaces beats a render crash that takes the whole app down.
+ */
+async function requestList<T>(path: string, key: string): Promise<T[]> {
+  const payload = await request<unknown>('GET', path);
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === 'object') {
+    const rows = (payload as Record<string, unknown>)[key];
+    if (Array.isArray(rows)) return rows as T[];
+  }
+  return [];
+}
+
 /** Non-2xx → Error with the most useful message the body offers
  *  (FastAPI `{detail: "..."}` / `{detail: {message}}` / plain text). */
 async function toError(res: Response): Promise<Error> {
@@ -250,20 +274,45 @@ export interface TeleopRecordingCreate {
 // Calls
 // ---------------------------------------------------------------------------
 
-export function listSessions(): Promise<InferenceSessionOut[]> {
-  return request<InferenceSessionOut[]>('GET', '/api/v1/inference/sessions');
+export async function listSessions(): Promise<InferenceSessionOut[]> {
+  const rows = await requestList<InferenceSessionOut>(
+    '/api/v1/inference/sessions',
+    'sessions',
+  );
+  // The self-hosted coordinator keeps one assignment slot per node, so a teleop
+  // recording is stored *as* that node's session and comes back on this route
+  // too. It tags itself, so drop it here rather than listing every recording
+  // under both tabs. A hosted deployment never sets the tag.
+  return rows.filter((s) => s.assignment_type !== 'teleop_recording');
 }
 
 export function listTeleopRecordings(): Promise<TeleopRecordingOut[]> {
-  return request<TeleopRecordingOut[]>('GET', '/api/v1/teleop-recordings');
+  return requestList<TeleopRecordingOut>(
+    '/api/v1/teleop-recordings',
+    'recordings',
+  );
 }
 
 export function listNodes(): Promise<NodeOut[]> {
-  return request<NodeOut[]>('GET', '/api/v1/nodes');
+  return requestList<NodeOut>('/api/v1/nodes', 'nodes');
 }
 
-export function listEnvironments(): Promise<EnvironmentOut[]> {
-  return request<EnvironmentOut[]>('GET', '/api/v1/environments');
+export async function listEnvironments(): Promise<EnvironmentOut[]> {
+  const rows = await requestList<EnvironmentOut>(
+    '/api/v1/environments',
+    'environments',
+  );
+  return rows.map(normalizeEnvironment);
+}
+
+/** The self-hosted coordinator names an environment's id `id`, not
+ *  `environment_id`, so the create form read undefined and posted no
+ *  environment. It resolves either the id or the slug on create, so the slug is
+ *  a safe fallback when neither id field is present. */
+function normalizeEnvironment(env: EnvironmentOut): EnvironmentOut {
+  if (env.environment_id) return env;
+  const id = typeof env.id === 'string' ? env.id : '';
+  return { ...env, environment_id: id || env.slug || '' };
 }
 
 /**
