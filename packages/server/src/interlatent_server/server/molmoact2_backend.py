@@ -248,15 +248,43 @@ class MolmoAct2Backend(LeRobotBackend):
         import json
         import os.path as _osp
 
-        from lerobot.configs import FeatureType, PolicyFeature
-        from lerobot.policies.molmoact2.configuration_molmoact2 import (
-            MolmoAct2Config,
-            _resolve_checkpoint_location,
-        )
-        from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy
-        from lerobot.policies.molmoact2.processor_molmoact2 import (
-            make_molmoact2_pre_post_processors,
-        )
+        # Import from the SUBMODULE, not the `lerobot.configs` package.
+        # `lerobot/configs/__init__.py` (which re-exports FeatureType /
+        # PolicyFeature) only appeared in lerobot 0.6.0; on 0.4.x/0.5.x
+        # `lerobot.configs` is a namespace package, so the package-level
+        # import dies with "cannot import name 'FeatureType' from
+        # 'lerobot.configs' (unknown location)". `configs/types.py` has
+        # existed since 0.4.0, so the submodule path works everywhere.
+        from lerobot.configs.types import FeatureType, PolicyFeature
+
+        # The molmoact2 policy first shipped in lerobot 0.6.0. An older
+        # lerobot satisfies this package's `lerobot[dataset]>=0.4.0` floor
+        # perfectly well for ACT/diffusion/smolvla, so the miss lands here,
+        # at load time, as a bare ModuleNotFoundError naming a lerobot
+        # internal — which reads like a broken checkpoint rather than a
+        # too-old dependency. Say which it is.
+        try:
+            from lerobot.policies.molmoact2.configuration_molmoact2 import (
+                MolmoAct2Config,
+                _resolve_checkpoint_location,
+            )
+            from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy
+            from lerobot.policies.molmoact2.processor_molmoact2 import (
+                make_molmoact2_pre_post_processors,
+            )
+        except ImportError as exc:
+            try:
+                from lerobot import __version__ as _lr_version
+            except Exception:
+                _lr_version = "unknown"
+            raise RuntimeError(
+                f"MolmoAct2 checkpoint {policy_uri!r} needs lerobot's molmoact2 "
+                f"policy, which the installed lerobot ({_lr_version}) does not "
+                f"provide (added in lerobot 0.6.0). Install a newer lerobot — "
+                f"'pip install -U \"lerobot[dataset,molmoact2]\"', or the git ref "
+                f"pinned in docker/Dockerfile (ARG LEROBOT_REF). Underlying "
+                f"import error: {exc}"
+            ) from exc
 
         # --- read norm_stats.json from the checkpoint -------------------
         ckpt_dir = _resolve_checkpoint_location(policy_uri)
