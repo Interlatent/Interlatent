@@ -6,12 +6,13 @@ This module is the read side: given a kind, find its installed data and hand bac
 paths or parsed JSON, uniformly, whether or not the wheel happens to be unpacked
 on disk.
 
-``ik_config.json`` — the hand-authored curation source the MuJoCo exporter turns
-into ``kinematic_spec.json`` — lives only in the source repo/sdist and is *not*
-packaged into wheels (ADR 0017, amended 2026-07-18): no runtime path consumes it.
-So :func:`load_ik_config` works in a source/editable checkout and raises
-:class:`RobotDataError` on a wheel install, and :attr:`RobotData.ik_config` is
-``None`` there.
+``ik_config.json`` — the hand-authored curation source that the MuJoCo exporter
+(``python packaging/kinematic_spec.py <kind-dir>``, a maintainer tool in the
+source repo) turns into ``kinematic_spec.json`` — lives only in the repo/sdist
+and is *not* packaged into wheels (ADR 0017, amended 2026-07-18): no runtime path
+consumes it. So :func:`load_ik_config` works in a source/editable checkout and
+raises :class:`RobotDataError` on a wheel install, and
+:attr:`RobotData.ik_config` is ``None`` there.
 
 Why the distinct top-level ``interlatent_robots`` rather than data inside
 ``interlatent``: the SDK and the internal ``interlatent-engine`` are both the

@@ -10,7 +10,10 @@ import {
   API_BASE_STORAGE_KEY,
   API_KEY_STORAGE_KEY,
   createTeleopRecording,
+  listEnvironments,
   listNodes,
+  listSessions,
+  listTeleopRecordings,
   stopTeleopRecording,
 } from '../client';
 
@@ -129,5 +132,68 @@ describe('listNodes', () => {
     expect(init.method).toBe('GET');
     expect(init.body).toBeUndefined();
     expect((init.headers as Record<string, string>)['content-type']).toBeUndefined();
+  });
+});
+
+// A hosted deployment answers these routes with a bare array; the self-hosted
+// coordinator wraps it under a key. Handing React the wrapper object is what
+// crashed the app on `sessions.map is not a function`, so both shapes — and
+// anything neither — have to come back as an array.
+describe('list responses', () => {
+  it('accepts the self-hosted coordinator envelope', async () => {
+    mockJson({ sessions: [{ id: 'sess_1', status: 'running' }] });
+    expect(await listSessions()).toHaveLength(1);
+
+    mockJson({ recordings: [{ id: 'trec_1', status: 'running' }] });
+    expect(await listTeleopRecordings()).toHaveLength(1);
+
+    mockJson({ nodes: [{ id: 'node_1', name: 'my-arm' }] });
+    expect(await listNodes()).toHaveLength(1);
+  });
+
+  it('accepts the hosted deployment bare array', async () => {
+    mockJson([{ id: 'sess_1', status: 'active' }]);
+    expect(await listSessions()).toHaveLength(1);
+  });
+
+  it('degrades an unrecognized body to an empty list, not a render crash', async () => {
+    mockJson({ detail: 'something else entirely' });
+    expect(await listSessions()).toEqual([]);
+  });
+
+  it('hides teleop recordings that the coordinator also lists as sessions', async () => {
+    // The self-hosted coordinator stores a recording *as* the node's session,
+    // so it shows up on both routes — tagged, and dropped here.
+    mockJson({
+      sessions: [
+        { id: 'sess_1', status: 'running' },
+        {
+          id: 'trec_1',
+          status: 'running',
+          assignment_type: 'teleop_recording',
+        },
+      ],
+    });
+    expect((await listSessions()).map((s) => s.id)).toEqual(['sess_1']);
+  });
+});
+
+describe('listEnvironments', () => {
+  it("fills environment_id from the self-hosted coordinator's `id`", async () => {
+    mockJson({ environments: [{ id: 'env_abc', slug: 'kitchen' }] });
+    const [env] = await listEnvironments();
+    expect(env.environment_id).toBe('env_abc');
+  });
+
+  it('falls back to the slug, which the create route also resolves', async () => {
+    mockJson({ environments: [{ slug: 'kitchen' }] });
+    const [env] = await listEnvironments();
+    expect(env.environment_id).toBe('kitchen');
+  });
+
+  it('leaves a hosted environment_id alone', async () => {
+    mockJson([{ environment_id: 'env_1', slug: 'kitchen', id: 'ignored' }]);
+    const [env] = await listEnvironments();
+    expect(env.environment_id).toBe('env_1');
   });
 });

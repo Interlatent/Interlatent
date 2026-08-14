@@ -141,6 +141,7 @@ heartbeat simply backoff-retry.
 Every runtime piece is yours to run and all of it is Apache-2.0: `packages/sdk` on the
 robot, `packages/server` on the GPU machine, the coordinator wherever you like it, and
 `teleop/teleop-web` for VR. Episodes are recorded through sessions (ADR 0022) and land in
-a directory or an S3 bucket you own. What remains private is the offline half — the
-dataset/canonical store and merge pipeline, offline policy improvement, and the annotation
-stack.
+a directory or an S3 bucket you own — that dataset is complete where it lands, and no
+upstream store or merge pipeline exists to fold it into (ADR 0039). What remains private
+is the offline half: the annotation stack, the datasets it builds out of annotated video,
+and offline policy improvement.

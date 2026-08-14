@@ -31,34 +31,49 @@ incomplete, mis-named, or missing from the tree.
 ## The two configs are different jobs — do not confuse them
 
 - **`ik_config.json`** — hand-authored. The tuning surface (damping, reach limits,
-  scales, `webxr_to_base_R`). Read pod-side by the retarget stage and by the backend
-  to build the browser's `ik_hints`. Repo/sdist-only: no runtime path reads the
-  installed copy, so it is excluded from wheels (ADR 0017 amendment 2026-07-18).
+  scales, `webxr_to_base_R`) plus the semantics the URDF can't state: which body is
+  `tool0`, which joint is the gripper, the robot-units affine. Repo/sdist-only: no
+  runtime path reads the installed copy, so it is excluded from wheels
+  (ADR 0017 amendment 2026-07-18).
 - **`kinematic_spec.json`** — **generated**, do not hand-edit. The compact serial-chain
   descriptor the in-browser solver walks. Produced from the URDF + `ik_config.json` by
-  `interlatent.inference.server.retarget.kinematic_spec` (an engine/pod-side
-  maintainer tool — it lives in the platform codebase, not this SDK; needs MuJoCo). A bundle
-  missing it makes the arms do **nothing** — the browser can't build a solver.
+  [`packaging/kinematic_spec.py`](../../../../packaging/kinematic_spec.py), a maintainer
+  tool in this repo (needs MuJoCo; not in the wheel). A bundle missing it makes the arms
+  do **nothing** — the browser can't build a solver.
+
+```bash
+pip install mujoco numpy
+python packaging/kinematic_spec.py packages/sdk/src/interlatent_robots/<kind>
+```
 
 Regenerate the spec after any `ik_config.json` or URDF change, or the browser solver
-and the pod solver silently disagree.
+and the robot's real joint tree silently disagree.
 
-**Exception: `a1z`, `xarm7` and `xarm6` were NOT produced by the official
-generator** — this environment has no access to
-`interlatent.inference.server.retarget.kinematic_spec` (the platform repo). Each
-was built by `packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the
-URDF's `<origin>`/`<axis>`/`<limit>` tags directly) plus a `tool0` taken from
-the URDF's own terminal fixed joint — both genuine URDF properties, and
+**Exception: `a1z`, `xarm7` and `xarm6` were NOT produced by that generator** —
+it was unavailable here when they were authored. Each was built by
+`packages/sdk/scripts/dimos_kinematic_spec_gen.py` (parses the URDF's
+`<origin>`/`<axis>`/`<limit>` tags directly) plus a `tool0` taken from the
+URDF's own terminal fixed joint — both genuine URDF properties, and
 `packaging/verify_urdf.py`'s FK-parity check confirms the geometry against a
 MuJoCo-compiled model to ~1e-16 m.
+
+Re-exporting them now reproduces `xarm6` exactly and leaves two hand-set values
+that the generator would overwrite. Decide them deliberately before you run it:
+
+- `a1z` joints 4-6 carry `max_dq` 0.05 in the spec but 0.1 in `ik_config.json`;
+  the generator takes `ik_config`, doubling the per-solve step cap on that wrist.
+- `xarm7` joints 2 and 6 carry limits narrower than the URDF's
+  (±2.059/2.0944 vs ±2.18; -1.69297 vs -1.75); the generator takes the URDF and
+  widens them. If the narrower numbers are the real hardware, fix the **URDF** —
+  it is the source of truth for limits and nothing else reads the spec's copy.
 
 The solver-tuning fields that aren't URDF properties at all — `damping`,
 `webxr_to_base_R`, `pos_reach_limit`/`rot_reach_limit`, `w_rot` — are copied
 from a nearest-neighbour kind as a starting template and are **unverified
 against that robot's real hardware** in every case. The copy chain is
 `yam` → `a1z` → `xarm7` → `xarm6`. Nothing in that chain was tuned for the arm
-it ended up on, and FK parity does not exercise any of it. Regenerate these
-kinds' specs with the official tool the next time it's available.
+it ended up on, and FK parity does not exercise any of it; regenerating carries
+them across unchanged.
 
 ## Meshes are not used (IK needs no geometry)
 
